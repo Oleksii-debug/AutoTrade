@@ -27,6 +27,68 @@ from mvp.tests.test_autonomous_simulation import PRICES, run
 
 
 class AutonomousObservedFillRecoveryTests(unittest.TestCase):
+    def test_retained_fill_cost_identity_cannot_be_forged_during_recovery(self):
+        # Reuse a real durable observed fill, but alter only the supplied
+        # in-memory started-episode cost identity. Recovery must reconstruct
+        # the historical cost cut, reject before admission/send and preserve
+        # the journal. The recorded original remains recoverable.
+        prices = ["100", "101", "103"]
+        with TemporaryDirectory() as directory:
+            original_atomic = session.commit_order_fill_with_reservation_consumption
+
+            def lose_atomic_response(*args, **kwargs):
+                original_atomic(*args, **kwargs)
+                raise RuntimeError("simulated response loss")
+
+            with patch.object(
+                session, "commit_order_fill_with_reservation_consumption",
+                lose_atomic_response,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "response loss"):
+                    run(directory, prices)
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            events = store.load_events(
+                "canonical_autonomous_simulation", "acceptance",
+            )
+            active = next(
+                event["payload"] for event in events
+                if event["event_type"] == "AutonomousEpisodeStarted"
+                and event["payload"]["episode"] == 3
+            )
+            observed = next(
+                event["payload"] for event in events
+                if event["event_type"] == "AutonomousEpisodeFillObserved"
+            )
+            completed = [
+                event["payload"] for event in events
+                if event["event_type"] == "AutonomousEpisodeCompleted"
+            ]
+            protocol = events[0]["payload"]["protocol"]
+            prior = (
+                completed[-1]["provider_state"] if completed
+                else events[0]["payload"]["provider_state"]
+            )
+            self.assertNotEqual(active["lifecycle_cost_digest"], "sha256:" + "0" * 64)
+            forged = {**active, "lifecycle_cost_digest": "sha256:" + "0" * 64}
+            before = store.current_journal_sequence()
+            with patch.object(
+                session.AuthorityService,
+                "historical_admission",
+                side_effect=AssertionError("no historical admission after cost mismatch"),
+            ), patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("no recovery resend"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "retained fill historical cost cut differs",
+                ):
+                    session._recover_autonomous_observed_fill(
+                        store, Path(directory), protocol, forged, observed, prior,
+                    )
+            self.assertEqual(store.current_journal_sequence(), before)
+
     def test_crash_matrix_recovers_same_fill_without_admission_or_resend(self):
         prices = ["100", "101", "103"]
         with TemporaryDirectory() as reference_dir:

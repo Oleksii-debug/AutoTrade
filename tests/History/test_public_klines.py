@@ -236,6 +236,39 @@ class PublicHistoryTests(unittest.TestCase):
             verify_archive(raw, b"0" * 64 + b"  BTCUSDT-1h-2024-01-02.zip\n",
                            symbol="BTCUSDT", interval="1h", month="2024-01", day=day)
 
+    def test_archive_url_path_identity_rejects_aliases_and_injection_before_network(self):
+        from tools.historical_public_klines import _validate_public_archive_url
+        prefix = "https://data.binance.vision/data/spot"
+        monthly = prefix + "/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2024-01.zip"
+        daily = prefix + "/daily/klines/ETHUSDT/1h/ETHUSDT-1h-2026-10-08.zip"
+        for url in (monthly, monthly + ".CHECKSUM", daily, daily + ".CHECKSUM"):
+            with self.subTest(accepted=url):
+                _validate_public_archive_url(url)
+
+        malformed = (
+            monthly.replace("BTCUSDT-1h-", "ETHUSDT-1h-"),
+            monthly.replace("/1h/BTCUSDT-", "/5m/BTCUSDT-"),
+            monthly.replace("/2024-01.zip", "/../2024-01.zip"),
+            monthly.replace("/BTCUSDT/1h/", "/BTCUSDT/%31h/"),
+            monthly.replace("https://", "http://"),
+            monthly.replace("data.binance.vision", "data.binance.vision.evil.test"),
+            monthly.replace("data.binance.vision", "data.binance.vision:443"),
+            monthly.replace("data.binance.vision", "user@data.binance.vision"),
+            monthly + "?cache=1",
+            monthly + "#source",
+            monthly.replace("monthly/", "daily/"),
+            daily.replace("daily/", "monthly/"),
+            daily.replace("2026-10-08", "2026-10-99"),
+            monthly.replace("2024-01", "2024-13"),
+            monthly + "/extra",
+        )
+        with patch("tools.historical_public_klines._pace_request",
+                   side_effect=AssertionError("must not reserve network slot")):
+            for url in malformed:
+                with self.subTest(rejected=url):
+                    with self.assertRaisesRegex(HistoricalArchiveError, "unexpected archive URL"):
+                        _fetch(url, 4096)
+
     def test_wrong_archive_symbol_and_unsafe_options(self):
         raw, check = _bundle()
         with self.assertRaises(HistoricalArchiveError):

@@ -16,6 +16,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from autotrade_runtime.artifacts import ArtifactStore
 from tools.historical_public_klines import _month_range, collect_month, collect_day
 
 
@@ -58,9 +59,17 @@ class RealHistoryArchiveSample(unittest.TestCase):
         # Both historic milliseconds and newer microseconds are covered.
         # One verifiable completed daily archive for each market and era.
         with TemporaryDirectory(prefix="autotrade-plan10-real-daily-") as tmp:
+            root = Path(tmp)
+            artifacts = ArtifactStore(root / ".artifact-store")
             for symbol, day in (("BTCUSDT", "2024-01-02"),
                                 ("ETHUSDT", "2026-10-08")):
-                item = collect_day(symbol=symbol, interval="1h", day=day, output=Path(tmp))
+                item = collect_day(
+                    symbol=symbol,
+                    interval="1h",
+                    day=day,
+                    output=root,
+                    artifact_store=artifacts,
+                )
                 self.assertEqual(item["row_count"], 24)
                 self.assertEqual(item["missing_candle_intervals"], 0)
                 self.assertTrue(item["usable_as_complete_causal_interval"])
@@ -86,8 +95,10 @@ class RealHistoryArchiveSample(unittest.TestCase):
 
         with TemporaryDirectory(prefix="autotrade-plan10-real-zero-") as tmp:
             root = Path(tmp)
+            artifacts = ArtifactStore(root / ".artifact-store")
             source = collect_month(symbol="BTCUSDT", interval="1h",
-                                   month="2024-01", output=root)
+                                   month="2024-01", output=root,
+                                   artifact_store=artifacts)
             self.assertEqual(source["row_count"], 744)
             self.assertEqual(source["missing_candle_intervals"], 0)
             output = StringIO()
@@ -135,10 +146,11 @@ class RealHistoryArchiveSample(unittest.TestCase):
         self.assertGreaterEqual(len(months), 1)
         with TemporaryDirectory(prefix="autotrade-plan10-real-") as tmp:
             root = Path(tmp)
+            artifacts = ArtifactStore(root / ".artifact-store")
             for symbol in ("BTCUSDT", "ETHUSDT"):
                 for month in months:
                     result = collect_month(symbol=symbol, interval="1h", month=month,
-                                           output=root)
+                                           output=root, artifact_store=artifacts)
                     self.assertEqual(result["missing_candle_intervals"], 0)
                     self.assertTrue(result["usable_as_complete_causal_interval"])
                     self.assertEqual(result["rights_scope"],

@@ -189,6 +189,13 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     if not isinstance(command, str) or not command.startswith('run: dotnet restore '):
         raise ValueError('not a canonical dotnet restore run line')
     payload = command.removeprefix('run: ')
+    # shlex in POSIX mode treats a backslash as an escape and would turn a
+    # non-canonical Windows path such as ``src\\App\\App.csproj`` into the
+    # misleading token ``srcAppApp.csproj``.  Reject it before tokenization so
+    # restore authority is never granted to a path different from the source
+    # text reviewed in the workflow.
+    if '\\' in payload:
+        raise ValueError('dotnet restore command must use canonical POSIX paths')
     if _DOTNET_RESTORE_SHELL_CONTROL.search(payload) is not None:
         raise ValueError('dotnet restore command must not contain shell execution control')
     try:

@@ -115,7 +115,8 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
         self.assertEqual(len(economics.transactions), 1)
         reservation = reservations.get("reservation-1")
         self.assertEqual(reservation.consumed["CASH:USD"], Decimal("100"))
-        self.assertEqual(reservation.remaining["CASH:USD"], Decimal("20"))
+        self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(reservation.state, "FILLED")
 
     def test_restart_replays_one_atomic_effect(self):
         with TemporaryDirectory() as directory:

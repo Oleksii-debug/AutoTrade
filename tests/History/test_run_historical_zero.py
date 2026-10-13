@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import patch
 from zipfile import ZipFile
 
+from autotrade_runtime.artifacts import ArtifactStore
+
 from tools.historical_public_klines import collect_month, HistoricalArchiveError
 from tools.run_historical_zero import load_verified_months, main
 
@@ -43,7 +45,8 @@ class HistoricalZeroTests(unittest.TestCase):
         def no_network(url,limit):
             return checksum if url.endswith(".CHECKSUM") else archive
         manifest=collect_month(symbol="BTCUSDT",interval="1h",month="2024-01",
-                               output=Path(tmp),fetch=no_network)
+                               output=Path(tmp),fetch=no_network,
+                               artifact_store=ArtifactStore(Path(tmp) / ".artifact-store"))
         self.assertTrue(manifest["usable_as_complete_causal_interval"])
         self.assertEqual(manifest["row_count"],count)
         return count
@@ -57,6 +60,29 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(times[0].isoformat(),"2024-01-01T00:00:00+00:00")
             self.assertEqual(times[-1].isoformat(),"2024-01-31T23:00:00+00:00")
             self.assertEqual(len(digest),64)
+
+    def test_replay_authenticates_canonical_artifact_store_evidence(self):
+        with TemporaryDirectory() as tmp:
+            self._dataset(tmp)
+            store = ArtifactStore(Path(tmp) / ".artifact-store")
+            times, prices, _digest = load_verified_months(
+                Path(tmp), "BTCUSDT", "1h", "2024-01", "2024-01",
+                artifact_store=store,
+            )
+            self.assertEqual((len(times), len(prices)), (744, 744))
+
+            manifest_path = Path(tmp) / "spot/BTCUSDT/1h/2024-01.manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifact_evidence"]["source_zip"]["sha256"] = "sha256:" + "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(
+                HistoricalArchiveError,
+                "artifact evidence conflicts",
+            ):
+                load_verified_months(
+                    Path(tmp), "BTCUSDT", "1h", "2024-01", "2024-01",
+                    artifact_store=ArtifactStore(Path(tmp) / ".artifact-store"),
+                )
 
     def test_nested_parent_symlink_blocks_archive_before_network_and_replay(self):
         # Even when data-root itself is not a symlink, one of its higher

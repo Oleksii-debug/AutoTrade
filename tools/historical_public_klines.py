@@ -24,8 +24,11 @@ from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, uuid5
 from zipfile import ZipFile, BadZipFile
 from io import BytesIO
+
+from autotrade_runtime.artifacts import ArtifactConflict, ArtifactStore
 
 BASE = "https://data.binance.vision/data/spot/monthly/klines"
 DAILY_BASE = "https://data.binance.vision/data/spot/daily/klines"
@@ -286,6 +289,105 @@ def _read_bounded_zip_member(archive: ZipFile, member) -> bytes:
     return data
 
 
+def _historical_artifact_id(*, source_url: str, role: str) -> str:
+    """Return a stable identity for one immutable publisher-source role.
+
+    The digest is deliberately *not* part of the UUID input.  If the publisher
+    later changes bytes at the same canonical source URL, ArtifactStore must
+    raise an immutable conflict instead of silently accepting a second object.
+    """
+    return str(uuid5(
+        NAMESPACE_URL,
+        f"autotrade:plan10:binance-public-history:{role}:{source_url}",
+    ))
+
+
+def _publish_artifact_evidence(
+    *,
+    store: ArtifactStore,
+    source_url: str,
+    checksum_url: str,
+    raw_zip: bytes,
+    raw_checksum: bytes,
+    normalized_csv: bytes,
+    symbol: str,
+    interval: str,
+    period: str,
+) -> dict[str, dict[str, object]]:
+    """Publish source and normalized bytes through the canonical store/lock.
+
+    Binance Vision's default terms allow this research storage but do not
+    authorize redistribution.  Export therefore remains fail-closed.  The
+    canonical ArtifactStore owns content hashing, resource locking, atomic
+    publication, restart idempotency, and immutable revision conflicts.
+    """
+    if type(store) is not ArtifactStore:
+        raise HistoricalArchiveError("artifact_store must be the canonical ArtifactStore")
+    rights = {
+        "storage": True,
+        "export": False,
+        "rights_id": "binance-vision-noncommercial-research-v1",
+    }
+    common_metadata = {
+        "exchange": "BINANCE_SPOT",
+        "symbol": symbol,
+        "interval": interval,
+        "period": period,
+        "license_terms_url": DATASET_TERMS_URL,
+        "rights_scope": "PERSONAL_NON_COMMERCIAL_RESEARCH_SIMULATION_ONLY",
+    }
+    specifications = (
+        (
+            "source_zip",
+            raw_zip,
+            "application/zip",
+            source_url,
+            [source_url, checksum_url, DATASET_TERMS_URL],
+        ),
+        (
+            "publisher_checksum",
+            raw_checksum,
+            "text/plain; charset=us-ascii",
+            checksum_url,
+            [checksum_url, source_url, DATASET_TERMS_URL],
+        ),
+        (
+            "normalized_ohlcv_csv",
+            normalized_csv,
+            "text/csv; charset=utf-8",
+            source_url + "#normalized-ohlcv-v1",
+            [source_url, checksum_url, DATASET_TERMS_URL],
+        ),
+    )
+    published: dict[str, dict[str, object]] = {}
+    try:
+        for role, data, media_type, identity_url, source_refs in specifications:
+            manifest = store.publish_bytes(
+                artifact_id=_historical_artifact_id(
+                    source_url=identity_url,
+                    role=role,
+                ),
+                data=data,
+                media_type=media_type,
+                rights=rights,
+                source_refs=source_refs,
+                metadata={**common_metadata, "evidence_kind": role.upper()},
+            )
+            published[role] = {
+                "artifact_id": manifest["artifact_id"],
+                "sha256": manifest["sha256"],
+                "bytes": manifest["bytes"],
+                "media_type": manifest["media_type"],
+                "rights_id": manifest["rights"]["rights_id"],
+                "export_permitted": manifest["rights"]["export"],
+            }
+    except (ArtifactConflict, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HistoricalArchiveError(
+            "historical source artifact publication failed closed"
+        ) from exc
+    return published
+
+
 def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, month: str, day: str | None = None) -> dict:
     if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None:
         raise HistoricalArchiveError("symbol must be uppercase bounded pair")
@@ -357,7 +459,16 @@ def verify_archive(raw: bytes, checksum: bytes, *, symbol: str, interval: str, m
     }
 
 
-def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch=_fetch, day: str | None = None) -> dict:
+def collect_month(
+    *,
+    symbol: str,
+    interval: str,
+    month: str,
+    output: Path,
+    fetch=_fetch,
+    day: str | None = None,
+    artifact_store: ArtifactStore | None = None,
+) -> dict:
     if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None or interval not in INTERVAL_SECONDS:
         raise HistoricalArchiveError("invalid public archive selection")
     _utc_month(month)
@@ -413,6 +524,18 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     writer.writerows(lines)
     csv_bytes = stream.getvalue().encode("utf-8")
     manifest["normalized_csv_sha256"] = sha256(csv_bytes).hexdigest()
+    if artifact_store is not None:
+        manifest["artifact_evidence"] = _publish_artifact_evidence(
+            store=artifact_store,
+            source_url=url,
+            checksum_url=url + ".CHECKSUM",
+            raw_zip=raw,
+            raw_checksum=checksum,
+            normalized_csv=csv_bytes,
+            symbol=symbol,
+            interval=interval,
+            period=period,
+        )
     if target.exists() and not target.is_symlink():
         previous_bytes = target.read_bytes()
         if len(previous_bytes) > 20_000:
@@ -462,11 +585,20 @@ def collect_month(*, symbol: str, interval: str, month: str, output: Path, fetch
     return manifest
 
 
-def collect_day(*, symbol: str, interval: str, day: str, output: Path, fetch=_fetch) -> dict:
+def collect_day(
+    *,
+    symbol: str,
+    interval: str,
+    day: str,
+    output: Path,
+    fetch=_fetch,
+    artifact_store: ArtifactStore | None = None,
+) -> dict:
     """One completed UTC day using the existing immutable ingestion authority."""
     _utc_day(day)
     return collect_month(symbol=symbol, interval=interval, month=day[:7],
-                         day=day, output=output, fetch=fetch)
+                         day=day, output=output, fetch=fetch,
+                         artifact_store=artifact_store)
 
 
 def main(argv=None) -> int:
@@ -477,6 +609,12 @@ def main(argv=None) -> int:
     parser.add_argument("--through-month", required=True,
                         help="last fully published month YYYY-MM; current incomplete month is not an accepted monthly archive")
     parser.add_argument("--output", default="historical-data")
+    parser.add_argument(
+        "--artifact-store",
+        default=None,
+        help=("canonical content-addressed evidence store; defaults to "
+              "<output>/.artifact-store"),
+    )
     parser.add_argument("--daily-through", default=None,
                         help="Last completed UTC day YYYY-MM-DD; begins after --through-month")
     args = parser.parse_args(argv)
@@ -499,15 +637,26 @@ def main(argv=None) -> int:
                           for i in range((last_day - first_daily).days + 1)]
         if (len(months) + len(daily_days)) * len(symbols) > 600:
             raise HistoricalArchiveError("combined archive count exceeds budget")
+        output = Path(args.output)
+        artifact_root = (Path(args.artifact_store) if args.artifact_store is not None
+                         else output / ".artifact-store")
+        _reject_symlink_ancestors(artifact_root)
+        artifact_store = ArtifactStore(artifact_root)
         for sym in symbols:
             if SYMBOL.fullmatch(sym) is None:
                 raise HistoricalArchiveError("invalid symbol")
             for month in months:
-                result = collect_month(symbol=sym, interval=args.interval, month=month, output=Path(args.output))
+                result = collect_month(
+                    symbol=sym,
+                    interval=args.interval,
+                    month=month,
+                    output=output,
+                    artifact_store=artifact_store,
+                )
                 print(f"{sym} {month}: {result['row_count']} rows; gaps={result['missing_candle_intervals']}; source_sha256={result['source_zip_sha256']}")
             for day in daily_days:
                 result = collect_day(symbol=sym, interval=args.interval, day=day,
-                                     output=Path(args.output))
+                                     output=output, artifact_store=artifact_store)
                 print(f"{sym} {day}: {result['row_count']} daily rows; gaps={result['missing_candle_intervals']}; source_sha256={result['source_zip_sha256']}")
         return 0
     except (HistoricalArchiveError, OSError) as exc:

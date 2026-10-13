@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 import re
 
+from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
+
 from tools.historical_public_klines import (
     BASE, DATASET_LICENSE, DATASET_TERMS_URL,
     HistoricalArchiveError, INTERVAL_SECONDS, SYMBOL, _month_range,
@@ -24,7 +26,86 @@ from tools.historical_public_klines import (
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
-def _checked_month(root: Path, symbol: str, interval: str, month: str):
+def _verify_artifact_evidence(
+    *,
+    store: ArtifactStore,
+    manifest: dict,
+    normalized_csv: bytes,
+) -> None:
+    if type(store) is not ArtifactStore:
+        raise HistoricalArchiveError("artifact_store must be the canonical ArtifactStore")
+    evidence = manifest.get("artifact_evidence")
+    roles = {"source_zip", "publisher_checksum", "normalized_ohlcv_csv"}
+    if type(evidence) is not dict or set(evidence) != roles:
+        raise HistoricalArchiveError("historical manifest lacks canonical artifact evidence")
+    expected_digests = {
+        "source_zip": "sha256:" + manifest["source_zip_sha256"],
+        "publisher_checksum": "sha256:" + manifest["source_checksum_sha256"],
+        "normalized_ohlcv_csv": "sha256:" + manifest["normalized_csv_sha256"],
+    }
+    expected_media = {
+        "source_zip": "application/zip",
+        "publisher_checksum": "text/plain; charset=us-ascii",
+        "normalized_ohlcv_csv": "text/csv; charset=utf-8",
+    }
+    expected_sources = {
+        "source_zip": [manifest["source_url"], manifest["source_checksum_url"], DATASET_TERMS_URL],
+        "publisher_checksum": [manifest["source_checksum_url"], manifest["source_url"], DATASET_TERMS_URL],
+        "normalized_ohlcv_csv": [manifest["source_url"], manifest["source_checksum_url"], DATASET_TERMS_URL],
+    }
+    try:
+        for role in sorted(roles):
+            reference = evidence[role]
+            if type(reference) is not dict or set(reference) != {
+                "artifact_id", "sha256", "bytes", "media_type", "rights_id",
+                "export_permitted",
+            }:
+                raise HistoricalArchiveError("historical artifact reference is malformed")
+            authenticated, data = store.read_authenticated_snapshot(reference["artifact_id"])
+            if any((
+                reference["sha256"] != expected_digests[role],
+                reference["sha256"] != authenticated.get("sha256"),
+                reference["bytes"] != authenticated.get("bytes"),
+                reference["media_type"] != expected_media[role],
+                reference["media_type"] != authenticated.get("media_type"),
+                reference["rights_id"] != "binance-vision-noncommercial-research-v1",
+                reference["export_permitted"] is not False,
+                authenticated.get("rights") != {
+                    "storage": True,
+                    "export": False,
+                    "rights_id": "binance-vision-noncommercial-research-v1",
+                },
+                authenticated.get("source_refs") != expected_sources[role],
+            )):
+                raise HistoricalArchiveError("historical artifact evidence conflicts with provenance")
+            metadata = authenticated.get("metadata")
+            if type(metadata) is not dict or any(metadata.get(key) != expected for key, expected in (
+                ("exchange", "BINANCE_SPOT"),
+                ("symbol", manifest["symbol"]),
+                ("interval", manifest["interval"]),
+                ("period", manifest["day"] or manifest["month"]),
+                ("license_terms_url", DATASET_TERMS_URL),
+                ("rights_scope", "PERSONAL_NON_COMMERCIAL_RESEARCH_SIMULATION_ONLY"),
+                ("evidence_kind", role.upper()),
+            )):
+                raise HistoricalArchiveError("historical artifact metadata conflicts with provenance")
+            if role == "normalized_ohlcv_csv" and data != normalized_csv:
+                raise HistoricalArchiveError("artifact-store normalized CSV differs from replay bytes")
+    except (ArtifactIntegrityError, FileNotFoundError, KeyError, OSError,
+            RuntimeError, TypeError, ValueError) as exc:
+        if isinstance(exc, HistoricalArchiveError):
+            raise
+        raise HistoricalArchiveError("historical artifact evidence verification failed") from exc
+
+
+def _checked_month(
+    root: Path,
+    symbol: str,
+    interval: str,
+    month: str,
+    *,
+    artifact_store: ArtifactStore | None = None,
+):
     base = root / "spot" / symbol / interval
     # Verify the complete lexical ancestor chain, including ancestors ABOVE
     # data-root; a symlink above root must never redirect trusted replay.
@@ -70,6 +151,12 @@ def _checked_month(root: Path, symbol: str, interval: str, month: str):
         raise HistoricalArchiveError("historical source has missing intervals; fail closed")
     if sha256(raw).hexdigest() != manifest.get("normalized_csv_sha256"):
         raise HistoricalArchiveError("normalized historical archive digest mismatch")
+    if artifact_store is not None:
+        _verify_artifact_evidence(
+            store=artifact_store,
+            manifest=manifest,
+            normalized_csv=raw,
+        )
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -120,14 +207,28 @@ def _checked_month(root: Path, symbol: str, interval: str, month: str):
     return dates, prices, manifest
 
 
-def load_verified_months(root: Path, symbol: str, interval: str, from_month: str, through_month: str):
+def load_verified_months(
+    root: Path,
+    symbol: str,
+    interval: str,
+    from_month: str,
+    through_month: str,
+    *,
+    artifact_store: ArtifactStore | None = None,
+):
     if SYMBOL.fullmatch(symbol) is None or interval not in INTERVAL_SECONDS:
         raise HistoricalArchiveError("invalid instrument selection")
     all_dates, all_prices, digests = [], [], []
     step = INTERVAL_SECONDS[interval]
     months = list(_month_range(from_month, through_month))
     for month in months:
-        dates, prices, manifest = _checked_month(root, symbol, interval, month)
+        dates, prices, manifest = _checked_month(
+            root,
+            symbol,
+            interval,
+            month,
+            artifact_store=artifact_store,
+        )
         if all_dates and dates[0] - all_dates[-1] != timedelta(seconds=step):
             raise HistoricalArchiveError("missing UTC time between adjacent monthly sources")
         all_dates.extend(dates)
@@ -146,6 +247,12 @@ def load_verified_months(root: Path, symbol: str, interval: str, from_month: str
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run a frozen, unqualified candle-close ZERO experiment")
     parser.add_argument("--data-root", default="historical-data")
+    parser.add_argument(
+        "--artifact-store",
+        default=None,
+        help=("canonical evidence store; defaults to "
+              "<data-root>/.artifact-store and is mandatory for CLI replay"),
+    )
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--interval", choices=tuple(INTERVAL_SECONDS), default="1h")
     parser.add_argument("--from-month", default="2024-01")
@@ -155,8 +262,17 @@ def main(argv=None) -> int:
     parser.add_argument("--stop-after-episodes", type=int)
     args = parser.parse_args(argv)
     try:
+        data_root = Path(args.data_root)
+        artifact_root = (Path(args.artifact_store) if args.artifact_store is not None
+                         else data_root / ".artifact-store")
+        _reject_symlink_ancestors(artifact_root)
         dates, prices, digest = load_verified_months(
-            Path(args.data_root), args.symbol, args.interval, args.from_month, args.through_month
+            data_root,
+            args.symbol,
+            args.interval,
+            args.from_month,
+            args.through_month,
+            artifact_store=ArtifactStore(artifact_root),
         )
         # The canonical simulator gets a complete immutable price cut for
         # restart/recovery, but its strategy receives only prices[:episode].

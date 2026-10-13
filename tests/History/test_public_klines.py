@@ -12,6 +12,8 @@ from unittest.mock import patch
 import os
 import json
 
+from autotrade_runtime.artifacts import ArtifactStore
+
 from tools.historical_public_klines import (
     HistoricalArchiveError, _month_range, verify_archive, collect_month, collect_day, _fetch,
 )
@@ -48,6 +50,74 @@ def _bundle(month="2024-01", interval="1h", gap=False, corrupt=False, unit="ms",
 
 
 class PublicHistoryTests(unittest.TestCase):
+    def test_canonical_artifact_store_binds_source_restart_and_revision(self):
+        """Collector reuses the durable store instead of a private lock/store.
+
+        The stable artifact identity makes an upstream byte revision at the
+        same public URL fail closed, while an ordinary restart is idempotent.
+        """
+        archive, checksum = _bundle()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store_root = root / "artifact-store"
+
+            def source(url, _limit):
+                return checksum if url.endswith(".CHECKSUM") else archive
+
+            first = collect_month(
+                symbol="BTCUSDT",
+                interval="1h",
+                month="2024-01",
+                output=root / "dataset",
+                fetch=source,
+                artifact_store=ArtifactStore(store_root),
+            )
+            evidence = first["artifact_evidence"]
+            self.assertEqual(
+                set(evidence),
+                {"source_zip", "publisher_checksum", "normalized_ohlcv_csv"},
+            )
+            self.assertEqual(
+                ArtifactStore(store_root).read_bytes(
+                    evidence["source_zip"]["artifact_id"]
+                ),
+                archive,
+            )
+            self.assertFalse(evidence["source_zip"]["export_permitted"])
+            self.assertEqual(
+                evidence["source_zip"]["rights_id"],
+                "binance-vision-noncommercial-research-v1",
+            )
+
+            restarted = collect_month(
+                symbol="BTCUSDT",
+                interval="1h",
+                month="2024-01",
+                output=root / "dataset",
+                fetch=source,
+                artifact_store=ArtifactStore(store_root),
+            )
+            self.assertEqual(restarted, first)
+
+            revised_archive, revised_checksum = _bundle(count=4)
+
+            def revised_source(url, _limit):
+                return (revised_checksum if url.endswith(".CHECKSUM")
+                        else revised_archive)
+
+            with self.assertRaisesRegex(
+                HistoricalArchiveError,
+                "artifact publication failed closed",
+            ):
+                collect_month(
+                    symbol="BTCUSDT",
+                    interval="1h",
+                    month="2024-01",
+                    output=root / "dataset",
+                    fetch=revised_source,
+                    artifact_store=ArtifactStore(store_root),
+                )
+
     def test_month_range_has_bounded_chronology(self):
         self.assertEqual(list(_month_range("2024-12", "2025-02")),
                          ["2024-12", "2025-01", "2025-02"])

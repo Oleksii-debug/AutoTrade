@@ -19,9 +19,9 @@ import re
 from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
 
 from tools.historical_public_klines import (
-    BASE, DATASET_LICENSE, DATASET_TERMS_URL,
+    BASE, DAILY_BASE, DATASET_LICENSE, DATASET_TERMS_URL,
     HistoricalArchiveError, INTERVAL_SECONDS, SYMBOL, _month_range,
-    _reject_symlink_ancestors,
+    _reject_symlink_ancestors, _utc_day, _require_past_month,
 )
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
@@ -105,13 +105,25 @@ def _checked_month(
     month: str,
     *,
     artifact_store: ArtifactStore | None = None,
+    day: str | None = None,
+    include_ohlcv: bool = False,
 ):
+    """Validate one frozen UTC period; daily and monthly paths share authority."""
+    if type(symbol) is not str or SYMBOL.fullmatch(symbol) is None or interval not in INTERVAL_SECONDS:
+        raise HistoricalArchiveError("invalid instrument selection")
+    if day is None:
+        _require_past_month(month)
+    elif _utc_day(day).strftime("%Y-%m") != month:
+        raise HistoricalArchiveError("daily period does not match month")
+    period = day or month
     base = root / "spot" / symbol / interval
+    if day is not None:
+        base = base / "daily"
     # Verify the complete lexical ancestor chain, including ancestors ABOVE
     # data-root; a symlink above root must never redirect trusted replay.
     _reject_symlink_ancestors(base)
-    manifest_file = base / (month + ".manifest.json")
-    rows_file = base / (month + ".ohlcv.csv")
+    manifest_file = base / (period + ".manifest.json")
+    rows_file = base / (period + ".ohlcv.csv")
     for f in (manifest_file, rows_file):
         if f.is_symlink() or not f.is_file():
             raise HistoricalArchiveError(f"missing/nonregular verified market archive for {month}")
@@ -131,10 +143,11 @@ def _checked_month(
         raise HistoricalArchiveError("source identity conflicts with requested archive")
     # A normalized CSV digest alone does not authenticate a locally mutable
     # provenance manifest. Reject origin/right-scope relabeling before replay.
-    canonical_zip_url = f"{BASE}/{symbol}/{interval}/{symbol}-{interval}-{month}.zip"
+    source_base = DAILY_BASE if day is not None else BASE
+    canonical_zip_url = f"{source_base}/{symbol}/{interval}/{symbol}-{interval}-{period}.zip"
     if any(manifest.get(key) != expected for key, expected in (
-        ("day", None),
-        ("period_granularity", "MONTHLY"),
+        ("day", day),
+        ("period_granularity", "DAILY" if day is not None else "MONTHLY"),
         ("exchange", "BINANCE_SPOT"),
         ("source_url", canonical_zip_url),
         ("source_checksum_url", canonical_zip_url + ".CHECKSUM"),
@@ -167,6 +180,7 @@ def _checked_month(
         raise HistoricalArchiveError("historical CSV header differs from canonical")
     prices = []
     dates = []
+    candles = []
     for row in reader:
         if any(type(v) is not str for v in row.values()):
             raise HistoricalArchiveError("historical CSV row malformed")
@@ -185,6 +199,7 @@ def _checked_month(
             raise HistoricalArchiveError("malformed candle in normalized archive") from exc
         dates.append(point)
         prices.append(row["close"])
+        candles.append(tuple(row[key] for key in ("open", "high", "low", "close", "volume")))
         if len(prices) > 10000:
             raise HistoricalArchiveError("one canonical ZERO run is capped at 10000 observations")
     if len(prices) != manifest.get("row_count"):
@@ -199,12 +214,13 @@ def _checked_month(
     # recomputed CSV hash must never silently qualify a partial month.
     from calendar import monthrange
     year, month_number = map(int, month.split("-"))
-    expected_first = datetime(year, month_number, 1, tzinfo=timezone.utc)
-    expected_bars = monthrange(year, month_number)[1] * 86400 // step
+    expected_first = (_utc_day(day) if day is not None else
+                      datetime(year, month_number, 1, tzinfo=timezone.utc))
+    expected_bars = (1 if day is not None else monthrange(year, month_number)[1]) * 86400 // step
     expected_last = expected_first + timedelta(seconds=step * (expected_bars - 1))
     if len(dates) != expected_bars or dates[0] != expected_first or dates[-1] != expected_last:
         raise HistoricalArchiveError("historical coverage does not include full UTC month")
-    return dates, prices, manifest
+    return dates, (tuple(candles) if include_ohlcv else prices), manifest
 
 
 def load_verified_months(

@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from .accessibility import format_accessible_status
+from .accessibility import accessible_status_state, format_accessible_status
 from .economics import build_economic_report
 from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
 from .simulation_session import run_canonical_simulation, run_autonomous_simulation
@@ -173,13 +173,21 @@ def _execute(args) -> int:
         canonical = _read_canonical_state(args.state_dir)
         status = canonical["status"] if canonical else _legacy_status(args.state_dir)
         economic_report = canonical["economic_report"] if canonical else None
-        if canonical is None and status.get("status") == "running":
+        if canonical is None and accessible_status_state(status) == "running":
             try:
                 economic_report = get_economic_report(args.state_dir)
-            except (OSError, ValueError):
+            except (
+                OSError,
+                sqlite3.Error,
+                RuntimeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                ArithmeticError,
+            ):
                 economic_report = None
         print(format_accessible_status(status, economic_report))
-        return 2 if status["status"] in {"corrupt", "busy"} else 0
+        return 2 if accessible_status_state(status) in {"corrupt", "busy"} else 0
     if args.economic_report:
         print(json.dumps(get_economic_report(args.state_dir), indent=2))
         return 0

@@ -1,3 +1,7 @@
+## Перебудова незакритих розділів — 2026-10-13
+
+Власник замінив незакриті розділи в Google Docs на окремі верхньорівневі NА/NБ/NВ (NГ, якщо було 4 завдання). Карта: [ATOMIC_OPEN_SECTIONS_2026-10-13.md](ATOMIC_OPEN_SECTIONS_2026-10-13.md). Старий розділ N тепер агрегат нових; DONE лише після приймання кожного нового розділу та спільної інтеграції. Статуси WAITING/PARKED, чинні PR та історичні DONE збережені. Воркери зобов’язані виконувати нові самостійні одиниці, не починати старий код заново й не підміняти реальні підтвердження тестовими.
+
 # AutoTrade — Multi-Plan Closure State
 
 This file is the live GitHub coordination authority for the new multi-plan architecture.

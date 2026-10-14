@@ -12,6 +12,16 @@ Plans 1–7 are independent engineering plans with no priority order.
 Plan 8 is provider-free M1 whole-product convergence.
 Plan 9 is the final dependency-aware release/NVDA/M2 plan with an optional later external-provider activation track.
 
+## Two AutoTrade workspaces — owner decision 2026-10-15
+
+One shared GitHub repo / one canonical agent and learning memory, **two isolated workspaces**, not independent trading engines:
+
+- **Simulation AutoTrade:** https://drive.google.com/drive/folders/1qaWZPFEy1oWghv1nVID2SXjBwDBhfYQ6 ; [scope](docs/workspaces/simulation/README.md), owner Plan 10 **23** actionable atomic sections. Genuine agent, models, memory and behavior; SIMULATION labels only execution and virtual balances. Current real-provider accounts/credentials and physical NVDA are NOT requirements for a working internal Windows build or causal learning. Research dataset rights still apply.
+- **Provider AutoTrade:** https://drive.google.com/drive/folders/1Mi2zwLjp9KT-WB5pxM9OrZ4grxRyiSk5 ; [scope](docs/workspaces/provider/README.md), owner Plan 9 **30** atomic sections. External facts/provider/PAPER/LIVE are optional parked when unavailable, with honest rights/signing/physical NVDA final release gates.
+- **Binding:** [model/strategy/memory promotion contract](docs/workspaces/MODEL_PROMOTION_CONTRACT.md). Shared Plans 1–8 stay in their original canonical engineering folder, unchanged.
+
+Plan URLs below are the **same original documents**, relocated to those two workspaces; no copied plan or reset of accepted source. No destructive source deletion: simulation scope excludes external activation code as a dependency while preserving shared security/financial controls.
+
 ## Plans
 
 1. Перший план — Фінансове ядро, портфель, ризик та економіка

@@ -13,7 +13,9 @@ import json
 from pathlib import Path
 
 from autotrade_runtime.artifacts import ArtifactStore
-from autotrade_research.evaluation.replay.feeder import CausalDataset, CausalEvent
+from autotrade_research.evaluation.replay.feeder import (
+    CausalDataset, CausalEvent, CausalFeeder,
+)
 from tools.historical_public_klines import (
     HistoricalArchiveError, INTERVAL_SECONDS, SYMBOL, _month_range, _utc_day,
 )
@@ -102,3 +104,54 @@ def load_causal_archive(
                 "availability_policy": availability_policy, "sources": sources}
     digest = "sha256:" + sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return CausalDataset.create(manifest_sha256=digest, events=events)
+
+
+def closed_candle_simulation_input(
+    root: Path, *, symbol: str, interval: str, from_month: str,
+    through_month: str, artifact_store: ArtifactStore,
+) -> tuple[list[datetime], list[str], str]:
+    """Bridge the verified causal cut to the existing ZERO simulation input.
+
+    This is an explicitly retrospective bar-close *scenario*, not evidence of
+    historical publisher availability or next-bar execution. The privileged
+    collector owns the complete dataset; the canonical engine still gives its
+    decision specialist only the completed prefix at each episode. Bind the
+    run identity to the full immutable feeder cut, including source capture.
+    """
+    dataset = load_causal_archive(
+        root, symbol=symbol, interval=interval, from_month=from_month,
+        through_month=through_month, availability_policy=BAR_CLOSE_SCENARIO,
+        artifact_store=artifact_store,
+    )
+    if not 1 <= len(dataset.events) <= 10000:
+        raise HistoricalArchiveError("one canonical ZERO run requires 1 to 10000 complete candles")
+    step = timedelta(seconds=INTERVAL_SECONDS[interval])
+    first_close = dataset.events[0].event_time
+    feeder = CausalFeeder(dataset, start_time=first_close - timedelta(microseconds=1))
+    if feeder.view().events:
+        raise HistoricalArchiveError("historical trader observed an unfinished first candle")
+    feeder.advance_to(dataset.events[-1].event_time)
+    visible = feeder.view().events
+    if len(visible) != len(dataset.events):
+        raise HistoricalArchiveError("historical source is not available at the simulated close")
+    dates: list[datetime] = []
+    prices: list[str] = []
+    for index, candle in enumerate(visible):
+        opened_at = candle.event_time - step
+        if (
+            candle.kind != "HISTORICAL_SPOT_CANDLE"
+            or candle.available_at != candle.event_time
+            or candle.payload.get("availability_policy") != BAR_CLOSE_SCENARIO
+            or candle.payload.get("symbol") != symbol
+            or candle.payload.get("interval") != interval
+            or candle.payload.get("open_time_utc") != opened_at.isoformat()
+            or candle.payload.get("close_time_utc") != candle.event_time.isoformat()
+            or (index > 0 and opened_at != dates[-1] + step)
+        ):
+            raise HistoricalArchiveError("causal candle order/availability conflicts with replay")
+        close = candle.payload.get("close")
+        if type(close) is not str:
+            raise HistoricalArchiveError("causal close must be exact decimal text")
+        dates.append(opened_at)
+        prices.append(close)
+    return dates, prices, dataset.dataset_sha256.removeprefix("sha256:")

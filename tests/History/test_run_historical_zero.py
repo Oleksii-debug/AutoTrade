@@ -1,5 +1,6 @@
 """Provider-free historical adapter tests: synthetic fixtures, NO trading evidence."""
 import csv
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO, StringIO
@@ -13,6 +14,7 @@ from zipfile import ZipFile
 from autotrade_runtime.artifacts import ArtifactStore
 
 from tools.historical_public_klines import collect_month, HistoricalArchiveError
+from tools.historical_causal_replay import BAR_CLOSE_SCENARIO
 from tools.run_historical_zero import load_verified_months, main
 
 
@@ -168,6 +170,29 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(small_sim.call_args.args[1], "historical-zero-state-200")
             self.assertEqual(small_sim.call_args.kwargs["virtual_cash"], "200")
             self.assertEqual(small_sim.call_args.kwargs["target_quantity"], "0.49504950")
+
+    def test_causal_archive_runs_and_resumes_canonical_small_account(self):
+        with TemporaryDirectory() as tmp:
+            self._dataset(tmp)
+            state = str(Path(tmp) / "state-200")
+            base = ["--data-root", tmp, "--through-month", "2024-01",
+                    "--virtual-cash", "200", "--state-dir", state,
+                    "--run-id", "causal-resume"]
+            for stop, resumed in ((2, False), (3, True)):
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = main([*base, "--stop-after-episodes", str(stop)])
+                self.assertEqual(code, 0, output.getvalue())
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["observation_count"], 744)
+                self.assertEqual(result["virtual_cash_usd"], "200")
+                self.assertEqual(result["availability_policy"], BAR_CLOSE_SCENARIO)
+                sim = result["simulation"]
+                self.assertEqual(sim["completed_episodes"], stop)
+                self.assertEqual(sim["cash"], "200")
+                self.assertEqual(sim["new_outbound_requests"], 0)
+                self.assertTrue(sim["reconciled"])
+                self.assertEqual(sim["resumed"], resumed)
 
     def test_tamper_and_missing_archive_rejected(self):
         with TemporaryDirectory() as tmp:

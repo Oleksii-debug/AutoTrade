@@ -284,12 +284,12 @@ def main(argv=None) -> int:
         artifact_root = (Path(args.artifact_store) if args.artifact_store is not None
                          else data_root / ".artifact-store")
         _reject_symlink_ancestors(artifact_root)
-        dates, prices, digest = load_verified_months(
-            data_root,
-            args.symbol,
-            args.interval,
-            args.from_month,
-            args.through_month,
+        from tools.historical_causal_replay import (
+            BAR_CLOSE_SCENARIO, closed_candle_simulation_input,
+        )
+        dates, prices, digest = closed_candle_simulation_input(
+            data_root, symbol=args.symbol, interval=args.interval,
+            from_month=args.from_month, through_month=args.through_month,
             artifact_store=ArtifactStore(artifact_root),
         )
         # The canonical simulator gets a complete immutable price cut for
@@ -328,6 +328,7 @@ def main(argv=None) -> int:
             "historical_end_utc": dates[-1].isoformat().replace("+00:00", "Z"),
             "observation_count": len(prices),
             "dataset_identity_sha256": digest,
+            "availability_policy": BAR_CLOSE_SCENARIO,
             "frozen_fractional_spot_target_quantity": format(research_target, "f"),
             "target_sizing_basis": (
                 f"USD {research_notional} (25% of selected virtual cash) / first completed "
@@ -337,6 +338,7 @@ def main(argv=None) -> int:
             "important_limitations": [
                 "Existing agent is currently a frozen moving-average strategy; this run does not prove learning.",
                 "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage.",
+                "Bar-close availability is a retrospective scenario, not proof that these archive bytes were published at that historical time.",
                 "OHLCV has no order-book or tick-level execution truth.",
                 f"Virtual {args.virtual_cash} USD, zero network orders. Do not infer profitability from these fills.",
             ],

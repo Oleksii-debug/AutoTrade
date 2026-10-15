@@ -5,14 +5,17 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 from autotrade_research.evaluation.replay.feeder import (
     CausalFeeder, CausalReplayError, CausalDataView, CausalObservation,
-    FeederCheckpoint,
+    FeederCheckpoint, CausalDataset, CausalEvent,
 )
 from tools.historical_public_klines import collect_month, collect_day, HistoricalArchiveError
-from tools.historical_causal_replay import load_causal_archive, BAR_CLOSE_SCENARIO
+from tools.historical_causal_replay import (
+    load_causal_archive, closed_candle_simulation_input, BAR_CLOSE_SCENARIO,
+)
 from tests.History.test_run_historical_zero import full_month_fixture
 from tests.History.test_public_klines import _bundle
 
@@ -42,6 +45,51 @@ class HistoricalCausalReplayTests(unittest.TestCase):
         self.assertEqual(feeder.published_count, 0)
         feeder.advance_to(first.available_at)
         self.assertEqual(feeder.published_count, 744)
+
+    def test_zero_runner_binds_exact_causal_cut_and_closed_observations(self):
+        dates, prices, identity = closed_candle_simulation_input(
+            self.root, symbol="BTCUSDT", interval="1h",
+            from_month="2024-01", through_month="2024-01",
+            artifact_store=self.store,
+        )
+        dataset = self.load(availability_policy=BAR_CLOSE_SCENARIO)
+        self.assertEqual(identity, dataset.dataset_sha256.removeprefix("sha256:"))
+        self.assertEqual((len(dates), len(prices)), (744, 744))
+        self.assertEqual((dates[0].isoformat(), prices[0]),
+                         ("2024-01-01T00:00:00+00:00", "101"))
+        self.assertEqual(dates[-1].isoformat(), "2024-01-31T23:00:00+00:00")
+
+    def test_zero_runner_rejects_delayed_or_relabelled_causal_candle(self):
+        source = self.load(availability_policy=BAR_CLOSE_SCENARIO)
+        first = source.events[0]
+        changed = []
+        for delayed in (True, False):
+            payload = dict(first.payload)
+            if not delayed:
+                payload["symbol"] = "ETHUSDT"
+            changed.append(CausalDataset.create(
+                manifest_sha256=source.manifest_sha256,
+                events=(CausalEvent.create(
+                    event_id=first.event_id, kind=first.kind,
+                    event_time=first.event_time,
+                    available_at=(first.event_time + timedelta(hours=1)
+                                  if delayed else first.event_time),
+                    ingested_at=first.ingested_at,
+                    source_priority=first.source_priority,
+                    source_sequence=first.source_sequence, payload=payload,
+                ),),
+            ))
+        for dataset in changed:
+            with self.subTest(dataset=dataset.dataset_sha256):
+                with patch("tools.historical_causal_replay.load_causal_archive",
+                           return_value=dataset):
+                    with self.assertRaisesRegex(HistoricalArchiveError,
+                                                "available|order/availability"):
+                        closed_candle_simulation_input(
+                            self.root, symbol="BTCUSDT", interval="1h",
+                            from_month="2024-01", through_month="2024-01",
+                            artifact_store=self.store,
+                        )
 
     def test_scenario_only_publishes_closed_candles_and_hides_audit_cut(self):
         dataset = self.load(availability_policy=BAR_CLOSE_SCENARIO)

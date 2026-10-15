@@ -2,12 +2,14 @@
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+import json
 from tempfile import TemporaryDirectory
 import unittest
 
 from autotrade_runtime.artifacts import ArtifactStore
 from tools.historical_public_klines import collect_month
 from tools.run_historical_walkforward import main, walk_forward
+from tools.export_historical_diagnostics import main as export_diagnostics
 from tests.History.test_run_historical_zero import full_month_fixture
 
 
@@ -57,6 +59,18 @@ class WalkForwardTests(unittest.TestCase):
             self.assertIn("Virtual USD 1000", spoken.getvalue())
             self.assertIn("simulated marked P&L", spoken.getvalue())
             self.assertIn("not real fills or proven profit", spoken.getvalue())
+            export_file = root / "share-with-support.json"
+            self.assertEqual(export_diagnostics([
+                "--workspace", str(root / "state"), "--output", str(export_file),
+            ]), 0)
+            diagnostic = json.loads(export_file.read_text(encoding="utf-8"))
+            self.assertEqual(diagnostic["scope"], "HISTORICAL_SIMULATION")
+            self.assertTrue(any(name.startswith("reports/") for name in diagnostic["artifacts"]))
+            self.assertEqual(len(diagnostic["journals"]), 4)
+            self.assertTrue(all(events for events in diagnostic["journals"].values()))
+            self.assertEqual(export_diagnostics([
+                "--workspace", str(root / "state"), "--output", str(export_file),
+            ]), 2)
             with self.assertRaisesRegex(ValueError, "completed UTC months"):
                 walk_forward(**dict(args, last_holdout="2099-01"))
             with self.assertRaisesRegex(ValueError, "max_cycles"):

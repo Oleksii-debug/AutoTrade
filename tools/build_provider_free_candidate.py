@@ -40,6 +40,7 @@ HISTORICAL_SOURCE = frozenset({
     'tools/validate_historical_agent.py',
     'tools/run_historical_campaign.py',
     'tools/run_historical_walkforward.py',
+    'tools/export_historical_diagnostics.py',
 })
 REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',

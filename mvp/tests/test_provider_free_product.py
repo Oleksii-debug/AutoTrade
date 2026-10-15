@@ -118,6 +118,42 @@ class ProductClient:
 
 
 class ProviderFreeProductAcceptance(unittest.TestCase):
+    def test_downloadable_diagnostics_are_durable_owner_only_and_redacted(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                status, report, headers = client.request('GET', '/api/v1/local-diagnostics')
+                self.assertEqual(status, 200, report)
+                self.assertEqual(headers['Content-Disposition'],
+                    'attachment; filename="autotrade-diagnostics.json"')
+                self.assertEqual(report['event_count'], len(report['events']))
+                self.assertGreater(report['event_count'], 0)
+                first_ids = [event['event_id'] for event in report['events']]
+                self.assertIn('journal_sequence', report['events'][0])
+                # Browser same-origin GET requests normally omit Origin.
+                connection = http.client.HTTPConnection('127.0.0.1', client.port, timeout=30)
+                try:
+                    connection.request('GET', '/api/v1/local-diagnostics',
+                        headers={'Cookie': client.cookie})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read())['event_count'], report['event_count'])
+                finally:
+                    connection.close()
+                client.cookie = None
+                rejected, _, _ = client.request('GET', '/api/v1/local-diagnostics')
+                self.assertEqual(rejected, 403)
+            finally:
+                client.close()
+            restarted = ProductClient(directory)
+            try:
+                status, after, _ = restarted.request('GET', '/api/v1/local-diagnostics')
+                self.assertEqual(status, 200)
+                self.assertEqual(first_ids,
+                    [event['event_id'] for event in after['events']][:len(first_ids)])
+            finally:
+                restarted.close()
+
     def test_owned_desktop_child_uses_direct_ephemeral_session_handoff(self):
         from mvp.autotrade_mvp import product_runtime
 

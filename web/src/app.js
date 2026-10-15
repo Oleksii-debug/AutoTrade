@@ -94,6 +94,7 @@
     "jobs-copy",
     "event-history-filter",
     "event-history-copy",
+    "download-diagnostics",
     "permissions-sort",
     "permissions-previous",
     "permissions-next",
@@ -2363,6 +2364,36 @@ function renderOperation(operation) {
   async function start() {
     bindPageNavigation();
     bindTableTools();
+    byId("download-diagnostics").addEventListener("click", async () => {
+      const button = byId("download-diagnostics");
+      button.disabled = true;
+      text("diagnostic-download-status", "Preparing the durable diagnostic report.");
+      try {
+        const response = await fetch("/api/v1/local-diagnostics", {
+          method: "GET", credentials: "same-origin", cache: "no-store",
+          headers: {"Accept": "application/json"}
+        });
+        if (!response.ok) throw new Error("Diagnostic export failed with status " + response.status);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        try {
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "autotrade-diagnostics.json";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          text("diagnostic-download-status", "Diagnostic report downloaded. You can attach the JSON file to our conversation.");
+        } finally {
+          window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+        }
+      } catch (error) {
+        text("diagnostic-download-status", "Diagnostic download failed. Pair the local owner session and retry; the journal was not changed.");
+      } finally {
+        button.disabled = false;
+        button.focus();
+      }
+    });
     bindAuthorityPolicyReviewInvalidation();
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {

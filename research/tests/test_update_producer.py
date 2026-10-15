@@ -31,9 +31,13 @@ from research.autotrade_research.science.registry import ScientificRegistry
 SOURCE_SHA = "a" * 40
 FEATURE_SCHEMA = "sha256:" + "f" * 64
 PROTOCOL_ID = "00000000-0000-0000-0000-000000000901"
-CALIBRATION_CUTOFF = datetime(2026, 10, 5, tzinfo=timezone.utc)
-UPDATE_CUTOFF = datetime(2026, 10, 10, tzinfo=timezone.utc)
-DECISION = datetime(2026, 10, 1, tzinfo=timezone.utc)
+# Keep the entire synthetic causal chronology ahead of the wall clock used to
+# stamp immutable evidence. This preserves the production invariant that
+# physical evidence must exist before its label becomes available, even when
+# the regression suite is executed after the original 2026 fixture dates.
+CALIBRATION_CUTOFF = datetime(2099, 10, 5, tzinfo=timezone.utc)
+UPDATE_CUTOFF = datetime(2099, 10, 10, tzinfo=timezone.utc)
+DECISION = datetime(2099, 10, 1, tzinfo=timezone.utc)
 
 
 def canonical_bytes(value):
@@ -255,7 +259,7 @@ class ProducerFixture:
                 target="0",
                 observation_id=f"cal-{index}",
                 label_available_at=datetime(
-                    2026, 10, 3, 12, index, tzinfo=timezone.utc
+                    2099, 10, 3, 12, index, tzinfo=timezone.utc
                 ),
             )
 
@@ -266,7 +270,7 @@ class ProducerFixture:
             target=target,
             observation_id=observation_id,
             label_available_at=datetime(
-                2026, 10, 8, tzinfo=timezone.utc
+                2099, 10, 8, tzinfo=timezone.utc
             ),
         )
 
@@ -714,7 +718,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="0",
                 observation_id="post-freeze-calibration",
                 label_available_at=datetime(
-                    2026, 10, 3, 13, tzinfo=timezone.utc
+                    2099, 10, 3, 13, tzinfo=timezone.utc
                 ),
             )
             fixture.seed_update()
@@ -809,7 +813,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="-10",
                 observation_id="negative-evidence",
                 label_available_at=datetime(
-                    2026, 10, 8, 1, tzinfo=timezone.utc
+                    2099, 10, 8, 1, tzinfo=timezone.utc
                 ),
                 outcome_class="NEGATIVE",
                 intended_side="BUY",
@@ -848,7 +852,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="caller-claims-mature",
                 label_available_at=datetime(
-                    2026, 10, 8, 2, tzinfo=timezone.utc
+                    2099, 10, 8, 2, tzinfo=timezone.utc
                 ),
                 canonical_label_mature=True,
                 canonical_reconciliation_state="RECONCILED",
@@ -887,7 +891,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="forged-reconciled-trade",
                 label_available_at=datetime(
-                    2026, 10, 8, 3, tzinfo=timezone.utc
+                    2099, 10, 8, 3, tzinfo=timezone.utc
                 ),
                 outcome_class="POSITIVE",
                 canonical_label_mature=True,
@@ -935,7 +939,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="wrong-episode-reconciliation",
                 label_available_at=datetime(
-                    2026, 10, 8, 4, tzinfo=timezone.utc
+                    2099, 10, 8, 4, tzinfo=timezone.utc
                 ),
                 outcome_class="POSITIVE",
                 intended_side="BUY",
@@ -943,7 +947,7 @@ class UpdateProducerTests(unittest.TestCase):
             fixture.bind_reconciliation_evidence(
                 episode_id,
                 observed_at=datetime(
-                    2026, 10, 8, 3, 59, tzinfo=timezone.utc
+                    2099, 10, 8, 3, 59, tzinfo=timezone.utc
                 ),
             )
             fixture.reconciliation_evidence[episode_id]["episode_id"] = (
@@ -975,7 +979,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="authority-backed-trade",
                 label_available_at=datetime(
-                    2026, 10, 8, 4, tzinfo=timezone.utc
+                    2099, 10, 8, 4, tzinfo=timezone.utc
                 ),
                 outcome_class="POSITIVE",
                 intended_side="BUY",
@@ -983,7 +987,7 @@ class UpdateProducerTests(unittest.TestCase):
             fixture.bind_reconciliation_evidence(
                 episode_id,
                 observed_at=datetime(
-                    2026, 10, 8, 3, 59, tzinfo=timezone.utc
+                    2099, 10, 8, 3, 59, tzinfo=timezone.utc
                 ),
             )
 
@@ -1010,7 +1014,7 @@ class UpdateProducerTests(unittest.TestCase):
             self.assertEqual(proof["checkpoint_aggregate_version"], 1)
             self.assertEqual(
                 proof["observed_at"],
-                "2026-10-08T03:59:00+00:00",
+                "2099-10-08T03:59:00+00:00",
             )
             self.assertTrue(proof["current_scope"])
 
@@ -1094,7 +1098,7 @@ class UpdateProducerTests(unittest.TestCase):
             )
             self.assertEqual(
                 artifact["runtime_state"]["last_update_at"],
-                "2026-10-09T23:00:00Z",
+                "2099-10-09T23:00:00Z",
             )
             self.assertIn(
                 "LEARNING.INSUFFICIENT_UPDATE_EVIDENCE",
@@ -1143,7 +1147,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="backdated-evidence",
                 label_available_at=datetime(
-                    2026, 9, 1, tzinfo=timezone.utc
+                    2000, 9, 1, tzinfo=timezone.utc
                 ),
             )
             exact_manifest = fixture.population_manifest(
@@ -1283,12 +1287,12 @@ class UpdateProducerTests(unittest.TestCase):
                 target="0",
                 observation_id="corrected-observation",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000201",
             )
             correction_time = datetime(
-                2026, 10, 9, tzinfo=timezone.utc
+                2099, 10, 9, tzinfo=timezone.utc
             )
             evidence_ref = "artifact:correction-evidence"
             fixture.correction_times[evidence_ref] = correction_time
@@ -1301,9 +1305,9 @@ class UpdateProducerTests(unittest.TestCase):
                     "learning": {
                         "observation_id": "corrected-observation",
                         "label_version": "label-v1",
-                        "label_available_at": "2026-10-08T00:00:00Z",
-                        "outcome_horizon_at": "2026-10-08T00:00:00Z",
-                        "execution_reconciled_at": "2026-10-08T00:00:00Z",
+                        "label_available_at": "2099-10-08T00:00:00Z",
+                        "outcome_horizon_at": "2099-10-08T00:00:00Z",
+                        "execution_reconciled_at": "2099-10-08T00:00:00Z",
                         "features": {"x": "1"},
                         "target": "1",
                     },
@@ -1317,10 +1321,10 @@ class UpdateProducerTests(unittest.TestCase):
                 episode,
                 outcome_class="NULL",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 outcome_horizon_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 target="1",
                 observed_at=correction_time,
@@ -1353,7 +1357,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="same-observation",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000211",
                 decision_time=DECISION,
@@ -1364,7 +1368,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="same-observation",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000212",
                 decision_time=DECISION,
@@ -1408,7 +1412,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="conflict",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000221",
                 decision_time=DECISION,
@@ -1419,7 +1423,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="2",
                 observation_id="conflict",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000222",
                 decision_time=DECISION + timedelta(minutes=1),
@@ -1454,7 +1458,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="0",
                 observation_id="calibration-alias",
                 label_available_at=datetime(
-                    2026, 10, 3, 12, 3, tzinfo=timezone.utc
+                    2099, 10, 3, 12, 3, tzinfo=timezone.utc
                 ),
                 decision_time=physical_time,
                 evidence_ref=shared,
@@ -1465,7 +1469,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="update-alias",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 decision_time=physical_time + timedelta(minutes=7),
                 evidence_ref=shared,
@@ -1505,7 +1509,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="forged-physical-ref",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 evidence_ref=forged,
             )
@@ -1749,7 +1753,7 @@ class UpdateProducerTests(unittest.TestCase):
                 target="1",
                 observation_id="late-correction",
                 label_available_at=datetime(
-                    2026, 10, 8, tzinfo=timezone.utc
+                    2099, 10, 8, tzinfo=timezone.utc
                 ),
                 episode_id="00000000-0000-0000-0000-000000000311",
             )
@@ -1765,9 +1769,9 @@ class UpdateProducerTests(unittest.TestCase):
                     "learning": {
                         "observation_id": "late-correction",
                         "label_version": "label-v1",
-                        "label_available_at": "2026-10-08T00:00:00Z",
-                        "outcome_horizon_at": "2026-10-08T00:00:00Z",
-                        "execution_reconciled_at": "2026-10-08T00:00:00Z",
+                        "label_available_at": "2099-10-08T00:00:00Z",
+                        "outcome_horizon_at": "2099-10-08T00:00:00Z",
+                        "execution_reconciled_at": "2099-10-08T00:00:00Z",
                         "features": {"x": "1"},
                         "target": "9",
                     },

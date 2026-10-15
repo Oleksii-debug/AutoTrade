@@ -353,6 +353,14 @@ def main(argv=None) -> int:
             strategy_fast=model_fast, strategy_slow=model_slow,
             model_sha256=model_digest,
         )
+        comparative = None
+        if args.next_bar_open:
+            from tools.historical_holdout_report import holdout_report
+            comparative = holdout_report(
+                result, execution_prices=execution_prices,
+                execution_dates=dates[1:], virtual_cash=args.virtual_cash,
+                slippage_bps=args.slippage_bps,
+            )
         print(json.dumps({
             "label": ("INTERNAL_NEXT_BAR_OPEN_SCENARIO_NOT_PERFORMANCE_EVIDENCE"
                       if args.next_bar_open else
@@ -390,6 +398,7 @@ def main(argv=None) -> int:
                 f"Virtual {args.virtual_cash} USD, zero network orders. Do not infer profitability from these fills.",
             ],
             "simulation": result,
+            "comparative_report": comparative,
         }, indent=2))
         return 2 if result.get("status") == "UNKNOWN" else 0
     except (HistoricalArchiveError, OSError, RuntimeError, ValueError, TypeError, ArithmeticError) as exc:

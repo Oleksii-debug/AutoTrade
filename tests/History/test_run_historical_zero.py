@@ -2,6 +2,7 @@
 import csv
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO, StringIO
 import json
@@ -230,6 +231,13 @@ class HistoricalZeroTests(unittest.TestCase):
                 self.assertEqual(result["simulation"]["new_outbound_requests"], 0)
                 self.assertTrue(result["simulation"]["reconciled"])
                 self.assertEqual(result["simulation"]["resumed"], stop == 3)
+                report = result["comparative_report"]
+                self.assertEqual(report["through_episode"], stop)
+                self.assertEqual(report["cash_baseline_equity_usd"], "200")
+                self.assertEqual(report["agent_mark_pnl_usd"], "0")
+                self.assertLess(Decimal(report["buy_hold_liquidation_scenario_pnl_usd"]), 0)
+                self.assertEqual(report["asof_execution_open_utc"],
+                                 (datetime(2024, 1, 1, stop, tzinfo=timezone.utc)).isoformat())
             self.assertEqual(observed_cuts, [("101",), ("101", "101"),
                                              ("101", "101", "101")])
             self.assertEqual(agent_cuts, observed_cuts)
@@ -287,6 +295,10 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(sim["cash"], "199.8")
             self.assertEqual(sim["position"], "0")
             self.assertEqual(sim["new_outbound_requests"], 2)
+            comparison = result["comparative_report"]
+            self.assertEqual(comparison["agent_mark_pnl_usd"], "-0.2")
+            self.assertEqual(Decimal(comparison["agent_liquidation_scenario_equity_usd"]), Decimal("199.8"))
+            self.assertEqual(comparison["cash_baseline_equity_usd"], "200")
 
     def test_invalid_next_open_cost_cannot_start_financial_state(self):
         with TemporaryDirectory() as tmp:

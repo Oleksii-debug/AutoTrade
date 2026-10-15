@@ -131,6 +131,7 @@ _TEST_BILLING_AMOUNTS = {
     "other-line": Decimal("0.25"),
     "invoice-stable": Decimal("0.2"),
     "bill-after-process-exit": Decimal("0.6"),
+    "class-rebinding-billing": Decimal("0.25"),
 }
 
 

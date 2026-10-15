@@ -37,7 +37,7 @@ def _open_budget(directory):
         budget_id="class-rebinding-budget",
         ceiling="5",
         environment="PAPER",
-        clock=lambda: NOW_TEXT,
+        clock=lambda: NOW.isoformat(),
     )
     return journal, budget
 

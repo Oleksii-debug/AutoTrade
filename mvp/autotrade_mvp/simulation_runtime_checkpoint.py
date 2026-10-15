@@ -595,15 +595,17 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event in _autonomous_owned_publication_events(store, run_id=run_id):
-        # The canonical event, not caller input, chooses the only trusted topic.
-        # Non-published component events must not be treated as outbox rows.
-        topic = _canonical_publication_topic(event)
-        if topic is None:
-            continue
-        state = JournalStore.outbox_delivery_state(
-            store, event["event_id"], topic=topic,
+    events = _autonomous_owned_publication_events(store, run_id=run_id)
+    try:
+        states = JournalStore.outbox_delivery_states(
+            store,
+            tuple((event["event_id"], _canonical_publication_topic(event)) for event in events),
         )
+    except ValueError as error:
+        raise AutonomousRuntimeCheckpointError(str(error)) from error
+    for event, state in zip(events, states, strict=True):
+        if state is None:
+            continue
         # The JournalStore's authenticated single-cut read returns only
         # validated delivery metadata, not a second caller-visible envelope.
         # The original canonical journal event remains the ownership authority;

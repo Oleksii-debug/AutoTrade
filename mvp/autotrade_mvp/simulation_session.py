@@ -2024,6 +2024,7 @@ def run_autonomous_simulation(
     strategy_fast: int = 2,
     strategy_slow: int = 3,
     model_sha256: str | None = None,
+    validation_sha256: str | None = None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -2065,6 +2066,12 @@ def run_autonomous_simulation(
         or any(c not in "0123456789abcdef" for c in model_sha256)
     ):
         raise ValueError("trained model requires an exact next-open identity")
+    if validation_sha256 is not None and (
+        model_sha256 is None or type(validation_sha256) is not str
+        or len(validation_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in validation_sha256)
+    ):
+        raise ValueError("validation evidence requires an exact trained model identity")
     timestamp = _now(now)
     if virtual_cash is not None and (type(virtual_cash) is not str or virtual_cash not in {"200", "1000"}):
         raise ValueError("virtual_cash must be exactly 200 or 1000 USD")
@@ -2131,6 +2138,8 @@ def run_autonomous_simulation(
         protocol["adverse_slippage_bps"] = canonical_decimal_text(adverse_bps)
     if model_sha256 is not None:
         protocol["trained_model_sha256"] = model_sha256
+    if validation_sha256 is not None:
+        protocol["validation_report_sha256"] = validation_sha256
     root = Path(state_dir)
     if any((root / name).exists() for name in ("checkpoint.json", "learning-evidence.jsonl")):
         raise ValueError("legacy state requires a separate autonomous simulation directory")

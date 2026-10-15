@@ -160,3 +160,103 @@ def verify_model(model: dict, *, symbol: str, interval: str,
     ))]:
         raise ValueError("trained selected policy conflicts with weights")
     return pair[0], pair[1], digest
+
+
+def validate_closed_candles(model: dict, *, dates: list[datetime],
+                            prices: list[str], dataset_sha256: str,
+                            symbol: str, interval: str) -> dict:
+    """Score a frozen model on a disjoint period without updating weights."""
+    if len(dates) != len(prices) or not 10 <= len(prices) <= 10000:
+        raise ValueError("validation requires 10..10000 aligned closed candles")
+    fast, slow, digest = verify_model(
+        model, symbol=symbol, interval=interval,
+        holdout_start_open=dates[0],
+    )
+    if type(dataset_sha256) is not str or len(dataset_sha256) != 64 or any(
+        c not in "0123456789abcdef" for c in dataset_sha256
+    ):
+        raise ValueError("validation requires an immutable source digest")
+    from datetime import timedelta
+    step = timedelta(hours=1)
+    if interval != "1h" or any(
+        type(day) is not datetime or day.tzinfo is None or
+        day.utcoffset() != timezone.utc.utcoffset(day)
+        for day in dates
+    ) or any(b-a != step for a, b in zip(dates, dates[1:])):
+        raise ValueError("validation requires continuous hourly UTC bars")
+    values = [parse_bounded_exact_decimal(price) for price in prices]
+    if any(value <= 0 for value in values):
+        raise ValueError("validation prices must be positive")
+    correct = matured = 0
+    for index in range(1, len(values)):
+        predicted = _direction(values[:index], fast, slow)
+        actual = 1 if values[index] > values[index - 1] else -1 if values[index] < values[index - 1] else 0
+        if predicted is None or actual == 0:
+            continue
+        matured += 1
+        correct += predicted == actual
+    report = {
+        "status": "INDEPENDENT_DIRECTIONAL_VALIDATION_NOT_TRADING_PERFORMANCE",
+        "model_sha256": digest,
+        "validation_dataset_sha256": dataset_sha256,
+        "symbol": symbol, "interval": interval,
+        "validation_start_open_utc": dates[0].isoformat(),
+        "validation_last_close_utc": (dates[-1] + step).isoformat(),
+        "selected_parameters": {"fast": fast, "slow": slow},
+        "matured_labels": matured, "correct_labels": correct,
+        "accuracy_fraction": (format(Decimal(correct) / Decimal(matured), "f")
+                              if matured else None),
+        "model_updated": False,
+    }
+    return {**report, "report_sha256": sha256(_canonical(report)).hexdigest()}
+
+
+def verify_validation_report(report: dict, *, model_sha256: str,
+                             symbol: str, interval: str,
+                             holdout_start_open: datetime,
+                             selected_parameters: tuple[int, int] | None = None) -> str:
+    if type(report) is not dict or set(report) != {
+        "status", "model_sha256", "validation_dataset_sha256", "symbol",
+        "interval", "validation_start_open_utc", "validation_last_close_utc",
+        "selected_parameters", "matured_labels", "correct_labels",
+        "accuracy_fraction", "model_updated", "report_sha256",
+    }:
+        raise ValueError("validation report schema differs")
+    payload = {key: value for key, value in report.items() if key != "report_sha256"}
+    digest = report["report_sha256"]
+    if type(digest) is not str or digest != sha256(_canonical(payload)).hexdigest():
+        raise ValueError("validation report integrity differs")
+    if (report["status"] != "INDEPENDENT_DIRECTIONAL_VALIDATION_NOT_TRADING_PERFORMANCE"
+        or report["model_sha256"] != model_sha256 or report["symbol"] != symbol
+        or report["interval"] != interval or report["model_updated"] is not False
+        or type(report["validation_dataset_sha256"]) is not str
+        or len(report["validation_dataset_sha256"]) != 64
+        or any(c not in "0123456789abcdef" for c in report["validation_dataset_sha256"])
+    ):
+        raise ValueError("validation report model or instrument differs")
+    selected = report["selected_parameters"]
+    if (type(selected) is not dict or set(selected) != {"fast", "slow"}
+        or (selected["fast"], selected["slow"]) not in EXPERTS
+        or (selected_parameters is not None and
+            (selected["fast"], selected["slow"]) != selected_parameters)
+    ):
+        raise ValueError("validation selected policy differs from trained model")
+    try:
+        start = datetime.fromisoformat(report["validation_start_open_utc"])
+        end = datetime.fromisoformat(report["validation_last_close_utc"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("validation report clock is invalid") from exc
+    if (start.tzinfo is None or end.tzinfo is None or
+        start.utcoffset() != timezone.utc.utcoffset(start) or
+        end.utcoffset() != timezone.utc.utcoffset(end) or
+        not start < end <= holdout_start_open):
+        raise ValueError("validation overlaps the independent holdout")
+    count, correct = report["matured_labels"], report["correct_labels"]
+    if (type(count) is not int or type(correct) is not int or
+        not 0 <= correct <= count or
+        count > int((end-start).total_seconds() // 3600) or
+        report["accuracy_fraction"] != (
+            format(Decimal(correct) / Decimal(count), "f") if count else None
+        )):
+        raise ValueError("validation label arithmetic differs")
+    return digest

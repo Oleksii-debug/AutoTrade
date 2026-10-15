@@ -285,6 +285,8 @@ def main(argv=None) -> int:
                         help="next-open fixed adverse basis points (0..100); not measured spread/liquidity")
     parser.add_argument("--model-path", default=None,
                         help="verified trained model from an earlier, disjoint historical period; requires --next-bar-open")
+    parser.add_argument("--validation-report-path", default=None,
+                        help="verified disjoint validation evidence ending before this holdout; requires --model-path")
     args = parser.parse_args(argv)
     try:
         data_root = Path(args.data_root)
@@ -320,6 +322,17 @@ def main(argv=None) -> int:
                 read_model(Path(args.model_path)), symbol=args.symbol,
                 interval=args.interval, holdout_start_open=dates[0],
             )
+        validation_digest = None
+        if args.validation_report_path is not None:
+            if model_digest is None:
+                raise HistoricalArchiveError("validation report requires a trained model")
+            from mvp.autotrade_mvp.adaptive_ma import verify_validation_report
+            validation_digest = verify_validation_report(
+                read_model(Path(args.validation_report_path)),
+                model_sha256=model_digest, symbol=args.symbol,
+                interval=args.interval, holdout_start_open=dates[0],
+                selected_parameters=(model_fast, model_slow),
+            )
         execution_prices = opens[1:] if args.next_bar_open else prices
         signal_prices = prices[:-1] if args.next_bar_open else None
         first_execution_time = (dates[1] if args.next_bar_open else
@@ -352,6 +365,7 @@ def main(argv=None) -> int:
                if args.next_bar_open else {}),
             strategy_fast=model_fast, strategy_slow=model_slow,
             model_sha256=model_digest,
+            validation_sha256=validation_digest,
         )
         comparative = None
         if args.next_bar_open:
@@ -375,6 +389,7 @@ def main(argv=None) -> int:
                                  else "SAME_OBSERVED_CLOSE_EXPERIMENT"),
             "adverse_slippage_bps": args.slippage_bps if args.next_bar_open else "0",
             "trained_model_sha256": model_digest,
+            "validation_report_sha256": validation_digest,
             "trained_strategy_parameters": {"fast": model_fast, "slow": model_slow},
             "dataset_identity_sha256": digest,
             "availability_policy": BAR_CLOSE_SCENARIO,

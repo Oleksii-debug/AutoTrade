@@ -47,6 +47,8 @@ python -m tools.run_historical_campaign --data-root historical-data --workspace 
 
 The command prints a short JSON account comparison and writes immutable model, validation and completed-prefix report files under `--workspace`. Repeat it with the same episode limit to verify recovery, then raise `--episode-limit` or omit it to continue through the complete period. The $200 and $1000 accounts have separate journals. Training and validation must succeed before any account is opened; if one account fails, the command does not publish a combined report and an identical retry recovers the other account from its own journal. This is one finite, frozen-policy research cut, **not** continuous online learning, a Windows user interface or an economically qualified strategy.
 
+The per-account `comparative_report` also contains a reconciled hourly equity curve, sample hourly return volatility, an unannualized zero-cash-rate Sharpe calculation when variance is nonzero, and a **mark-based position-turnover proxy**. These statistics read completed simulated episodes only. They are not exchange execution measurements or proof of an advantage; very short prefixes are particularly unstable.
+
 
 
 Universal autonomous multi-agent financial trading platform.

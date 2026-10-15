@@ -7,7 +7,7 @@ cash and full-cash buy-and-hold are explicitly hypothetical scenarios.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from mvp.autotrade_mvp.exact_decimal import (
     as_fraction, parse_bounded_exact_decimal, round_fraction_to_quantum,
@@ -56,12 +56,40 @@ def holdout_report(simulation: dict, *, execution_prices: list[str],
         raise ValueError("canonical agent mark conflicts with comparative report")
     peak = starting
     max_drawdown = Decimal(0)
+    curve = []
+    returns = []
+    prior_equity = starting
+    prior_position = Decimal(0)
+    turnover_proxy = Decimal(0)
     for index, decision in enumerate(decisions):
         if decision.get("episode") != index + 1 or decision.get("reconciled") is not True:
             raise ValueError("canonical agent decision history is incomplete")
         equity = parse_bounded_exact_decimal(decision["equity"])
+        position_at_step = parse_bounded_exact_decimal(decision["position"])
+        cash_at_step = parse_bounded_exact_decimal(decision["cash"])
+        open_at_step = parse_bounded_exact_decimal(execution_prices[index])
+        if (open_at_step <= 0 or position_at_step < 0 or cash_at_step < 0 or
+            cash_at_step + position_at_step * open_at_step != equity):
+            raise ValueError("canonical agent equity curve conflicts with account state")
+        if prior_equity <= 0:
+            raise ValueError("canonical agent equity must remain positive")
+        returns.append((equity - prior_equity) / prior_equity)
+        turnover_proxy += abs(position_at_step - prior_position) * open_at_step
+        curve.append({"episode": index + 1,
+                      "execution_open_utc": execution_dates[index].isoformat(),
+                      "cash_usd": _text(cash_at_step),
+                      "position": _text(position_at_step),
+                      "mark_equity_usd": _text(equity)})
+        prior_equity, prior_position = equity, position_at_step
         peak = max(peak, equity)
         max_drawdown = max(max_drawdown, (peak - equity) / peak)
+    with localcontext() as context:
+        context.prec = 42
+        mean = sum(returns) / len(returns)
+        variance = (sum((value - mean) ** 2 for value in returns) /
+                    (len(returns) - 1) if len(returns) > 1 else None)
+        volatility = variance.sqrt() if variance is not None else None
+        sharpe = mean / volatility if volatility is not None and volatility > 0 else None
     buy_price = _fill(first, bps, "BUY")
     sell_price = _fill(mark, bps, "SELL")
     hold_quantity = round_fraction_to_quantum(
@@ -83,6 +111,12 @@ def holdout_report(simulation: dict, *, execution_prices: list[str],
         "agent_mark_pnl_usd": _text(marked_equity - starting),
         "agent_liquidation_scenario_equity_usd": _text(agent_liquidation),
         "agent_max_mark_drawdown_fraction": _text(max_drawdown),
+        "agent_equity_curve": curve,
+        "agent_hourly_return_sample_volatility_fraction": (
+            _text(volatility) if volatility is not None else None),
+        "agent_hourly_sharpe_zero_cash_rate_unannualized": (
+            _text(sharpe) if sharpe is not None else None),
+        "agent_gross_mark_turnover_proxy_fraction": _text(turnover_proxy / starting),
         "cash_baseline_equity_usd": _text(starting),
         "buy_hold_liquidation_scenario_equity_usd": _text(hold_liquidation),
         "buy_hold_liquidation_scenario_pnl_usd": _text(hold_liquidation - starting),

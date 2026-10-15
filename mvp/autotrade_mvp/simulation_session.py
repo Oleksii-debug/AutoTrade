@@ -2021,6 +2021,9 @@ def run_autonomous_simulation(
     instrument_profile: str = "GENERIC",
     signal_prices: list[str] | None = None,
     slippage_bps: str = "0",
+    strategy_fast: int = 2,
+    strategy_slow: int = 3,
+    model_sha256: str | None = None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -2052,6 +2055,16 @@ def run_autonomous_simulation(
     adverse_bps = parse_bounded_exact_decimal(slippage_bps)
     if adverse_bps < 0 or adverse_bps > 100 or (signal_prices is None and adverse_bps != 0):
         raise ValueError("bounded adverse slippage applies only to next-open simulation")
+    if (type(strategy_fast) is not int or type(strategy_slow) is not int or
+        not 1 <= strategy_fast < strategy_slow <= 64):
+        raise ValueError("strategy window must be bounded and ordered")
+    if (strategy_fast, strategy_slow) != (2, 3) and model_sha256 is None:
+        raise ValueError("changed strategy parameters require a verified model")
+    if model_sha256 is not None and (
+        signal_prices is None or type(model_sha256) is not str or len(model_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in model_sha256)
+    ):
+        raise ValueError("trained model requires an exact next-open identity")
     timestamp = _now(now)
     if virtual_cash is not None and (type(virtual_cash) is not str or virtual_cash not in {"200", "1000"}):
         raise ValueError("virtual_cash must be exactly 200 or 1000 USD")
@@ -2092,13 +2105,14 @@ def run_autonomous_simulation(
         "source_build_identity": _simulation_build_identity(),
         "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
         "financial_scope": _simulation_protocol_document(fault_after_send=False)["financial_scope"],
-        "strategy_parameters": {"fast": 2, "slow": 3},
+        "strategy_parameters": {"fast": strategy_fast, "slow": strategy_slow},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "observation_interval_seconds": observation_interval_seconds,
         "instrument_profile": instrument_profile,
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
-        "strategy": "moving-average-2-3-long-only-target-" + canonical_decimal_text(target),
+        "strategy": (f"moving-average-{strategy_fast}-{strategy_slow}-long-only-target-"
+                     + canonical_decimal_text(target)),
         "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(initial_cash),
         "settlement_policy": {
             "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
@@ -2115,6 +2129,8 @@ def run_autonomous_simulation(
         protocol["signal_prices"] = [canonical_decimal_text(v) for v in signals]
         protocol["execution_timing"] = "PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO"
         protocol["adverse_slippage_bps"] = canonical_decimal_text(adverse_bps)
+    if model_sha256 is not None:
+        protocol["trained_model_sha256"] = model_sha256
     root = Path(state_dir)
     if any((root / name).exists() for name in ("checkpoint.json", "learning-evidence.jsonl")):
         raise ValueError("legacy state requires a separate autonomous simulation directory")

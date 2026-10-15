@@ -24,7 +24,19 @@ https://github.com/binance/binance-public-data/blob/master/TERMS_AND_CONDITIONS.
 restrict the default dataset license to **CC BY-NC-SA 4.0 plus non-commercial-only terms**.
 This intake is strictly personal non-commercial research/simulation; do **not** redistribute the raw archive, use it for commercial products or connect it to compensated signal distribution or LIVE execution without appropriate separate rights.
 
-The original source URL, publisher checksum SHA-256, normalized CSV SHA-256, exchange, symbol, interval, date range, gap count, and research-only rights notice are kept in each manifest. This does **not** qualify next-bar execution, model learning, profitability, or a public signed release. The existing `tools/run_historical_zero.py` experiment is explicitly marked **SAME-CLOSE / INTERNAL / UNQUALIFIED** until Sections 2–6 are completed.
+The original source URL, publisher checksum SHA-256, normalized CSV SHA-256, exchange, symbol, interval, date range, gap count, and research-only rights notice are kept in each manifest. This does **not** qualify profitability or a public signed release. The default `tools/run_historical_zero.py` experiment remains **SAME-CLOSE / INTERNAL / UNQUALIFIED**. An opt-in next-open cost scenario and a causal parameter-training candidate exist on PR #2389; neither closes Plan 10 Sections 2–6 or establishes economic edge.
+
+### Experimental training and independent historical run
+
+After collecting completed January and February 2024 BTCUSDT hourly archives as above, the following commands train on January's closed-bar direction labels, persist one versioned model, and run it on disjoint February data using the **existing** ZERO risk, OMS, simulated provider and financial journal. Use a separate state directory for each account. The archived source files and account state must remain outside Git.
+
+```console
+python -m tools.train_historical_agent --data-root historical-data --symbol BTCUSDT --interval 1h --from-month 2024-01 --through-month 2024-01 --model-out local-models/btc-2024-01.json
+python -m tools.run_historical_zero --data-root historical-data --symbol BTCUSDT --interval 1h --from-month 2024-02 --through-month 2024-02 --next-bar-open --model-path local-models/btc-2024-01.json --virtual-cash 200 --state-dir local-state/btc-200 --run-id february-200
+python -m tools.run_historical_zero --data-root historical-data --symbol BTCUSDT --interval 1h --from-month 2024-02 --through-month 2024-02 --next-bar-open --model-path local-models/btc-2024-01.json --virtual-cash 1000 --state-dir local-state/btc-1000 --run-id february-1000
+```
+
+These are developer commands, not a ready Windows installer. A completed month can be processed in bounded pieces with `--stop-after-episodes N`; repeat with a larger N and the same state/run/model to resume. The training command does not create orders. It updates candidate weights only when the following candle has closed; the selected parameters are frozen during the independent run. Changing the training or validation period, model, costs, or code identity in an existing state fails closed. The next-open run assumes the prior candle was available at its close, adds a fixed adverse 10 basis point scenario plus the existing 10 basis point provider fee, and has no observed order-book liquidity. Negative P&L remains a valid result. The model and historical dataset are not a production promotion artifact; Windows packaging, holdout metrics, long-lived online learning and human NVDA verification remain open.
 
 
 

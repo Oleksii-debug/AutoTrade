@@ -283,6 +283,8 @@ def main(argv=None) -> int:
                         help="decision on a closed bar, simulated fill at following bar open with fixed adverse costs")
     parser.add_argument("--slippage-bps", default="10",
                         help="next-open fixed adverse basis points (0..100); not measured spread/liquidity")
+    parser.add_argument("--model-path", default=None,
+                        help="verified trained model from an earlier, disjoint historical period; requires --next-bar-open")
     args = parser.parse_args(argv)
     try:
         data_root = Path(args.data_root)
@@ -308,6 +310,16 @@ def main(argv=None) -> int:
                 raise HistoricalArchiveError("adverse slippage must be 0..100 exact basis points")
         elif args.slippage_bps != "10":
             raise HistoricalArchiveError("slippage configuration requires --next-bar-open")
+        if args.model_path is not None and not args.next_bar_open:
+            raise HistoricalArchiveError("trained model requires --next-bar-open")
+        model_fast, model_slow, model_digest = 2, 3, None
+        if args.model_path is not None:
+            from tools.train_historical_agent import read_model
+            from mvp.autotrade_mvp.adaptive_ma import verify_model
+            model_fast, model_slow, model_digest = verify_model(
+                read_model(Path(args.model_path)), symbol=args.symbol,
+                interval=args.interval, holdout_start_open=dates[0],
+            )
         execution_prices = opens[1:] if args.next_bar_open else prices
         signal_prices = prices[:-1] if args.next_bar_open else None
         first_execution_time = (dates[1] if args.next_bar_open else
@@ -338,6 +350,8 @@ def main(argv=None) -> int:
             virtual_cash=args.virtual_cash,
             **({"signal_prices": signal_prices, "slippage_bps": args.slippage_bps}
                if args.next_bar_open else {}),
+            strategy_fast=model_fast, strategy_slow=model_slow,
+            model_sha256=model_digest,
         )
         print(json.dumps({
             "label": ("INTERNAL_NEXT_BAR_OPEN_SCENARIO_NOT_PERFORMANCE_EVIDENCE"
@@ -352,6 +366,8 @@ def main(argv=None) -> int:
             "execution_timing": ("PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO" if args.next_bar_open
                                  else "SAME_OBSERVED_CLOSE_EXPERIMENT"),
             "adverse_slippage_bps": args.slippage_bps if args.next_bar_open else "0",
+            "trained_model_sha256": model_digest,
+            "trained_strategy_parameters": {"fast": model_fast, "slow": model_slow},
             "dataset_identity_sha256": digest,
             "availability_policy": BAR_CLOSE_SCENARIO,
             "frozen_fractional_spot_target_quantity": format(research_target, "f"),
@@ -361,7 +377,11 @@ def main(argv=None) -> int:
             ),
             "virtual_cash_usd": args.virtual_cash,
             "important_limitations": [
-                "Existing agent is currently a frozen moving-average strategy; this run does not prove learning.",
+                ("Selected moving-average parameters were trained on earlier closed-bar labels; this holdout run does not update them."
+                 if model_digest is not None else
+                 "Existing agent is currently a frozen moving-average strategy; this run does not prove learning."),
+                ("This run evaluates parameters from a separate training cut; no holdout updates are permitted."
+                 if model_digest is not None else "No trained model is selected for this run."),
                 ("Next-open mode adds fixed adverse basis points and fees, not measured spread or qualified execution liquidity."
                  if args.next_bar_open else
                  "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage."),

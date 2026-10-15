@@ -1,9 +1,10 @@
 """Research-only historical candle adapter for the existing AutoTrade ZERO engine.
 
-No broker credentials, no network orders. This is an integration experiment:
-the underlying moving-average simulation currently marks and executes at the
-same observed candle close. It is NOT a valid next-bar historical profitability
-test. Plan 10 Section 3 must qualify independent decision/fill timing.
+No broker credentials, no network orders. This is an integration experiment.
+The optional next-open cut separates strategy observations from execution
+marks and applies a fixed adverse-cost scenario, not observed spread or
+publisher point-in-time availability proof.
+It is NOT qualified historical profitability evidence.
 """
 from __future__ import annotations
 
@@ -278,6 +279,10 @@ def main(argv=None) -> int:
     parser.add_argument("--run-id", default="research-2024")
     parser.add_argument("--virtual-cash", choices=("200", "1000"), default="1000")
     parser.add_argument("--stop-after-episodes", type=int)
+    parser.add_argument("--next-bar-open", action="store_true",
+                        help="decision on a closed bar, simulated fill at following bar open with fixed adverse costs")
+    parser.add_argument("--slippage-bps", default="10",
+                        help="next-open fixed adverse basis points (0..100); not measured spread/liquidity")
     args = parser.parse_args(argv)
     try:
         data_root = Path(args.data_root)
@@ -287,15 +292,26 @@ def main(argv=None) -> int:
         from tools.historical_causal_replay import (
             BAR_CLOSE_SCENARIO, closed_candle_simulation_input,
         )
-        dates, prices, digest = closed_candle_simulation_input(
+        dates, opens, prices, digest = closed_candle_simulation_input(
             data_root, symbol=args.symbol, interval=args.interval,
             from_month=args.from_month, through_month=args.through_month,
             artifact_store=ArtifactStore(artifact_root),
         )
-        # The canonical simulator gets a complete immutable price cut for
-        # restart/recovery, but its strategy receives only prices[:episode].
-        # Observation time represents the completed bar, never its open.
-        first_close = dates[0] + timedelta(seconds=INTERVAL_SECONDS[args.interval])
+        # In next-open mode the specialist sees closed bars [0..n-2], while
+        # only the canonical execution authority sees next-bar opens [1..n-1].
+        # Both cuts are immutable and bound into the restart protocol.
+        if args.next_bar_open and len(prices) < 2:
+            raise HistoricalArchiveError("next-bar simulation needs at least two complete candles")
+        if args.next_bar_open:
+            slippage = Decimal(args.slippage_bps)
+            if not slippage.is_finite() or not Decimal("0") <= slippage <= Decimal("100"):
+                raise HistoricalArchiveError("adverse slippage must be 0..100 exact basis points")
+        elif args.slippage_bps != "10":
+            raise HistoricalArchiveError("slippage configuration requires --next-bar-open")
+        execution_prices = opens[1:] if args.next_bar_open else prices
+        signal_prices = prices[:-1] if args.next_bar_open else None
+        first_execution_time = (dates[1] if args.next_bar_open else
+                                dates[0] + timedelta(seconds=INTERVAL_SECONDS[args.interval]))
         # The first CLOSED candle is known at first_close. Freeze a bounded,
         # affordable SPOT quantity from that observation alone; no future
         # bars, result labels or hindsight portfolio figures are consulted.
@@ -312,21 +328,30 @@ def main(argv=None) -> int:
             else "historical-zero-state-200"
         )
         result = run_autonomous_simulation(
-            prices, state_dir, run_id=args.run_id + "-" + digest[:16],
-            now=first_close.isoformat().replace("+00:00", "Z"),
+            execution_prices, state_dir,
+            run_id=args.run_id + ("-nextopen-" if args.next_bar_open else "-") + digest[:16],
+            now=first_execution_time.isoformat().replace("+00:00", "Z"),
             observation_interval_seconds=INTERVAL_SECONDS[args.interval],
             stop_after_episodes=args.stop_after_episodes,
             instrument_profile="FRACTIONAL_SPOT_RESEARCH",
             target_quantity=format(research_target, "f"),
             virtual_cash=args.virtual_cash,
+            **({"signal_prices": signal_prices, "slippage_bps": args.slippage_bps}
+               if args.next_bar_open else {}),
         )
         print(json.dumps({
-            "label": "INTERNAL_CANDLE_CLOSE_SAME_PRICE_EXPERIMENT_NOT_PERFORMANCE_EVIDENCE",
+            "label": ("INTERNAL_NEXT_BAR_OPEN_SCENARIO_NOT_PERFORMANCE_EVIDENCE"
+                      if args.next_bar_open else
+                      "INTERNAL_CANDLE_CLOSE_SAME_PRICE_EXPERIMENT_NOT_PERFORMANCE_EVIDENCE"),
             "source_market": "BINANCE_HISTORICAL_SPOT_CANDLES",
             "original_symbol": args.symbol,
             "historical_start_utc": dates[0].isoformat().replace("+00:00", "Z"),
             "historical_end_utc": dates[-1].isoformat().replace("+00:00", "Z"),
             "observation_count": len(prices),
+            "execution_count": len(execution_prices),
+            "execution_timing": ("PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO" if args.next_bar_open
+                                 else "SAME_OBSERVED_CLOSE_EXPERIMENT"),
+            "adverse_slippage_bps": args.slippage_bps if args.next_bar_open else "0",
             "dataset_identity_sha256": digest,
             "availability_policy": BAR_CLOSE_SCENARIO,
             "frozen_fractional_spot_target_quantity": format(research_target, "f"),
@@ -337,7 +362,9 @@ def main(argv=None) -> int:
             "virtual_cash_usd": args.virtual_cash,
             "important_limitations": [
                 "Existing agent is currently a frozen moving-average strategy; this run does not prove learning.",
-                "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage.",
+                ("Next-open mode adds fixed adverse basis points and fees, not measured spread or qualified execution liquidity."
+                 if args.next_bar_open else
+                 "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage."),
                 "Bar-close availability is a retrospective scenario, not proof that these archive bytes were published at that historical time.",
                 "OHLCV has no order-book or tick-level execution truth.",
                 f"Virtual {args.virtual_cash} USD, zero network orders. Do not infer profitability from these fills.",

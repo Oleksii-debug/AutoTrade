@@ -2019,6 +2019,8 @@ def run_autonomous_simulation(
     should_pause=None,
     observation_interval_seconds: int = 1,
     instrument_profile: str = "GENERIC",
+    signal_prices: list[str] | None = None,
+    slippage_bps: str = "0",
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -2039,6 +2041,17 @@ def run_autonomous_simulation(
     if type(prices) is not list or not 1 <= len(prices) <= 10000:
         raise ValueError("price stream must contain 1 to 10000 observations")
     values = _prices(prices)
+    if signal_prices is not None:
+        if type(signal_prices) is not list or len(signal_prices) != len(values):
+            raise ValueError("next-open signal stream must match execution stream length")
+        signals = _prices(signal_prices)
+    else:
+        signals = values
+    if type(slippage_bps) is not str:
+        raise TypeError("slippage basis points must be exact decimal text")
+    adverse_bps = parse_bounded_exact_decimal(slippage_bps)
+    if adverse_bps < 0 or adverse_bps > 100 or (signal_prices is None and adverse_bps != 0):
+        raise ValueError("bounded adverse slippage applies only to next-open simulation")
     timestamp = _now(now)
     if virtual_cash is not None and (type(virtual_cash) is not str or virtual_cash not in {"200", "1000"}):
         raise ValueError("virtual_cash must be exactly 200 or 1000 USD")
@@ -2060,6 +2073,8 @@ def run_autonomous_simulation(
     if execution_profile == "TWO_EQUAL_PARTIALS":
         instrument.validate_quantity(exact_multiply(target, Decimal("0.5")))
     for price in values:
+        instrument.validate_price(price)
+    for price in signals:
         instrument.validate_price(price)
     for name, value in (("stop_after_episodes", stop_after_episodes),
                         ("fault_at_episode", fault_at_episode),
@@ -2094,6 +2109,12 @@ def run_autonomous_simulation(
         "fault_at_episode": fault_at_episode, "emergency_at_episode": emergency_at_episode,
         "instrument": instrument.to_contract_dict(),
     }
+    if signal_prices is not None:
+        # Retain both immutable cuts in the restart identity; the specialist
+        # receives only completed signal closes, never the execution open.
+        protocol["signal_prices"] = [canonical_decimal_text(v) for v in signals]
+        protocol["execution_timing"] = "PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO"
+        protocol["adverse_slippage_bps"] = canonical_decimal_text(adverse_bps)
     root = Path(state_dir)
     if any((root / name).exists() for name in ("checkpoint.json", "learning-evidence.jsonl")):
         raise ValueError("legacy state requires a separate autonomous simulation directory")
@@ -3065,7 +3086,10 @@ def _run_autonomous_locked(
         drawdown = round_fraction_to_quantum(as_fraction(exact_subtract(peak, equity)) / as_fraction(peak),
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
-        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
+        signal_cut = protocol.get("signal_prices", protocol["prices"])
+        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(
+            [parse_bounded_exact_decimal(v) for v in signal_cut[:episode]], frozen_target
+        )
         # The specialist is durable diagnostics only.  It must agree with the
         # frozen strategy, but it never selects allocation, risk, reservation,
         # or dispatch authority.
@@ -3115,7 +3139,23 @@ def _run_autonomous_locked(
         if quantity != 0 and allocation.status == "ALLOCATED":
             side = "BUY" if quantity > 0 else "SELL"
             instrument.validate_quantity(exact_abs(quantity))
-            amount = exact_multiply(exact_abs(quantity), price)
+            execution_price = price
+            if "signal_prices" in protocol:
+                adverse_bps = parse_bounded_exact_decimal(protocol["adverse_slippage_bps"])
+                # A fixed, explicitly hypothetical adverse spread/slippage
+                # scenario. The observed next open stays the valuation mark;
+                # only the canonical simulated order/fill uses this rounded
+                # worse price. No order-book liquidity is inferred.
+                adjusted = as_fraction(price) * (
+                    1 + as_fraction(adverse_bps) / 10000
+                    if side == "BUY" else 1 - as_fraction(adverse_bps) / 10000
+                )
+                execution_price = round_fraction_to_quantum(
+                    adjusted, instrument.price_tick,
+                    mode="CEILING" if side == "BUY" else "FLOOR",
+                )
+                instrument.validate_price(execution_price)
+            amount = exact_multiply(exact_abs(quantity), execution_price)
             required = exact_add(amount, exact_multiply(amount, FEE_RATE)) if side == "BUY" else exact_multiply(amount, FEE_RATE)
             # REDUCE never spends unfilled sale proceeds. Canonical hard risk
             # verifies owned inventory; the sequential OMS fence holds every
@@ -3175,7 +3215,7 @@ def _run_autonomous_locked(
                 simulation_time=timestamp)
             intent_id = _uuid("loop-intent", key)
             intent_hash = payload_digest({"protocol_digest": protocol_digest, "episode": episode,
-                "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price),
+                "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(execution_price),
                 "instrument": INSTRUMENT, "allocation": {
                     "target": canonical_decimal_text(allocation.targets[0].quantity),
                     "lifecycle_cost_digest": lifecycle_cost.lifecycle_cost_digest,
@@ -3188,7 +3228,7 @@ def _run_autonomous_locked(
                 intent_id=intent_id, intent_hash=intent_hash, account_id=ACCOUNT, environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional=amount,
                 capability_snapshot_id="simulated-capability-v1", risk_intent=RiskIntent.create(symbol=INSTRUMENT,
-                    side=side, quantity=exact_abs(quantity), price=price, expected_state_version=episode,
+                    side=side, quantity=exact_abs(quantity), price=execution_price, expected_state_version=episode,
                     instrument_type="EQUITY", reduce_only=side == "SELL", action="REDUCE" if side == "SELL" else "TRADE"),
                 risk_context=context, risk_policy=policy, risk_valid_until=future, reservation_book=reservations,
                 reservation_id=reservation_id, reservation_requirements={resource: required},
@@ -3206,7 +3246,7 @@ def _run_autonomous_locked(
                     topic="autotrade.order-projection.events",
                     expected_cut=JournalStore.whole_store_state_cut(store))
                 request = {"attempt_id": attempt_id, "instrument_version": INSTRUMENT, "side": side,
-                    "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price), "now": timestamp}
+                    "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(execution_price), "now": timestamp}
                 if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS":
                     request["fill_immediately"] = False
                 frozen_request = dict(request)
@@ -3238,7 +3278,7 @@ def _run_autonomous_locked(
                     for part in (1, 2):
                         provider.record_fill(client_order_id=order_id,
                             provider_execution_id=_uuid("loop-partial-execution", f"{key}:part:{part}"),
-                            quantity=part_quantity, now=timestamp, price=price)
+                            quantity=part_quantity, now=timestamp, price=execution_price)
                 fresh_fills = [f for f in provider.activity_fills() if f["order_ref"] == dispatched.response["provider_order_id"]]
                 if len(fresh_fills) != (2 if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS" else 1):
                     raise ValueError("ACK is not fill evidence")

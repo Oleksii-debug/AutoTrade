@@ -47,7 +47,7 @@ class HistoricalCausalReplayTests(unittest.TestCase):
         self.assertEqual(feeder.published_count, 744)
 
     def test_zero_runner_binds_exact_causal_cut_and_closed_observations(self):
-        dates, prices, identity = closed_candle_simulation_input(
+        dates, opens, prices, identity = closed_candle_simulation_input(
             self.root, symbol="BTCUSDT", interval="1h",
             from_month="2024-01", through_month="2024-01",
             artifact_store=self.store,
@@ -55,6 +55,7 @@ class HistoricalCausalReplayTests(unittest.TestCase):
         dataset = self.load(availability_policy=BAR_CLOSE_SCENARIO)
         self.assertEqual(identity, dataset.dataset_sha256.removeprefix("sha256:"))
         self.assertEqual((len(dates), len(prices)), (744, 744))
+        self.assertEqual((len(opens), opens[0]), (744, "100"))
         self.assertEqual((dates[0].isoformat(), prices[0]),
                          ("2024-01-01T00:00:00+00:00", "101"))
         self.assertEqual(dates[-1].isoformat(), "2024-01-31T23:00:00+00:00")

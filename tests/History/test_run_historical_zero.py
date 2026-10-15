@@ -18,7 +18,7 @@ from tools.historical_causal_replay import BAR_CLOSE_SCENARIO
 from tools.run_historical_zero import load_verified_months, main
 
 
-def full_month_fixture(month="2024-01"):
+def full_month_fixture(month="2024-01", close_at=None):
     origin = datetime.fromisoformat(month+"-01T00:00:00+00:00")
     limit = (datetime(origin.year+1,1,1,tzinfo=timezone.utc)
              if origin.month == 12 else datetime(origin.year,origin.month+1,1,tzinfo=timezone.utc))
@@ -29,7 +29,8 @@ def full_month_fixture(month="2024-01"):
         t = int((origin+timedelta(hours=i)).timestamp())
         open_millis = t*1000 if origin.year == 2024 else t*1_000_000
         unit = 1000 if origin.year == 2024 else 1_000_000
-        writer.writerow([str(open_millis),"100","102","99","101","1",
+        closing = str(close_at(i)) if close_at is not None else "101"
+        writer.writerow([str(open_millis),"100","102","99",closing,"1",
                          str(open_millis+3600*unit-1),"101","5","1","101","0"])
         i += 1
     filename=f"BTCUSDT-1h-{month}.zip"
@@ -42,8 +43,8 @@ def full_month_fixture(month="2024-01"):
 
 
 class HistoricalZeroTests(unittest.TestCase):
-    def _dataset(self,tmp):
-        archive, checksum, count=full_month_fixture()
+    def _dataset(self,tmp, *, close_at=None):
+        archive, checksum, count=full_month_fixture(close_at=close_at)
         def no_network(url,limit):
             return checksum if url.endswith(".CHECKSUM") else archive
         manifest=collect_month(symbol="BTCUSDT",interval="1h",month="2024-01",
@@ -193,6 +194,93 @@ class HistoricalZeroTests(unittest.TestCase):
                 self.assertEqual(sim["new_outbound_requests"], 0)
                 self.assertTrue(sim["reconciled"])
                 self.assertEqual(sim["resumed"], resumed)
+
+    def test_next_open_cut_hides_execution_prices_from_strategy_and_resumes(self):
+        with TemporaryDirectory() as tmp:
+            self._dataset(tmp)
+            from mvp.autotrade_mvp.pipeline import MovingAverageStrategy
+            original_decide = MovingAverageStrategy.decide
+            observed_cuts = []
+            def observe_strategy(self, prices, quantity):
+                observed_cuts.append(tuple(str(price) for price in prices))
+                return original_decide(self, prices, quantity)
+            state = str(Path(tmp) / "next-open-200")
+            base = ["--data-root", tmp, "--through-month", "2024-01",
+                    "--virtual-cash", "200", "--state-dir", state,
+                    "--run-id", "next-open", "--next-bar-open"]
+            for stop in (2, 3):
+                output = StringIO()
+                with redirect_stdout(output), patch.object(MovingAverageStrategy, "decide", observe_strategy):
+                    code = main([*base, "--stop-after-episodes", str(stop)])
+                self.assertEqual(code, 0, output.getvalue())
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["observation_count"], 744)
+                self.assertEqual(result["execution_count"], 743)
+                self.assertEqual(result["simulation"]["completed_episodes"], stop)
+                self.assertEqual(result["simulation"]["new_outbound_requests"], 0)
+                self.assertTrue(result["simulation"]["reconciled"])
+                self.assertEqual(result["simulation"]["resumed"], stop == 3)
+            self.assertEqual(observed_cuts, [("101",), ("101", "101"),
+                                             ("101", "101", "101")])
+            from mvp.autotrade_mvp.persistence import JournalStore
+            store = JournalStore(Path(state) / "journal.sqlite3")
+            events = store.load_events("canonical_autonomous_simulation",
+                                       result["simulation"]["run_id"])
+            protocol = events[0]["payload"]["protocol"]
+            self.assertEqual(protocol["execution_timing"],
+                             "PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO")
+            self.assertEqual(protocol["signal_prices"][0], "101")
+            self.assertEqual(protocol["prices"][0], "100")
+            self.assertEqual(protocol["adverse_slippage_bps"], "10")
+            from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
+            changed_signals = list(protocol["signal_prices"])
+            changed_signals[0] = "102"
+            with self.assertRaisesRegex(ValueError, "protocol/input identity changed"):
+                run_autonomous_simulation(
+                    protocol["prices"], state, run_id=protocol["run_id"],
+                    now=protocol["start_time"], virtual_cash="200",
+                    observation_interval_seconds=3600,
+                    instrument_profile="FRACTIONAL_SPOT_RESEARCH",
+                    target_quantity=protocol["target_quantity"],
+                    signal_prices=changed_signals, slippage_bps="10",
+                    stop_after_episodes=3,
+                )
+
+    def test_next_open_buy_sell_adverse_fill_and_canonical_fee(self):
+        with TemporaryDirectory() as tmp:
+            self._dataset(tmp, close_at=lambda i: ("100", "100", "102", "102", "100")[i]
+                          if i < 5 else "101")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(["--data-root", tmp, "--through-month", "2024-01",
+                             "--virtual-cash", "200", "--state-dir", str(Path(tmp) / "state"),
+                             "--run-id", "next-buy", "--next-bar-open",
+                             "--stop-after-episodes", "5"])
+            self.assertEqual(code, 0, output.getvalue())
+            result = json.loads(output.getvalue())
+            sim = result["simulation"]
+            self.assertEqual(sim["decisions"][2]["decision"], "BUY")
+            self.assertEqual(sim["decisions"][2]["status"], "FILLED")
+            self.assertEqual(sim["decisions"][2]["cash"], "149.89995")
+            self.assertEqual(sim["decisions"][4]["decision"], "REDUCE")
+            self.assertEqual(sim["decisions"][4]["status"], "FILLED")
+            self.assertEqual(sim["cash"], "199.8")
+            self.assertEqual(sim["position"], "0")
+            self.assertEqual(sim["new_outbound_requests"], 2)
+
+    def test_invalid_next_open_cost_cannot_start_financial_state(self):
+        with TemporaryDirectory() as tmp:
+            self._dataset(tmp)
+            state = Path(tmp) / "invalid-cost"
+            for amount in ("-1", "101", "nan", "untrusted"):
+                with self.subTest(amount=amount):
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--data-root", tmp, "--through-month", "2024-01",
+                                     "--state-dir", str(state), "--next-bar-open",
+                                     "--slippage-bps", amount])
+                    self.assertEqual(code, 2)
+                    self.assertFalse(state.exists())
 
     def test_tamper_and_missing_archive_rejected(self):
         with TemporaryDirectory() as tmp:

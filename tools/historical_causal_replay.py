@@ -109,7 +109,7 @@ def load_causal_archive(
 def closed_candle_simulation_input(
     root: Path, *, symbol: str, interval: str, from_month: str,
     through_month: str, artifact_store: ArtifactStore,
-) -> tuple[list[datetime], list[str], str]:
+) -> tuple[list[datetime], list[str], list[str], str]:
     """Bridge the verified causal cut to the existing ZERO simulation input.
 
     This is an explicitly retrospective bar-close *scenario*, not evidence of
@@ -135,6 +135,7 @@ def closed_candle_simulation_input(
     if len(visible) != len(dataset.events):
         raise HistoricalArchiveError("historical source is not available at the simulated close")
     dates: list[datetime] = []
+    opens: list[str] = []
     prices: list[str] = []
     for index, candle in enumerate(visible):
         opened_at = candle.event_time - step
@@ -150,8 +151,10 @@ def closed_candle_simulation_input(
         ):
             raise HistoricalArchiveError("causal candle order/availability conflicts with replay")
         close = candle.payload.get("close")
-        if type(close) is not str:
-            raise HistoricalArchiveError("causal close must be exact decimal text")
+        opened = candle.payload.get("open")
+        if type(close) is not str or type(opened) is not str:
+            raise HistoricalArchiveError("causal open/close must be exact decimal text")
         dates.append(opened_at)
+        opens.append(opened)
         prices.append(close)
-    return dates, prices, dataset.dataset_sha256.removeprefix("sha256:")
+    return dates, opens, prices, dataset.dataset_sha256.removeprefix("sha256:")

@@ -637,6 +637,9 @@ _PROVIDER_FILL_BINDING_FIELDS = frozenset({
     "position_effect",
     "evidence_refs",
 })
+_PROVIDER_FILL_BINDING_FIELDS_WITH_PROVIDER_ENVIRONMENT = (
+    _PROVIDER_FILL_BINDING_FIELDS | {"provider_environment"}
+)
 
 
 def _projected_fill_from_binding_payload(

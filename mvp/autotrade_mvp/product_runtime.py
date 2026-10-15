@@ -32,6 +32,7 @@ from .security import SecurityBoundary
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
 from .simulation_status import SimulationStateChanging, inspect_canonical_simulation
 from .simulation_commands import _protocol
+from .diagnostic_export import runtime_diagnostic_export
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
 from .windows_host_session import persist_desktop_owner_session
 
@@ -143,6 +144,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         **kwargs,
     ):
         self.state_dir = state_dir
+        self._diagnostic_journal = journal
         self._pairing_code = pairing_code
         self._pairing_lock = Lock()
         if not callable(desktop_session_sink):
@@ -166,6 +168,28 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         super().__init__(journal, web_bundle=web_bundle(), **kwargs)
 
     def dispatch(self, *, method, target, headers, body=b''):
+        if target == '/api/v1/local-diagnostics':
+            if method != 'GET' or body:
+                return TransportResponse(405, 'application/json', b'{"error":"METHOD_NOT_ALLOWED"}')
+            try:
+                normalized = _headers(headers)
+                if normalized.get('origin') not in (None, self._origin):
+                    raise PermissionError('diagnostic export requires same origin')
+                _principal, role = self._principal(normalized)
+                if role != 'OWNER':
+                    raise PermissionError('diagnostic export requires owner')
+                prepared = runtime_diagnostic_export(self._diagnostic_journal, Path(self.state_dir))
+                return TransportResponse(200, 'application/json; charset=utf-8', prepared.data,
+                    (('Content-Disposition', 'attachment; filename="' + prepared.filename + '"'),
+                     ('X-Content-Type-Options', 'nosniff'),
+                     ('Cache-Control', 'no-store'),
+                     ('X-AutoTrade-Diagnostic-SHA256', prepared.sha256)))
+            except PermissionError:
+                return TransportResponse(403, 'application/json', b'{"error":"AUTHENTICATION_OR_AUTHORIZATION_FAILED"}',
+                    (('Cache-Control', 'no-store'),))
+            except (OSError, TypeError, ValueError):
+                return TransportResponse(409, 'application/json', b'{"error":"DIAGNOSTIC_EVIDENCE_UNAVAILABLE"}',
+                    (('Cache-Control', 'no-store'),))
         if target == '/api/v1/session' and method == 'POST':
             try:
                 normalized = _headers(headers)

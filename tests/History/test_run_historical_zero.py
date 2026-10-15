@@ -199,18 +199,28 @@ class HistoricalZeroTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             self._dataset(tmp)
             from mvp.autotrade_mvp.pipeline import MovingAverageStrategy
+            from mvp.autotrade_mvp import product_agent
             original_decide = MovingAverageStrategy.decide
+            original_agent = product_agent.decide
             observed_cuts = []
+            agent_cuts = []
             def observe_strategy(self, prices, quantity):
                 observed_cuts.append(tuple(str(price) for price in prices))
                 return original_decide(self, prices, quantity)
+            def observe_agent(journal, protocol, **kwargs):
+                self.assertNotIn("prices", protocol)
+                self.assertEqual(len(protocol["signal_prices"]), kwargs["episode"])
+                agent_cuts.append(tuple(protocol["signal_prices"]))
+                return original_agent(journal, protocol, **kwargs)
             state = str(Path(tmp) / "next-open-200")
             base = ["--data-root", tmp, "--through-month", "2024-01",
                     "--virtual-cash", "200", "--state-dir", state,
                     "--run-id", "next-open", "--next-bar-open"]
             for stop in (2, 3):
                 output = StringIO()
-                with redirect_stdout(output), patch.object(MovingAverageStrategy, "decide", observe_strategy):
+                with redirect_stdout(output), \
+                     patch.object(MovingAverageStrategy, "decide", observe_strategy), \
+                     patch.object(product_agent, "decide", observe_agent):
                     code = main([*base, "--stop-after-episodes", str(stop)])
                 self.assertEqual(code, 0, output.getvalue())
                 result = json.loads(output.getvalue())
@@ -222,7 +232,8 @@ class HistoricalZeroTests(unittest.TestCase):
                 self.assertEqual(result["simulation"]["resumed"], stop == 3)
             self.assertEqual(observed_cuts, [("101",), ("101", "101"),
                                              ("101", "101", "101")])
-            from mvp.autotrade_mvp.persistence import JournalStore
+            self.assertEqual(agent_cuts, observed_cuts)
+            from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
             store = JournalStore(Path(state) / "journal.sqlite3")
             events = store.load_events("canonical_autonomous_simulation",
                                        result["simulation"]["run_id"])
@@ -232,6 +243,15 @@ class HistoricalZeroTests(unittest.TestCase):
             self.assertEqual(protocol["signal_prices"][0], "101")
             self.assertEqual(protocol["prices"][0], "100")
             self.assertEqual(protocol["adverse_slippage_bps"], "10")
+            research = store.load_events("provider_free_research", protocol["run_id"])
+            self.assertEqual(len(research), 3)
+            for episode, event in enumerate(research, 1):
+                payload = event["payload"]
+                self.assertEqual(payload["through_episode"], episode)
+                self.assertEqual(payload["data_origin"], "HISTORICAL_BAR_CLOSE_SCENARIO")
+                self.assertEqual(len(payload["proposals"]), episode)
+                self.assertEqual(payload["dataset_digest"],
+                                 payload_digest(protocol["signal_prices"][:episode]))
             from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
             changed_signals = list(protocol["signal_prices"])
             changed_signals[0] = "102"

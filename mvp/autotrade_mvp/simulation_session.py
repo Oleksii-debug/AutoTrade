@@ -3094,9 +3094,20 @@ def _run_autonomous_locked(
         # frozen strategy, but it never selects allocation, risk, reservation,
         # or dispatch authority.
         from .product_agent import decide as decide_zero_agent
+        agent_protocol = protocol
+        if "signal_prices" in protocol:
+            # Cross the specialist boundary with a genuinely bounded snapshot.
+            # Neither the next execution open nor later closed bars are present
+            # in the object the agent or its research diagnostic receives.
+            agent_protocol = {
+                k: v for k, v in protocol.items()
+                if k not in {"prices", "signal_prices"}
+            }
+            agent_protocol["source_protocol_digest"] = protocol_digest
+            agent_protocol["signal_prices"] = protocol["signal_prices"][:episode]
         agent_side = decide_zero_agent(
             store,
-            protocol,
+            agent_protocol,
             episode=episode,
             strategy_side=proposal.side,
             position=position,

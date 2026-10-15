@@ -34,7 +34,7 @@ def _events(store: JournalStore) -> list[dict]:
             rows = connection.execute(
                 "SELECT " + _EVENT_COLUMNS + " FROM events ORDER BY journal_sequence"
             ).fetchall()
-            events = [store._decode_event_row(row) for row in rows]
+            events = [redact_diagnostic_value(store._decode_event_row(row)) for row in rows]
             connection.commit()
         except Exception:
             connection.rollback()
@@ -64,7 +64,7 @@ def _artifact(path: Path):
 def _prepare(payload: dict, filename: str) -> PreparedExport:
     return prepare_json_export(
         export_id=str(uuid4()), filename=filename,
-        payload=redact_diagnostic_value(payload),
+        payload=payload,
         rights={"export": True, "rights_id": "local-owner-diagnostic"},
         source_refs=("durable-journal",),
     )

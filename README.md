@@ -55,7 +55,7 @@ To inspect successive model versions and results, use a bounded monthly walk-for
 PYTHONPATH=research:. python -m tools.run_historical_walkforward --data-root historical-data --workspace local-state/walkforward-btc --symbol BTCUSDT --train-from 2024-01 --first-holdout 2024-03 --last-holdout 2024-04 --max-cycles 2
 ```
 
-The JSON lists the $200 and $1000 balances, risk and benchmark for each monthly cut, with the model and validation hashes. This finite retrospective research loop does not run in the background or promote a strategy to provider trading. The original publication time of archived data is not established, so it is not a point-in-time live trading or profitability claim.
+Add `--text` for a screen-reader friendly line after every completed monthly cut, including model version, matured training labels, both virtual accounts, marked P&L and drawdown. The default JSON retains the model and validation hashes. The internal Windows candidate now stages these exact-source command modules alongside the shared simulation engine; from its extracted `payload/product` directory, the embedded interpreter is `../runtime/python/python.exe`. Provide absolute local paths for `--data-root` and `--workspace`; downloaded data and mutable account state stay outside the packaged product. This finite retrospective research loop does not run in the background or promote a strategy to provider trading. The original publication time of archived data is not established, so it is not a point-in-time live trading or profitability claim.
 
 
 

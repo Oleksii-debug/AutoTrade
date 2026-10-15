@@ -109,6 +109,8 @@ def campaign(*, data_root: Path, workspace: Path, symbol: str,
                     "validation": [validate_from, validate_through],
                     "holdout": [holdout_from, holdout_through]},
         "model_sha256": model["model_sha256"],
+        "selected_strategy_parameters": model["strategy_parameters"],
+        "matured_training_labels": model["matured_labels"],
         "validation_report_sha256": validation["report_sha256"],
         "accounts": accounts,
     }

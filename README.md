@@ -39,6 +39,14 @@ python -m tools.run_historical_zero --data-root historical-data --symbol BTCUSDT
 
 These are developer commands, not a ready Windows installer. A completed month can be processed in bounded pieces with `--stop-after-episodes N`; repeat with a larger N and the same state/run/model/validation to resume. The training command does not create orders. It updates candidate weights only when the following candle has closed; the selected parameters are frozen during validation and independent holdout. Validation records directional accuracy, not trading P&L; its hash is bound into the holdout protocol, and a changed, corrupted, mismatched or overlapping report is rejected before creating financial state. Changing the training or validation period, model, costs, or code identity in an existing state fails closed. The next-open run assumes the prior candle was available at its close, adds a fixed adverse 10 basis point scenario plus the existing 10 basis point provider fee, and has no observed order-book liquidity. The JSON `comparative_report` shows the completed prefix's canonical agent equity/P&L/drawdown alongside cash and hypothetical full-cash buy-and-hold liquidation with these fixed costs. Negative P&L remains a valid result. The model and historical dataset are not a production promotion artifact; Windows packaging, full independent holdout qualification, long-lived online learning and human NVDA verification remain open.
 
+For a single restartable research command that executes the same three cuts and **both separate virtual accounts** through the existing engine, run:
+
+```console
+python -m tools.run_historical_campaign --data-root historical-data --workspace local-state/campaign-btc --symbol BTCUSDT --train-from 2024-01 --train-through 2024-01 --validate-from 2024-02 --validate-through 2024-02 --holdout-from 2024-03 --holdout-through 2024-03 --episode-limit 24
+```
+
+The command prints a short JSON account comparison and writes immutable model, validation and completed-prefix report files under `--workspace`. Repeat it with the same episode limit to verify recovery, then raise `--episode-limit` or omit it to continue through the complete period. The $200 and $1000 accounts have separate journals. Training and validation must succeed before any account is opened; if one account fails, the command does not publish a combined report and an identical retry recovers the other account from its own journal. This is one finite, frozen-policy research cut, **not** continuous online learning, a Windows user interface or an economically qualified strategy.
+
 
 
 Universal autonomous multi-agent financial trading platform.

@@ -19,11 +19,10 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-2025]
     runs-on: ${{ matrix.os }}
-    # The retained 120-episode unattended/recovery scenario was still making
-    # forward progress when an exact-head Ubuntu Verify run hit its 20-minute
-    # timeout. Keep a finite boundary with enough headroom on both runners so
-    # core verification can emit exact-head evidence without removing tests.
-    timeout-minutes: 45
+    # Exact-head Verify runs on both runners hit the finite 45-minute boundary
+    # while the retained 120-episode unattended/recovery test was still running.
+    # Preserve every test and use a larger finite window for full core evidence.
+    timeout-minutes: 90
     env:
       AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}

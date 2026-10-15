@@ -604,6 +604,10 @@ class DurableModelCallOrchestrator:
             raise ModelCallError(
                 "durable model budget journal authority is invalid"
             ) from error
+        if _model_journal_class_authority_changes(restore=False):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
         self.budget = budget
         self.journal = budget.journal
         self.clock = clock
@@ -1680,7 +1684,7 @@ class DurableModelCallOrchestrator:
         *,
         resolver: ObservationEvidenceResolver,
     ) -> ModelObservationEvidence:
-        expected = self._observation_digest(observation, binding)
+        expected_observation_digest = self._observation_digest(observation, binding)
         # The authenticator may inspect evidence inputs, but it must not be able
         # to mutate the authoritative observation/binding graph retained by this
         # attempt. Deep-copy JSON output and reseal all scalar dataclass fields.
@@ -1768,8 +1772,9 @@ class DurableModelCallOrchestrator:
             )
         if evidence.attempt_id != binding.attempt_id:
             raise ModelCallError("observation evidence attempt identity mismatch")
-        if (evidence.observation_digest != expected
-                or self._observation_digest(observation, binding) != expected):
+        if (evidence.observation_digest != expected_observation_digest
+                or self._observation_digest(observation, binding)
+                != expected_observation_digest):
             raise ModelCallError(
                 "observation evidence does not bind exact usage/response fields"
             )
@@ -2950,9 +2955,11 @@ class DurableModelCallOrchestrator:
         if type(observed_only) is not bool:
             raise TypeError("observed_only must be boolean")
 
-        expected: Decimal | None = None
+        expected_billing_amount: Decimal | None = None
         if expected_billed is not None:
-            expected = _exact_decimal(expected_billed, name="expected_billed")
+            expected_billing_amount = _exact_decimal(
+                expected_billed, name="expected_billed"
+            )
 
         events = self._events(attempt)
         terminal = next(
@@ -3160,7 +3167,8 @@ class DurableModelCallOrchestrator:
             raise ModelCallError(
                 f"billing evidence scope does not match the {scope_name}"
             )
-        if expected is not None and evidence.billed != expected:
+        if (expected_billing_amount is not None
+                and evidence.billed != expected_billing_amount):
             raise ModelCallError(
                 "billing evidence amount does not match caller expectation"
             )

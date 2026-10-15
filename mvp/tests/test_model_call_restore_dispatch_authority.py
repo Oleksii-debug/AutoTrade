@@ -34,7 +34,7 @@ def _open_budget(directory):
         budget_id="restore-dispatch-budget",
         ceiling="5",
         environment="PAPER",
-        clock=lambda: NOW_TEXT,
+        clock=lambda: NOW.isoformat(),
     )
     return journal, budget
 
@@ -370,10 +370,7 @@ class ModelCallRestoreDispatchAuthorityTests(unittest.TestCase):
             self.assertEqual(forged_calls, [])
             self.assertIs(model_call_module._utc_text, original_utc_text)
             self.assertEqual(inference_calls, [])
-            self.assertEqual(
-                budget.active_reservation(attempt_id),
-                Decimal("1.2"),
-            )
+            self.assertIsNone(budget.active_reservation(attempt_id))
             self.assertEqual(orchestrator._events(attempt_id), [])
 
 

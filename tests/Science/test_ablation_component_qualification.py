@@ -10,8 +10,14 @@ from fractions import Fraction
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import sys
 import unittest
 from uuid import NAMESPACE_URL, uuid5
+
+# The standalone science workflow runs this suite without installing the
+# research distribution. Resolve the checked-out source, as tools/verify.py
+# already does for the whole repository, rather than a host-installed copy.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research"))
 
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,

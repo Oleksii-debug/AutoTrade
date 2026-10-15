@@ -104,7 +104,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             dotnet_restore_tokens_are_locked(
                 dotnet_restore_command_tokens(
                     'run: dotnet restore src/App/App.csproj '
-                    '-p:Other=x;RestoreLockedMode=true'
+                    '-p:Other=x,RestoreLockedMode=true'
                 )
             )
         )
@@ -140,7 +140,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             dotnet_restore_tokens_are_locked(
                 dotnet_restore_command_tokens(
                     "run: dotnet restore src/App/App.csproj "
-                    "-p:RestoreLockedMode=true;"
+                    "-p:RestoreLockedMode=true,"
                     "NuGetLockFilePath=artifacts/other.lock.json"
                 )
             )
@@ -159,7 +159,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             dotnet_restore_tokens_are_locked(
                 dotnet_restore_command_tokens(
                     "run: dotnet restore src/App/App.csproj "
-                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=true"
+                    "-p:RestoreLockedMode=true,RestoreForceEvaluate=true"
                 )
             )
         )
@@ -167,7 +167,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             dotnet_restore_tokens_are_locked(
                 dotnet_restore_command_tokens(
                     "run: dotnet restore src/App/App.csproj "
-                    "-p:RestoreLockedMode=true;RestoreForceEvaluate=false"
+                    "-p:RestoreLockedMode=true,RestoreForceEvaluate=false"
                 )
             )
         )
@@ -362,7 +362,6 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         for command in (
             "run: dotnet restore ../App/App.csproj --locked-mode",
             "run: dotnet restore /tmp/App.csproj --locked-mode",
-            "run: dotnet restore src\\App\\App.csproj --locked-mode",
             "run: dotnet restore src/App/App.sln --locked-mode",
             "run: dotnet restore --locked-mode",
         ):
@@ -372,6 +371,10 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                         dotnet_restore_command_tokens(command)
                     )
                 )
+        with self.assertRaisesRegex(ValueError, "canonical POSIX paths"):
+            dotnet_restore_command_tokens(
+                "run: dotnet restore src\\App\\App.csproj --locked-mode"
+            )
 
     def test_restore_project_coverage_requires_first_positional_target(self):
         canonical = dotnet_restore_command_tokens(
@@ -712,7 +715,10 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 }
             }
             (project.parent / 'packages.lock.json').write_text(json.dumps(payload), encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'invalid NuGet content hash'):
+            with self.assertRaisesRegex(
+                ValueError,
+                'DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID',
+            ):
                 dotnet_locked_dependency_graph(root, [project])
 
     def test_missing_package_version_fails_closed(self):

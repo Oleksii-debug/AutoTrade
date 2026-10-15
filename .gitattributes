@@ -3,3 +3,5 @@ provenance/** text eol=lf
 requirements-dev.txt text eol=lf
 global.json text eol=lf
 research/pyproject.toml text eol=lf
+# Exact-source qualification reads these runtime bytes and Git blob bytes verbatim.
+qualification/zero_model/qualify.py text eol=lf

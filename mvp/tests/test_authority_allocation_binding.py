@@ -533,10 +533,18 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
             )
             result, resolved = _allocation_bundle(reservations)
             canonical = _snapshot(result, resolved)
-            hostile = AllocationSnapshotSubclass(**{
+            hostile_fields = {
                 field: getattr(canonical, field)
                 for field in canonical.__dataclass_fields__
-            })
+            }
+            # Keep every nested field canonical so the resolver, rather than
+            # AllocationAuthoritySnapshot.__post_init__, exercises the
+            # top-level exact-type rejection under test.
+            hostile_fields["resolved_evidence"] = dict(canonical.resolved_evidence)
+            hostile_fields["instrument_versions"] = dict(canonical.instrument_versions)
+            hostile_fields["financial_instruments"] = dict(canonical.financial_instruments)
+            hostile_fields["capability_snapshot_ids"] = dict(canonical.capability_snapshot_ids)
+            hostile = AllocationSnapshotSubclass(**hostile_fields)
             authority = AuthorityService(
                 store,
                 allocation_authority_resolver=lambda _result: hostile,

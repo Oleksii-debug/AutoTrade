@@ -2006,6 +2006,9 @@ function renderOperation(operation) {
     if (state.pendingCommand === payload) {
       state.pendingCommand = null;
       state.pendingCommandHostId = null;
+      if (state.snapshotReady && state.sessionIdentity !== null) {
+        syncHostActionOptions(state.sessionIdentity.role);
+      }
     }
   }
 

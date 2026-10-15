@@ -548,11 +548,11 @@ def _provider_fill_transaction_is_bound(
     """Resolve provider-fill ownership from durable financial-binding events."""
 
     target = _impl._text(transaction_id, name="reversed transaction_id")
-    store, store_identity = _impl._require_exact_financial_book(
-        economic_book,
-        _impl.DurableProviderEconomicBook,
-        name="economic_book",
+    authority = _impl._require_durable_provider_economic_book_authority(
+        economic_book
     )
+    store = authority.store
+    store_identity = authority.store_identity
     with journal_store_authority_scope(store, store_identity):
         events = JournalStore.load_events_by_aggregate_type(
             store,

@@ -153,8 +153,21 @@ class HistoricalZeroTests(unittest.TestCase):
             # never the last/future candles; canonical engine handles fills.
             self.assertEqual(kw["instrument_profile"],"FRACTIONAL_SPOT_RESEARCH")
             self.assertEqual(kw["target_quantity"],"2.47524752")
+            self.assertEqual(kw["virtual_cash"],"1000")
             self.assertTrue(kw["run_id"].startswith("trial-"))
             self.assertEqual(len(kw["run_id"]),len("trial-")+16)
+
+            with patch("tools.run_historical_zero.run_autonomous_simulation", return_value={
+                "status": "SUCCEEDED", "environment": "SIMULATION", "mode": "ZERO",
+                "completed_episodes": 744,
+            }) as small_sim:
+                status = main(["--data-root", tmp, "--symbol", "BTCUSDT", "--interval", "1h",
+                               "--from-month", "2024-01", "--through-month", "2024-01",
+                               "--state-dir", str(Path(tmp) / "small-state"),
+                               "--run-id", "small", "--virtual-cash", "200"])
+            self.assertEqual(status, 0)
+            self.assertEqual(small_sim.call_args.kwargs["virtual_cash"], "200")
+            self.assertEqual(small_sim.call_args.kwargs["target_quantity"], "0.49504950")
 
     def test_tamper_and_missing_archive_rejected(self):
         with TemporaryDirectory() as tmp:

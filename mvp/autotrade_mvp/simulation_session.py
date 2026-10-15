@@ -2015,6 +2015,7 @@ def run_autonomous_simulation(
     fault_at_episode: int | None = None, emergency_at_episode: int | None = None,
     execution_profile: str = "IMMEDIATE",
     target_quantity: str = "1",
+    virtual_cash: str | None = None,
     should_pause=None,
     observation_interval_seconds: int = 1,
     instrument_profile: str = "GENERIC",
@@ -2039,6 +2040,9 @@ def run_autonomous_simulation(
         raise ValueError("price stream must contain 1 to 10000 observations")
     values = _prices(prices)
     timestamp = _now(now)
+    if virtual_cash is not None and (type(virtual_cash) is not str or virtual_cash not in {"200", "1000"}):
+        raise ValueError("virtual_cash must be exactly 200 or 1000 USD")
+    initial_cash = INITIAL_CASH if virtual_cash is None else parse_bounded_exact_decimal(virtual_cash)
     if type(observation_interval_seconds) is not int or not 1 <= observation_interval_seconds <= 86400:
         raise ValueError("observation_interval_seconds must be a positive bounded exact int")
     if type(instrument_profile) is not str or instrument_profile not in {"GENERIC", "FRACTIONAL_SPOT_RESEARCH"}:
@@ -2080,7 +2084,7 @@ def run_autonomous_simulation(
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
         "strategy": "moving-average-2-3-long-only-target-" + canonical_decimal_text(target),
-        "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(INITIAL_CASH),
+        "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(initial_cash),
         "settlement_policy": {
             "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
             "rule_version": _SIMULATION_SETTLEMENT_RULE_VERSION,
@@ -2830,7 +2834,7 @@ def _run_autonomous_locked(
     if not events:
         if store.current_journal_sequence() != 0:
             raise ValueError("autonomous simulation requires an empty or matching owned journal")
-        provider = SimulatedProvider(account_id=ACCOUNT, initial_cash=str(INITIAL_CASH), fee_rate=str(FEE_RATE))
+        provider = SimulatedProvider(account_id=ACCOUNT, initial_cash=protocol["initial_cash"], fee_rate=str(FEE_RATE))
         _loop_event(store, run_id, "AutonomousSimulationStarted", "start", {
             "protocol_digest": protocol_digest, "protocol": protocol,
             "provider_state": provider.export_state(),
@@ -3056,7 +3060,8 @@ def _run_autonomous_locked(
         available_cash = settlements.project(economic).available_to_spend("USD")
         price = mark.mark
         equity = exact_add(cash, exact_multiply(position, price))
-        peak = max([INITIAL_CASH, equity, *previous_equities])
+        initial_cash = parse_bounded_exact_decimal(protocol["initial_cash"])
+        peak = max([initial_cash, equity, *previous_equities])
         drawdown = round_fraction_to_quantum(as_fraction(exact_subtract(peak, equity)) / as_fraction(peak),
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
@@ -3118,7 +3123,7 @@ def _run_autonomous_locked(
             resource = "CASH:USD"
             context = RiskContext.create(state_version=episode, equity=equity,
                 positions={INSTRUMENT: position}, marks={INSTRUMENT: price}, reserved_position_delta={},
-                daily_pnl=exact_subtract(equity, INITIAL_CASH), drawdown_fraction=drawdown,
+                daily_pnl=exact_subtract(equity, initial_cash), drawdown_fraction=drawdown,
                 market_data_age_seconds="0", fx_age_seconds={"USD": "0"}, margin_headroom="1",
                 capability_allowed=True, borrow_available=True, stress_scenarios=({INSTRUMENT: "-0.25"},),
                 instrument_types={INSTRUMENT: "EQUITY"})

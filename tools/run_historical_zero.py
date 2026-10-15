@@ -275,6 +275,7 @@ def main(argv=None) -> int:
     parser.add_argument("--through-month", required=True)
     parser.add_argument("--state-dir", default="historical-zero-state")
     parser.add_argument("--run-id", default="research-2024")
+    parser.add_argument("--virtual-cash", choices=("200", "1000"), default="1000")
     parser.add_argument("--stop-after-episodes", type=int)
     args = parser.parse_args(argv)
     try:
@@ -299,7 +300,8 @@ def main(argv=None) -> int:
         # bars, result labels or hindsight portfolio figures are consulted.
         # Existing canonical ZERO risk/OMS/accounting still own every fill.
         first_closed_price = Decimal(prices[0])
-        research_target = (Decimal("250") / first_closed_price).quantize(
+        research_notional = Decimal(args.virtual_cash) * Decimal("0.25")
+        research_target = (research_notional / first_closed_price).quantize(
             Decimal("0.00000001"), rounding=ROUND_DOWN
         )
         if research_target <= 0:
@@ -311,6 +313,7 @@ def main(argv=None) -> int:
             stop_after_episodes=args.stop_after_episodes,
             instrument_profile="FRACTIONAL_SPOT_RESEARCH",
             target_quantity=format(research_target, "f"),
+            virtual_cash=args.virtual_cash,
         )
         print(json.dumps({
             "label": "INTERNAL_CANDLE_CLOSE_SAME_PRICE_EXPERIMENT_NOT_PERFORMANCE_EVIDENCE",
@@ -321,12 +324,16 @@ def main(argv=None) -> int:
             "observation_count": len(prices),
             "dataset_identity_sha256": digest,
             "frozen_fractional_spot_target_quantity": format(research_target, "f"),
-            "target_sizing_basis": "USD 250 / first completed candle close, rounded down to 0.00000001; remaining virtual cash stays unspent",
+            "target_sizing_basis": (
+                f"USD {research_notional} (25% of selected virtual cash) / first completed "
+                "candle close, rounded down to 0.00000001; remaining virtual cash stays unspent"
+            ),
+            "virtual_cash_usd": args.virtual_cash,
             "important_limitations": [
                 "Existing agent is currently a frozen moving-average strategy; this run does not prove learning.",
                 "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage.",
                 "OHLCV has no order-book or tick-level execution truth.",
-                "Virtual 1000 USD, zero network orders. Do not infer profitability from these fills.",
+                f"Virtual {args.virtual_cash} USD, zero network orders. Do not infer profitability from these fills.",
             ],
             "simulation": result,
         }, indent=2))

@@ -4,9 +4,11 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 from mvp.autotrade_mvp.adaptive_ma import (
@@ -14,12 +16,27 @@ from mvp.autotrade_mvp.adaptive_ma import (
 )
 from tools.historical_public_klines import collect_month
 from tools.run_historical_zero import main as run_holdout
-from tools.train_historical_agent import main as train, read_model
+from tools.train_historical_agent import main as train, read_model, save_model
 from tools.validate_historical_agent import main as validate
 from tests.History.test_run_historical_zero import full_month_fixture
 
 
 class CausalTrainingTests(unittest.TestCase):
+    def test_competing_model_publication_cannot_replace_first_version(self):
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "models" / "candidate.json"
+            original_link = os.link
+
+            def competing_writer(source, destination):
+                target.write_text('{"winner":true}\n', encoding="utf-8")
+                return original_link(source, destination)
+
+            with patch("tools.train_historical_agent.os.link", side_effect=competing_writer):
+                with self.assertRaisesRegex(ValueError, "existing model differs"):
+                    save_model(target, {"winner": False})
+            self.assertEqual(json.loads(target.read_text()), {"winner": True})
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
     def test_label_matures_after_prediction_and_weights_change(self):
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         prices = ["100", "100", "102", "102", "100", "100", "102", "102",

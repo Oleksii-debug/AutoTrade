@@ -44,7 +44,14 @@ def save_model(path: Path, model: dict) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        # Publish only if this versioned name is still free.  os.replace would
+        # overwrite another process's completed model after both observed an
+        # absent path, silently changing the model used by a resumed campaign.
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != data:
+                raise ValueError("existing model differs; choose a new versioned output path")
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -49,6 +49,14 @@ The command prints a short JSON account comparison and writes immutable model, v
 
 The per-account `comparative_report` also contains a reconciled hourly equity curve, sample hourly return volatility, an unannualized zero-cash-rate Sharpe calculation when variance is nonzero, and a **mark-based position-turnover proxy**. These statistics read completed simulated episodes only. They are not exchange execution measurements or proof of an advantage; very short prefixes are particularly unstable.
 
+To inspect successive model versions and results, use a bounded monthly walk-forward cut after collecting all named months. This freezes each model for its next validation and holdout, then allows a later month to train on the previously closed period. Repeating the command resumes the same journals and immutable artifacts:
+
+```console
+PYTHONPATH=research:. python -m tools.run_historical_walkforward --data-root historical-data --workspace local-state/walkforward-btc --symbol BTCUSDT --train-from 2024-01 --first-holdout 2024-03 --last-holdout 2024-04 --max-cycles 2
+```
+
+The JSON lists the $200 and $1000 balances, risk and benchmark for each monthly cut, with the model and validation hashes. This finite retrospective research loop does not run in the background or promote a strategy to provider trading. The original publication time of archived data is not established, so it is not a point-in-time live trading or profitability claim.
+
 
 
 Universal autonomous multi-agent financial trading platform.

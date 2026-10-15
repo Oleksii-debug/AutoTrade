@@ -213,13 +213,12 @@ class ReservationAuthorityIngressIntegrationTests(unittest.TestCase):
                 )
                 connection.commit()
 
-            restarted = DurableReservationBook(
-                JournalStore(path),
-                environment="PAPER",
-                account_id="paper-account",
-            )
             with self.assertRaisesRegex(ReservationConflict, pattern):
-                restarted.get("r1")
+                DurableReservationBook(
+                    JournalStore(path),
+                    environment="PAPER",
+                    account_id="paper-account",
+                )
 
     def test_replay_rejects_rehashed_cross_environment_scope(self):
         self._assert_rehashed_scope_tamper_rejected(

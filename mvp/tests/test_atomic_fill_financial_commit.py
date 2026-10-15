@@ -1269,7 +1269,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 event_key="equivalent-cut-event",
                 idempotency_key="equivalent-cut-idempotency",
                 reservation_id="reservation-1",
-                usage=plan.usage,
+                usage=dict(plan.usage),
                 committed_at="2026-09-25T09:00:02Z",
                 expected_snapshot_digest=plan.reservation_cut_digest,
             )
@@ -1326,7 +1326,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                     command_id="stale-plan-command",
                     idempotency_key="stale-plan-idempotency",
                     reservation_id="reservation-1",
-                    usage=plan.usage,
+                    usage=dict(plan.usage),
                     transactions=(plan.transaction,),
                     reservation_expected_snapshot_digest=plan.reservation_cut_digest,
                     committed_at="2026-09-25T09:00:02Z",

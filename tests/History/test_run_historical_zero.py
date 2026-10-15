@@ -163,9 +163,9 @@ class HistoricalZeroTests(unittest.TestCase):
             }) as small_sim:
                 status = main(["--data-root", tmp, "--symbol", "BTCUSDT", "--interval", "1h",
                                "--from-month", "2024-01", "--through-month", "2024-01",
-                               "--state-dir", str(Path(tmp) / "small-state"),
                                "--run-id", "small", "--virtual-cash", "200"])
             self.assertEqual(status, 0)
+            self.assertEqual(small_sim.call_args.args[1], "historical-zero-state-200")
             self.assertEqual(small_sim.call_args.kwargs["virtual_cash"], "200")
             self.assertEqual(small_sim.call_args.kwargs["target_quantity"], "0.49504950")
 

@@ -273,7 +273,8 @@ def main(argv=None) -> int:
     parser.add_argument("--interval", choices=tuple(INTERVAL_SECONDS), default="1h")
     parser.add_argument("--from-month", default="2024-01")
     parser.add_argument("--through-month", required=True)
-    parser.add_argument("--state-dir", default="historical-zero-state")
+    parser.add_argument("--state-dir", default=None,
+                        help="separate durable directory per virtual account; defaults are budget-isolated")
     parser.add_argument("--run-id", default="research-2024")
     parser.add_argument("--virtual-cash", choices=("200", "1000"), default="1000")
     parser.add_argument("--stop-after-episodes", type=int)
@@ -306,8 +307,12 @@ def main(argv=None) -> int:
         )
         if research_target <= 0:
             raise HistoricalArchiveError("first closed price exceeds bounded fractional research quantity")
+        state_dir = args.state_dir or (
+            "historical-zero-state" if args.virtual_cash == "1000"
+            else "historical-zero-state-200"
+        )
         result = run_autonomous_simulation(
-            prices, args.state_dir, run_id=args.run_id + "-" + digest[:16],
+            prices, state_dir, run_id=args.run_id + "-" + digest[:16],
             now=first_close.isoformat().replace("+00:00", "Z"),
             observation_interval_seconds=INTERVAL_SECONDS[args.interval],
             stop_after_episodes=args.stop_after_episodes,

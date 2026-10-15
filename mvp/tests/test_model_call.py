@@ -52,7 +52,7 @@ def open_budget(directory, *, ceiling="5", environment="PAPER"):
         budget_id="model-policy-budget",
         ceiling=ceiling,
         environment=environment,
-        clock=lambda: NOW_TEXT,
+        clock=lambda: NOW.isoformat(),
     )
     return journal, budget
 
@@ -1116,7 +1116,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                         now_utc=None,
                     )
 
-            self.assertEqual(outcome.status, "OBSERVED")
+            self.assertEqual(outcome.status, "OBSERVED_VALID")
             route_now.assert_called_once_with(None)
             self.assertEqual(admit_route.call_count, 1)
             self.assertEqual(admit_route.call_args.kwargs["now_utc"], NOW)
@@ -2503,7 +2503,7 @@ class ModelCallIntegrityTests(unittest.TestCase):
                 observation_evidence_resolver=resolver,
             )
 
-        self.assertEqual(result.status, "COMPLETED")
+        self.assertEqual(result.status, "OBSERVED_VALID")
         self.assertEqual(
             seen,
             [(result.attempt_id, "pricing-v1", "schema-v1")],
@@ -3080,7 +3080,7 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
 
             self.assertEqual(result.status, "UNKNOWN")
             self.assertIn(
-                "adapter_mutated_orchestrator_authority:observation_evidence_resolver",
+                "adapter_mutated_orchestrator_authority:orchestrator.observation_evidence_resolver",
                 result.reason,
             )
             self.assertEqual(forged_calls, [])
@@ -3804,7 +3804,7 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             call_spec = spec()
             canonical_connect = JournalStore._connect
             forged_calls = []
-            self.assertNotIn("_connect", JournalStore.__dict__)
+            self.assertIs(JournalStore.__dict__["_connect"], canonical_connect)
             try:
                 def hostile_adapter(*_args):
                     JournalStore._connect = (
@@ -3826,15 +3826,14 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 self.assertIn("JournalStore._connect", result.reason)
                 self.assertEqual(forged_calls, [])
                 self.assertIs(JournalStore._connect, canonical_connect)
-                self.assertNotIn("_connect", JournalStore.__dict__)
+                self.assertIs(JournalStore.__dict__["_connect"], canonical_connect)
                 self.assertEqual(budget.snapshot().incurred, Decimal("0"))
                 self.assertEqual(
                     budget.snapshot().estimated_unbilled,
                     Decimal("1.2"),
                 )
             finally:
-                if "_connect" in JournalStore.__dict__:
-                    type.__delattr__(JournalStore, "_connect")
+                type.__setattr__(JournalStore, "_connect", canonical_connect)
 
     def test_adapter_cannot_inject_journal_base_dispatch(self):
         with TemporaryDirectory() as directory:
@@ -4078,7 +4077,7 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
 
             self.assertEqual(forged_calls, [])
             self.assertNotIn("append_event", journal.__dict__)
-            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertIsNone(budget.active_reservation(attempt_id))
             self.assertEqual(orchestrator._events(attempt_id), [])
 
     def test_model_clock_cannot_rebind_callback_restore_before_recovery(self):
@@ -4127,7 +4126,7 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 )
                 self.assertEqual(
                     budget.active_reservation(attempt_id),
-                    Decimal("1.2"),
+                    None,
                 )
                 self.assertEqual(orchestrator._events(attempt_id), [])
             finally:

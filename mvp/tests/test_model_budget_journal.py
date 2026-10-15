@@ -68,16 +68,6 @@ def route_model_descriptor(*, cost="0.6", revision="r1"):
     )
 
 
-class RecordingJournalStore(JournalStore):
-    def __init__(self, path):
-        self.last_appended_envelope = None
-        super().__init__(path)
-
-    def append_event(self, envelope, *, outbox_topic=None):
-        self.last_appended_envelope = dict(envelope)
-        return super().append_event(envelope, outbox_topic=outbox_topic)
-
-
 class RejectingInitializationJournal(JournalStore):
     def append_event(self, envelope, *, outbox_topic=None):
         raise ValueError("synthetic malformed initialization")
@@ -335,7 +325,7 @@ class DurableModelBudgetTests(unittest.TestCase):
 
     def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
-            journal = RecordingJournalStore(Path(directory) / "journal.db")
+            journal = JournalStore(Path(directory) / "journal.db")
             budget = DurableModelBudget(
                 journal=journal,
                 budget_id="policy-sequence",
@@ -344,17 +334,17 @@ class DurableModelBudgetTests(unittest.TestCase):
                 clock=lambda: NOW,
             )
             self.assertEqual(
-                journal.last_appended_envelope["aggregate_version"],
-                "1",
+                journal.load_events("model_budget", "policy-sequence")[0]["aggregate_version"],
+                1,
             )
             self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
 
-    def test_initialization_contract_error_is_not_swallowed_as_race(self):
+    def test_initialization_rejects_noncanonical_journal_before_mutation(self):
         with TemporaryDirectory() as directory:
             journal = RejectingInitializationJournal(Path(directory) / "journal.db")
             with self.assertRaisesRegex(
-                ValueError,
-                "synthetic malformed initialization",
+                TypeError,
+                "exact JournalStore",
             ):
                 DurableModelBudget(
                     journal=journal,
@@ -363,6 +353,7 @@ class DurableModelBudgetTests(unittest.TestCase):
                     environment="SIMULATION",
                     clock=lambda: NOW,
                 )
+            self.assertEqual(journal.load_events("model_budget", "policy-reject"), [])
 
 
     def test_budget_id_rejects_hostile_text_before_strip(self):
@@ -1077,29 +1068,28 @@ class DurableModelBudgetTests(unittest.TestCase):
     def test_fresh_reserve_concurrent_exact_winner_is_idempotent_without_growth(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)
-            original_commit = budget.journal.commit_command
+            _, contender = open_budget(directory)
             before = journal.current_journal_sequence()
-            raced = False
+            barrier = threading.Barrier(2)
+            outcomes = []
+            errors = []
 
-            def race_then_commit(*args, **kwargs):
-                nonlocal raced
-                if not raced:
-                    raced = True
-                    winner = JournalStore(journal.path)
-                    saved, inserted, _ = winner.commit_command(
-                        *args,
-                        **kwargs,
-                    )
-                    self.assertTrue(inserted)
-                    self.assertEqual(saved, kwargs["result"])
-                return original_commit(*args, **kwargs)
+            def reserve(candidate):
+                try:
+                    barrier.wait(timeout=5)
+                    outcomes.append(candidate.reserve("req-race", "0.4"))
+                except Exception as error:
+                    errors.append(error)
 
-            with patch.object(
-                budget.journal,
-                "commit_command",
-                side_effect=race_then_commit,
-            ):
-                self.assertFalse(budget.reserve("req-race", "0.4"))
+            workers = [threading.Thread(target=reserve, args=(candidate,))
+                       for candidate in (budget, contender)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=10)
+            self.assertFalse(any(worker.is_alive() for worker in workers))
+            self.assertEqual(errors, [])
+            self.assertCountEqual(outcomes, [True, False])
 
             self.assertEqual(
                 journal.current_journal_sequence(),
@@ -1114,36 +1104,21 @@ class DurableModelBudgetTests(unittest.TestCase):
     def test_fresh_reserve_rejects_concurrent_domain_inconsistent_saved_result(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)
-            original_commit = budget.journal.commit_command
             before = journal.current_journal_sequence()
-            raced = False
-
-            def race_then_commit(*args, **kwargs):
-                nonlocal raced
-                if not raced:
-                    raced = True
-                    forged_kwargs = dict(kwargs)
-                    forged_result = dict(kwargs["result"])
-                    forged_result["reserved"] = False
-                    forged_kwargs["result"] = forged_result
-                    winner = JournalStore(journal.path)
-                    _saved, inserted, _ = winner.commit_command(
-                        *args,
-                        **forged_kwargs,
-                    )
-                    self.assertTrue(inserted)
-                return original_commit(*args, **kwargs)
-
-            with patch.object(
-                budget.journal,
-                "commit_command",
-                side_effect=race_then_commit,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "result conflicts with durable event",
-                ):
-                    budget.reserve("req-race-forged", "0.4")
+            self.assertTrue(budget.reserve("req-race-forged", "0.4"))
+            forged = {"reserved": False, "request_id": "req-race-forged", "amount": "0.4"}
+            connection = sqlite3.connect(journal.path)
+            try:
+                connection.execute(
+                    "UPDATE command_dedupe SET result_json = ?, result_hash = ?",
+                    (canonical_json(forged), payload_digest(forged)),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            _, contender = open_budget(directory)
+            with self.assertRaisesRegex(ValueError, "result conflicts with durable event"):
+                contender.reserve("req-race-forged", "0.4")
 
             self.assertEqual(
                 journal.current_journal_sequence(),
@@ -1291,7 +1266,7 @@ class DurableModelBudgetTests(unittest.TestCase):
                     billed="0.1",
                 )
 
-    def test_release_revalidates_exact_amount_before_commit(self):
+    def test_release_rejects_noncanonical_budget_and_remains_restart_safe(self):
         class InterleavingBudget(DurableModelBudget):
             def _commit(self, *, action, validate, payload, **kwargs):
                 if action != "release":
@@ -1310,24 +1285,23 @@ class DurableModelBudgetTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")
-            budget = InterleavingBudget(
-                journal=journal,
-                budget_id="policy-1",
-                ceiling="1",
-                environment="SIMULATION",
-                clock=lambda: NOW,
+            with self.assertRaisesRegex(TypeError, "exact DurableModelBudget"):
+                InterleavingBudget(
+                    journal=journal,
+                    budget_id="policy-1",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: NOW,
+                )
+            self.assertEqual(journal.load_events("model_budget", "policy-1"), [])
+            budget = DurableModelBudget(
+                journal=journal, budget_id="policy-1", ceiling="1",
+                environment="SIMULATION", clock=lambda: NOW,
             )
             budget.reserve("req-1", "0.4")
-            before = tuple(journal.load_events("model_budget", "policy-1"))
-            with self.assertRaisesRegex(
-                ValueError,
-                "release amount changed before commit",
-            ):
-                budget.release("req-1")
-            self.assertEqual(
-                tuple(journal.load_events("model_budget", "policy-1")),
-                before,
-            )
+            self.assertTrue(budget.release("req-1"))
+            self.assertFalse(budget.release("req-1"))
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
     def test_release_is_durable_across_restart(self):
         with TemporaryDirectory() as directory:

@@ -78,3 +78,15 @@ Detailed 0–47 mapping: LEGACY_48_TO_MULTIPLAN_COVERAGE.md.
 ## Canonical UI decision — 2026-10-08
 
 The canonical AutoTrade interface is the browser-like semantic Web UI (`web/src`) with page/section navigation, headings/landmarks, forms, tables, live status and keyboard/NVDA-first behavior. The Windows Desktop surface embeds this same Web artifact and adds only host integration/native emergency fallback; it must not fork a second navigation model.
+
+
+## Owner GitHub source-integration wave — 2026-10-17
+
+The owner requested evaluation and useful reuse of trading, multi-agent,
+learning, provider and infrastructure code. See the
+[60-repository inventory](control/external_reuse/catalog.json) and the
+[Plan 1/2/4/6/7/8/9/10 implementation work packages](docs/engineering/17_OWNER_GITHUB_REUSE_WORK_PLAN.md).
+This scope is subordinate to the existing financial/risk/release contracts.
+It does not mark any previously unfinished Plan 9/10 Section DONE.
+Three optional research bridges (CCXT/River/Optuna) are proposed on a separate
+branch but are not active in the final product or LIVE trading.

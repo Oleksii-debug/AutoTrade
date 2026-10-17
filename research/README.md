@@ -26,7 +26,7 @@ place orders, promote models or grant financial authority.**
 
 Opt-in installation in an isolated research environment:
 
-`python -m pip install -e 'research[opensource-shadow]'`
+`python -m pip install -e research && python -m pip install -r research/optional-open-source-requirements.txt`
 
 Isolated mock characterizations:
 

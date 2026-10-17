@@ -51,6 +51,22 @@ economic-edge result is asserted.
 2. Port candidate strategies only as proposal plugins with explicit scope,
    tick/lot economics, slippage, funding/settlement and risk checks.
 
+
+### Plan 3 — Runtime, observations and recovery
+
+1. Review Apache Arrow, DuckDB and OpenTelemetry dependencies as narrow
+   data/telemetry components; durable journal and financial host remain
+   the only authoritative sources of financial state.
+2. Isolate worker processes and budgets; record provider gaps, cancellation,
+   crashes and exact observations before replay or model update.
+
+### Plan 5 — Accessible UX and per-agent inspection
+
+1. Inspect Condor, Hummingbot Dashboard, OctoBot and TradingAgents UX
+   for explicit per-agent status, evidence, learning and cost visibility.
+2. Extend the existing semantic Web/Desktop only after keyboard/NVDA
+   scenarios are tested; no second UI application or hidden LLM execution.
+
 ### Plan 4 — Security / licensing / provenance
 
 1. For *each* candidate record exact upstream revision, source license text,

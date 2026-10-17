@@ -35,3 +35,10 @@ Isolated mock characterizations:
 Real upstream dependency execution, provider connectivity, Windows/Linux tests
 and Plan10 integration are **not yet qualified**. Read the
 [60-source registry](../control/external_reuse/catalog.json).
+
+Run a manual public-REST candle probe (requires separately installed CCXT):
+
+`python tools/probe_public_ohlcv.py --exchange binance --symbol BTC/USDT --timeframe 1h --limit 5`
+
+This prints JSON from public observations; it cannot read balances or place orders.
+No public endpoint reachability was independently qualified in this PR.

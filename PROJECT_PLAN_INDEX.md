@@ -1,5 +1,13 @@
 # AutoTrade — Canonical Multi-Plan Index
 
+## Current owner scope — 2026-10-18
+
+Read [WHITEBIT_EXECUTION_SCOPE.md](WHITEBIT_EXECUTION_SCOPE.md) before selecting new work. The owner confirmed creation of a private WhiteBIT key; its protected alias is `whitebit-primary`, while actual authenticated binding remains to be verified. Current new-provider work is **WhiteBIT-first**; do not spend on new other-exchange integrations. Existing multiexchange source is preserved, not deleted: [deferred scope](docs/deferred/MULTI_EXCHANGE_FUTURE.md).
+
+Select ready components by the **lowest remaining delivery cost**, including complete bounded replacements of unfinished custom modules when cheaper. Preserve one financial authority, verified migration/rollback, exact tests and keyboard/NVDA operation. A visual-only workflow is not acceptable. Do not install local model weights or conduct real-money diagnostics in this wave.
+
+[New source priorities](control/whitebit_focus/reuse_priorities.json), [15 worker ownership zones](control/whitebit_focus/workers.json), [all-plan implementation map](docs/engineering/22_WHITEBIT_REUSE_FIRST_PLAN_UK.md), and [local model research without weight installation](docs/engineering/23_LOCAL_FINANCIAL_MODELS_RESEARCH_UK.md) supplement the existing ten plans. These policy/source changes do not themselves mark the product or any unfinished Section DONE.
+
 ## Authority
 
 The former monolithic 48-Section execution plan is **SUPERSEDED FOR WORK SELECTION**.
@@ -56,11 +64,11 @@ For Plans 1–7:
 - plans may start and finish in any order;
 - existing PR/branch/source must be REUSE -> REPAIR -> CONVERGE before creating duplicate scope.
 
-Plan 6 is independent and ACTIONABLE offline without provider/account credentials. Use existing code, public specs and fixtures; real account/PAPER/LIVE activation is deferred to the optional Plan-9 provider track.
+Plan 6 is independent and ACTIONABLE offline without provider/account credentials. Use existing code, public specs and fixtures; real account/PAPER/LIVE activation is deferred to the optional Plan-9 provider track, subject to the newer WhiteBIT owner scope above.
 
 Plan 8 begins terminal M1 convergence only after Plans 1,2,3,4,5,7 have terminal outputs required for M1. Plan 6 is not an M1 dependency.
 
-Plan 9 uses per-Section dependencies. Provider Sections 2–6 are optional parked external activation and do not block a provider-free release. WAITING/PARKED Sections are skipped without false DONE; take the first ACTIONABLE Section whose named gates are satisfied.
+Plan 9 uses per-Section dependencies. Provider Sections 2–6 are optional parked external activation and do not block a provider-free release. WAITING/PARKED Sections are skipped without false DONE; take the first ACTIONABLE Section whose named gates are satisfied. The owner's new WhiteBIT key-creation confirmation makes protected read-binding work actionable when the credential is available; it does not authorize real orders or withdrawals.
 
 ## Migrated accepted work
 
@@ -90,3 +98,5 @@ This scope is subordinate to the existing financial/risk/release contracts.
 It does not mark any previously unfinished Plan 9/10 Section DONE.
 Three optional research bridges (CCXT/River/Optuna) are proposed on a separate
 branch but are not active in the final product or LIVE trading.
+The 2026-10-18 work-selection overlay above now parks foreign SDK/visual-only
+integration and adds specific WhiteBIT/learning/manual-UI donor priorities.

@@ -1,0 +1,24 @@
+{
+  "schema_version":"1.0",
+  "date":"2026-10-18",
+  "scope":"OPTIONAL_WHITEBIT_MAIN_BALANCE_READ_TRANSPORT",
+  "environment":{"os":"Linux","python":"3.13.5","httpx":"0.28.1"},
+  "command":"PYTHONPATH=research python -m unittest discover -s research/tests -p test_whitebit_private_readonly.py -v",
+  "test_count":12,
+  "passed":12,
+  "failed":0,
+  "skipped":0,
+  "real_upstream_hmac_implementation_used":true,
+  "network_transport":"httpx.MockTransport / local test transports",
+  "owner_credentials_used":false,
+  "live_network_verified":false,
+  "account_binding_verified":false,
+  "windows_verified":false,
+  "whole_repository_ci_pass":false,
+  "sha256":{
+    "research/autotrade_research/integrations/vendor/whitebit_hmac_transport.py":"9824e4fdb6edbec6be27dd12a2b57dae9a8850e4322d3b1b150aee69b83076e0",
+    "research/autotrade_research/integrations/whitebit_private_readonly.py":"d6b4930a72a4edf308ade0ab3d9b623571d5d7796a6bea7958f2d33255d25f28",
+    "research/tests/test_whitebit_private_readonly.py":"cfd3b6c5ebf8e91947043d1ee371ac261886ac75731e68b11cadfba89c1762b3"
+  },
+  "limitation":"Response bytes require canonical normalization/persistence; this optional reader is not yet wired into final Host or a verified owner account."
+}

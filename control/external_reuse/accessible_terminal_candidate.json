@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "as_of": "2026-10-17",
+  "repository": "churst90/accessible-trade-terminal",
+  "url": "https://github.com/churst90/accessible-trade-terminal",
+  "role": "DIRECT_COMPETITOR_AND_ACCESSIBILITY_RESEARCH_REFERENCE",
+  "license": "GPL-3.0",
+  "license_blob": "f288702d2fa16d3cdf0035b15a9fcbc552cd88e7",
+  "readme_blob": "3bd3575b94a6a5ec678cb2b1dc944486dca40675",
+  "source_copied": false,
+  "integration_status": "NOT_IMPORTED",
+  "independently_executed": false,
+  "nvda_tested_by_this_worker": false,
+  "author_claimed_data_sources": 33,
+  "author_claimed_trading_venues": 16,
+  "claims_are_not_our_qualification": true,
+  "useful_ideas": ["keyboard-first navigation", "spoken order review", "sonification", "configurable speech channels", "braille alternatives", "multi-provider capability UX"],
+  "commercial_note": "GPL permits sale with applicable obligations; proprietary redistribution is not automatically permitted. No competitor source copied.",
+  "parent_catalog": "control/external_reuse/catalog.json",
+  "counting_note": "Additional research candidate, not a 61st implemented integration; the original 60-entry inventory is unchanged."
+}

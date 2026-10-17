@@ -1,0 +1,6 @@
+[submodule "whitebit-sdk-source"]
+	path = third_party/optional/whitebit-python-sdk
+	url = https://github.com/whitebit-exchange/python-sdk.git
+[submodule "accessible-manual-source"]
+	path = third_party/optional/accessible-trade-terminal
+	url = https://github.com/churst90/accessible-trade-terminal.git

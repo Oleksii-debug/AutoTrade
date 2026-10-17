@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "directive_date": "2026-10-18",
+  "primary_provider": "WHITEBIT",
+  "primary_credential_alias": "whitebit-primary",
+  "credential_state": {
+    "owner_confirmed_created": true,
+    "owner_reports_ip_allowlist_required": false,
+    "key_material_in_repository": false,
+    "key_material_loaded_in_this_change": false,
+    "authenticated_account_binding_verified": false,
+    "status": "OWNER_CONFIRMED_CREATED_PENDING_AUTHENTICATED_READ"
+  },
+  "current_scope": {
+    "public_market_data": true,
+    "private_read_binding_when_vault_available": true,
+    "internal_simulation": true,
+    "autonomous_research_and_learning": true,
+    "accessible_manual_interface": true,
+    "new_foreign_exchange_integrations": false,
+    "delete_existing_multiexchange_code": false,
+    "install_local_model_weights": false
+  },
+  "financial_permission": {
+    "real_order_submission": false,
+    "transfer": false,
+    "withdrawal": false,
+    "borrow_or_leverage_expansion": false,
+    "future_diagnostic_test": "REQUIRES_NEW_EXPLICIT_AMOUNT_PAIR_ACCOUNT_LOSS_LIMIT_APPROVAL",
+    "zero_loss_guaranteed": false
+  },
+  "worker_policy": "WHITEBIT_EXECUTION_SCOPE.md",
+  "deferred_scope": "docs/deferred/MULTI_EXCHANGE_FUTURE.md",
+  "note": "This is work-selection policy, not runtime qualification or a stored secret."
+}

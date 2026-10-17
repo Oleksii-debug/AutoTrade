@@ -1,0 +1,27 @@
+{
+  "schema_version":"1.0",
+  "scope_document":"WHITEBIT_EXECUTION_SCOPE.md",
+  "status":"PROMPTS_PREPARED_NOT_AGENTS_LAUNCHED",
+  "shared_files_owner":"W01",
+  "status_path_template":"control/whitebit_focus/status/WNN.json",
+  "worktree_policy":"one isolated branch/worktree per worker; no force push or unqualified main writes",
+  "session_target_minutes":[90,120],
+  "session_limit_note":"Target only if the actual platform permits; never fabricate elapsed work, wait artificially or claim background execution.",
+  "workers":[
+    {"id":"W01","role":"Інтегратор і керівник залишкових витрат","conflict_key":"whitebit-convergence","plans":[8,9],"status":"NOT_STARTED"},
+    {"id":"W02","role":"WhiteBIT SDK і приватне читання","conflict_key":"whitebit-private-read","plans":[6,9],"status":"NOT_STARTED"},
+    {"id":"W03","role":"WhiteBIT публічні REST/WS та інструменти","conflict_key":"whitebit-public-feed","plans":[6,10],"status":"NOT_STARTED"},
+    {"id":"W04","role":"Наміри, ордери, скасування і UNKNOWN","conflict_key":"whitebit-order-lifecycle","plans":[1,6,9],"status":"NOT_STARTED"},
+    {"id":"W05","role":"Бухгалтерія, комісії, резерви, ризик","conflict_key":"whitebit-financial-truth","plans":[1],"status":"NOT_STARTED"},
+    {"id":"W06","role":"Runtime, дані, відновлення, Host","conflict_key":"whitebit-runtime","plans":[3,8],"status":"NOT_STARTED"},
+    {"id":"W07","role":"Історична та forward-симуляція","conflict_key":"whitebit-simulation","plans":[10],"status":"NOT_STARTED"},
+    {"id":"W08","role":"Команда агентів, координація, пам'ять","conflict_key":"whitebit-agent-team","plans":[2],"status":"NOT_STARTED"},
+    {"id":"W09","role":"Поступове навчання і збереження навичок","conflict_key":"whitebit-continual-learning","plans":[2,10],"status":"NOT_STARTED"},
+    {"id":"W10","role":"Оптимізація, RL, bandits і дослідницька петля","conflict_key":"whitebit-learning-experiments","plans":[2,7,10],"status":"NOT_STARTED"},
+    {"id":"W11","role":"Незалежна наукова оцінка","conflict_key":"whitebit-independent-evaluation","plans":[7],"status":"NOT_STARTED"},
+    {"id":"W12","role":"Доступний ручний інтерфейс і donor replacement","conflict_key":"whitebit-accessible-manual","plans":[5],"status":"NOT_STARTED"},
+    {"id":"W13","role":"Помічник, модельний шлюз, бюджети","conflict_key":"whitebit-assistant-gateway","plans":[2,5],"status":"NOT_STARTED"},
+    {"id":"W14","role":"Безпека секретів і джерельних залежностей","conflict_key":"whitebit-supply-chain","plans":[4],"status":"NOT_STARTED"},
+    {"id":"W15","role":"Наскрізне приймання, Windows і передача власнику","conflict_key":"whitebit-product-qualification","plans":[7,8,9],"status":"NOT_STARTED"}
+  ]
+}

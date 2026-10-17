@@ -1,0 +1,5 @@
+# Optional RESEARCH-ONLY source libraries. Not part of financial host or release lock.
+# Provisional pins from source review; independent resolver/advisory qualification needed.
+ccxt==4.5.82
+river==0.26.1
+optuna==5.0.0

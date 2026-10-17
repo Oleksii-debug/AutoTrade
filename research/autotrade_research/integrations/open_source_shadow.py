@@ -43,6 +43,16 @@ def _number(value: Any, name: str, *, minimum: Decimal | None = None,
     return result
 
 
+def _market_number(value: Any, name: str) -> Decimal:
+    # Exchange clients commonly deserialize OHLCV JSON numerics as floats.
+    # Exact-value cash authority remains outside this research data adapter.
+    if type(value) is float:
+        if not (-float("inf") < value < float("inf")):
+            raise ValueError(f"{name} must be finite")
+        return _number(str(value), name, minimum=Decimal("0"))
+    return _number(value, name, minimum=Decimal("0"))
+
+
 def _feature_map(raw: Any) -> dict[str, float]:
     if type(raw) is not dict or not 1 <= len(raw) <= 16:
         raise ValueError("features must contain 1..16 exact string keys")
@@ -86,7 +96,7 @@ def public_ohlcv_ccxt(exchange_id: str, symbol: str, timeframe: str = "1h",
                 raise ValueError("duplicate/out-of-order OHLCV rows")
             last_ms = when
             op, high, low, close, volume = (
-                _number(x, field, minimum=Decimal("0"))
+                _market_number(x, field)
                 for x, field in zip(item[1:], ("open", "high", "low", "close", "volume"))
             )
             if low > min(op, close) or high < max(op, close) or low > high:

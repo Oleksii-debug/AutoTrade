@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import unittest
 
 from mvp.tests.test_windows_install_manifest import (
@@ -54,6 +55,18 @@ class WindowsFixtureInstallAssemblyTests(unittest.TestCase):
 
     def selected(self):
         return json.loads((self.root / "selected-fixture.json").read_text(encoding="utf-8"))
+
+    def junction_or_skip(self, link: Path, target: Path):
+        if os.name != "nt":
+            self.skipTest("Windows directory junction scenario")
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest("junction creation unavailable: " + result.stderr.strip())
 
     def test_clean_install_binds_verified_source_archive_and_no_host_authority(self):
         result = self.install()
@@ -180,6 +193,41 @@ class WindowsFixtureInstallAssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(FixtureAssemblyError, "symlink"):
             self.install()
         self.assertEqual((other / "leave-alone.txt").read_text(), "private")
+
+    def test_windows_junctioned_versions_directory_is_rejected_without_external_write(self):
+        outside = self.canonical.root / "outside-junction-target"
+        outside.mkdir()
+        sentinel = outside / "leave-alone.txt"
+        sentinel.write_text("private", encoding="utf-8")
+        versions = self.root / "versions"
+        self.junction_or_skip(versions, outside)
+
+        with self.assertRaisesRegex(FixtureAssemblyError, "reparse point"):
+            self.install()
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "private")
+        self.assertFalse((outside / "selected-fixture.json").exists())
+        self.assertFalse((self.root / "selected-fixture.json").exists())
+
+    def test_windows_junction_inside_installed_tree_blocks_uninstall(self):
+        result = self.install()
+        outside = self.canonical.root / "outside-uninstall-target"
+        outside.mkdir()
+        sentinel = outside / "leave-alone.txt"
+        sentinel.write_text("private", encoding="utf-8")
+        payload = (
+            self.root / "versions" / result["version_directory"] / "payload"
+        )
+        self.junction_or_skip(payload / "redirected", outside)
+
+        with self.assertRaisesRegex(
+            FixtureAssemblyError,
+            "reparse point|untracked",
+        ):
+            fixture_uninstall(self.root, fixture_only=True)
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "private")
+        self.assertEqual(self.data.read_bytes(), self.data_original)
 
     def test_hardlinked_installed_payload_blocks_uninstall(self):
         result = self.install()

@@ -94,6 +94,8 @@
     "jobs-copy",
     "event-history-filter",
     "event-history-copy",
+    "download-technical-diagnostics",
+    "download-agent-report",
     "permissions-sort",
     "permissions-previous",
     "permissions-next",
@@ -497,6 +499,8 @@
       environment: canonicalEnvironment(snapshot.environment, "environment"),
       permissionSummary,
       connectionFreshness,
+      whitebitPublic: parseWhitebitPublicStatus(
+        connectionFreshness.whitebit_public),
       portfolio: requiredObject(snapshot.portfolio, "portfolio"),
       risk: requiredObject(snapshot.risk, "risk"),
       strategy: requiredObject(snapshot.strategy, "strategy"),
@@ -504,6 +508,114 @@
       reasonCodes: requiredStringArray(snapshot.reason_codes, "reason_codes"),
       sessionIdentity: readSessionIdentity(permissionSummary)
     };
+  }
+
+  function unavailableWhitebitPublicStatus(reason) {
+    return {
+      health: "BLOCKED",
+      reasons: [reason],
+      heartbeat: null,
+      latest: null,
+      publicDataOnly: true,
+      tradingAuthority: false
+    };
+  }
+
+  function exactNonNegativeInteger(value, name) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(name + " must be a non-negative safe integer");
+    }
+    return value;
+  }
+
+  function exactFields(value, expected, name) {
+    const actual = Object.keys(value);
+    if (actual.length !== expected.size || actual.some((key) => !expected.has(key))) {
+      throw new Error(name + " fields are not canonical");
+    }
+  }
+
+  function parseWhitebitPublicStatus(value) {
+    if (value === undefined || value === null) {
+      return unavailableWhitebitPublicStatus("whitebit_public_status_unavailable");
+    }
+    try {
+      const status = requiredObject(value, "connection_freshness.whitebit_public");
+      exactFields(status, new Set([
+        "schema", "health", "heartbeat", "latest", "public_data_only",
+        "trading_authority"
+      ]), "connection_freshness.whitebit_public");
+      if (status.schema !== "autotrade-whitebit-public-status-v1" ||
+          status.public_data_only !== true || status.trading_authority !== false) {
+        throw new Error("WhiteBIT public-only boundary is unavailable");
+      }
+      const health = requiredObject(status.health, "whitebit_public.health");
+      exactFields(health, new Set([
+        "component", "status", "as_of", "reason_codes"
+      ]), "whitebit_public.health");
+      if (health.component !== "WHITEBIT_PUBLIC_SUPERVISOR" ||
+          !["READY", "RECOVERING", "DEGRADED", "BLOCKED", "STOPPED"].includes(health.status)) {
+        throw new Error("WhiteBIT public health is not canonical");
+      }
+      utcInstant(health.as_of, "whitebit_public.health.as_of");
+      const reasons = requiredStringArray(
+        health.reason_codes, "whitebit_public.health.reason_codes");
+      const allowedReasons = new Set([
+        "whitebit_public_status_unavailable", "whitebit_public_status_changing",
+        "whitebit_public_heartbeat_stale", "whitebit_public_supervisor_failed",
+        "whitebit_public_supervisor_stopped", "whitebit_public_supervisor_starting",
+        "whitebit_public_connection_unavailable", "whitebit_public_latest_unavailable"
+      ]);
+      if (reasons.some((reason) => !allowedReasons.has(reason))) {
+        throw new Error("WhiteBIT public reason code is not canonical");
+      }
+
+      let heartbeat = null;
+      if (status.heartbeat !== null) {
+        heartbeat = requiredObject(status.heartbeat, "whitebit_public.heartbeat");
+        exactFields(heartbeat, new Set([
+          "as_of", "sequence", "phase", "connection_code", "observation_count"
+        ]), "whitebit_public.heartbeat");
+        utcInstant(heartbeat.as_of, "whitebit_public.heartbeat.as_of");
+        exactNonNegativeInteger(heartbeat.sequence, "whitebit_public.heartbeat.sequence");
+        exactNonNegativeInteger(
+          heartbeat.observation_count, "whitebit_public.heartbeat.observation_count");
+        if (!["STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"].includes(heartbeat.phase) ||
+            !["CONNECTING", "SUBSCRIBED", "CONNECTION_LOST", "SCHEMA_REJECTED",
+              "RECONNECT_WAIT", "STOPPED"].includes(heartbeat.connection_code)) {
+          throw new Error("WhiteBIT public heartbeat is not canonical");
+        }
+      }
+
+      let latest = null;
+      if (status.latest !== null) {
+        latest = requiredObject(status.latest, "whitebit_public.latest");
+        exactFields(latest, new Set([
+          "market", "venue", "available_at", "update_id", "stream_generation"
+        ]), "whitebit_public.latest");
+        const market = requiredText(latest.market, "whitebit_public.latest.market");
+        if (!/^[A-Z0-9]+_[A-Z0-9]+$/.test(market) || latest.venue !== "WHITEBIT_SPOT") {
+          throw new Error("WhiteBIT latest public market identity is not canonical");
+        }
+        utcInstant(latest.available_at, "whitebit_public.latest.available_at");
+        exactNonNegativeInteger(latest.update_id, "whitebit_public.latest.update_id");
+        exactNonNegativeInteger(
+          latest.stream_generation, "whitebit_public.latest.stream_generation");
+      }
+      if (health.status === "READY" && (heartbeat === null || latest === null)) {
+        throw new Error("WhiteBIT READY requires heartbeat and latest evidence");
+      }
+      return {
+        health: health.status,
+        reasons,
+        heartbeat,
+        latest,
+        publicDataOnly: true,
+        tradingAuthority: false
+      };
+    } catch (_error) {
+      return unavailableWhitebitPublicStatus("whitebit_public_status_invalid");
+    }
   }
 
   function parseCommandResult(value, expectedCommandId) {
@@ -618,6 +730,7 @@
 
   function freshnessText(parsed) {
     const details = Object.entries(parsed.connectionFreshness)
+      .filter(([key]) => key !== "whitebit_public")
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => key + "=" +
         (value && typeof value === "object" ? JSON.stringify(value) : String(value)))
@@ -627,6 +740,40 @@
       : " No host reason codes.";
     return "Host-provided freshness evidence at " + parsed.serverTime + ": " +
       details + "." + reasons;
+  }
+
+  function renderWhitebitPublicStatus(status) {
+    const safe = status === null
+      ? unavailableWhitebitPublicStatus("host_snapshot_unavailable")
+      : status;
+    const reasonText = safe.reasons.length > 0
+      ? ". Reason codes: " + safe.reasons.join(", ")
+      : ". No status reason codes";
+    text("whitebit-public-health", safe.health + reasonText + ".");
+    text(
+      "whitebit-public-phase",
+      safe.heartbeat === null
+        ? "Unavailable"
+        : safe.heartbeat.phase + "; connection " + safe.heartbeat.connection_code);
+    text(
+      "whitebit-public-heartbeat",
+      safe.heartbeat === null
+        ? "Unavailable"
+        : safe.heartbeat.as_of + "; sequence " + safe.heartbeat.sequence +
+          "; observations " + safe.heartbeat.observation_count);
+    text(
+      "whitebit-public-latest",
+      safe.latest === null
+        ? "Unavailable"
+        : safe.latest.market + " at " + safe.latest.available_at +
+          "; venue " + safe.latest.venue +
+          "; stream generation " + safe.latest.stream_generation +
+          "; update " + safe.latest.update_id);
+    text(
+      "whitebit-public-authority",
+      safe.publicDataOnly === true && safe.tradingAuthority === false
+        ? "Public data only. Trading authority: none."
+        : "Authority boundary unavailable. Trading authority: none.");
   }
 
   async function submitCanonicalCommand(payload) {
@@ -788,6 +935,7 @@
   }
 
   function captureTableSelection(body) {
+    if (typeof window.getSelection !== "function") return null;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
@@ -860,7 +1008,7 @@
     const anchor = findPoint(bookmark.anchor);
     const focus = findPoint(bookmark.focus);
     if (anchor === null || focus === null) return;
-    const selection = window.getSelection();
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
     if (!selection) return;
     selection.removeAllRanges();
     if (typeof selection.setBaseAndExtent === "function") {
@@ -1294,6 +1442,7 @@ function appendProjectionRow(body, label, value) {
     state.sessionIdentity = null;
     state.accountId = null;
     state.environment = null;
+    renderWhitebitPublicStatus(null);
     setCommandAvailability(false);
   }
 
@@ -1647,6 +1796,7 @@ function renderOperation(operation) {
       "Host: " + parsed.hostId + ". Account: " + parsed.accountId +
         ". Environment: " + parsed.environment + ".");
     text("freshness", freshnessText(parsed));
+    renderWhitebitPublicStatus(parsed.whitebitPublic);
     text("server-time", parsed.serverTime);
     renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !displayContextChanged});
     renderProjection(
@@ -2006,6 +2156,9 @@ function renderOperation(operation) {
     if (state.pendingCommand === payload) {
       state.pendingCommand = null;
       state.pendingCommandHostId = null;
+      if (state.snapshotReady && state.sessionIdentity !== null) {
+        syncHostActionOptions(state.sessionIdentity.role);
+      }
     }
   }
 
@@ -2360,9 +2513,62 @@ function renderOperation(operation) {
     }
   }
 
+  function bindDiagnosticDownload({buttonId, statusId, route, filename, label}) {
+    byId(buttonId).addEventListener("click", async () => {
+      const button = byId(buttonId);
+      button.disabled = true;
+      const preparing = "Preparing " + label + ".";
+      text(statusId, preparing);
+      queuePoliteAnnouncement(preparing);
+      try {
+        const response = await fetch(route, {
+          method: "GET", credentials: "same-origin", cache: "no-store",
+          headers: {"Accept": "application/zip"}
+        });
+        if (!response.ok) throw new Error(label + " failed with status " + response.status);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        try {
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          const complete = label + " ZIP download requested. You can attach the ZIP file to our conversation.";
+          text(statusId, complete);
+          queuePoliteAnnouncement(complete);
+        } finally {
+          window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+        }
+      } catch (error) {
+        const failed = label + " download failed. Pair the local owner session and retry; durable state was not changed.";
+        text(statusId, failed);
+        queuePoliteAnnouncement(failed);
+      } finally {
+        button.disabled = false;
+        button.focus();
+      }
+    });
+  }
+
   async function start() {
     bindPageNavigation();
     bindTableTools();
+    bindDiagnosticDownload({
+      buttonId: "download-technical-diagnostics",
+      statusId: "technical-diagnostic-download-status",
+      route: HOST_API.route("downloadTechnicalDiagnostics"),
+      filename: "autotrade-technical-diagnostics.zip",
+      label: "Technical diagnostics"
+    });
+    bindDiagnosticDownload({
+      buttonId: "download-agent-report",
+      statusId: "agent-report-download-status",
+      route: HOST_API.route("downloadAgentReport"),
+      filename: "autotrade-agent-report.zip",
+      label: "Agent report"
+    });
     bindAuthorityPolicyReviewInvalidation();
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {

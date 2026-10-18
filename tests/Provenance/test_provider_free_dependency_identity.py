@@ -295,7 +295,9 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             "packaging/windows/provider-free-inputs.json",
             workflow,
         )
-        self.assertIn("$inputs.webview2_sdk.url", workflow)
+        self.assertIn("$inputs.webview2_sdk.version", workflow)
+        self.assertIn("dotnet nuget verify $archive --all", workflow)
+        self.assertNotIn("Invoke-WebRequest $inputs.webview2_sdk.url", workflow)
         self.assertNotIn("1.0.4191.47", workflow)
 
     def test_input_drift_from_release_provenance_fails(self):
@@ -303,11 +305,22 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             root = Path(directory)
             (root / "provenance").mkdir()
             manifest = {
-                "dotnet_package_dependencies": [{
-                    "name": "Microsoft.Web.WebView2",
-                    "version": "1.0.4258.31",
-                    "content_hash_sha512_base64": "canonical",
-                }]
+                "dotnet_package_dependencies": [
+                    {
+                        "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+                        "target": target,
+                        "name": "Microsoft.Web.WebView2",
+                        "type": "Direct",
+                        "version": "1.0.4258.31",
+                        "content_hash_sha512_base64": "canonical",
+                        "dependencies": [],
+                        "requested": "[1.0.4191.47, )",
+                    }
+                    for target in (
+                        "net10.0-windows7.0",
+                        "net10.0-windows7.0/win-x64",
+                    )
+                ]
             }
             (root / "provenance/release-dependency-manifest.json").write_text(
                 json.dumps(manifest),
@@ -327,7 +340,7 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             nuget_lock = {
                 "version": 1,
                 "dependencies": {
-                    "net10.0-windows7.0": {
+                    target: {
                         "Microsoft.Web.WebView2": {
                             "type": "Direct",
                             "requested": "[1.0.4191.47, )",
@@ -335,6 +348,10 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                             "contentHash": "stale",
                         }
                     }
+                    for target in (
+                        "net10.0-windows7.0",
+                        "net10.0-windows7.0/win-x64",
+                    )
                 },
             }
             with self.assertRaisesRegex(
@@ -353,16 +370,22 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             root = Path(directory)
             (root / "provenance").mkdir()
             manifest = {
-                "dotnet_package_dependencies": [{
-                    "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
-                    "target": "net10.0-windows7.0",
-                    "name": "Microsoft.Web.WebView2",
-                    "type": "Direct",
-                    "version": "1.0.4258.31",
-                    "content_hash_sha512_base64": "canonical",
-                    "dependencies": [],
-                    "requested": "[1.0.4258.31, )",
-                }]
+                "dotnet_package_dependencies": [
+                    {
+                        "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+                        "target": target,
+                        "name": "Microsoft.Web.WebView2",
+                        "type": "Direct",
+                        "version": "1.0.4258.31",
+                        "content_hash_sha512_base64": "canonical",
+                        "dependencies": [],
+                        "requested": "[1.0.4258.31, )",
+                    }
+                    for target in (
+                        "net10.0-windows7.0",
+                        "net10.0-windows7.0/win-x64",
+                    )
+                ]
             }
             (root / "provenance/release-dependency-manifest.json").write_text(
                 json.dumps(manifest),
@@ -382,7 +405,7 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
             drifted_lock = {
                 "version": 1,
                 "dependencies": {
-                    "net10.0-windows7.0": {
+                    target: {
                         "Microsoft.Web.WebView2": {
                             "type": "Direct",
                             "requested": "[1.0.4258.31, )",
@@ -390,6 +413,10 @@ class ProviderFreeDependencyIdentityTests(unittest.TestCase):
                             "contentHash": "different",
                         }
                     }
+                    for target in (
+                        "net10.0-windows7.0",
+                        "net10.0-windows7.0/win-x64",
+                    )
                 },
             }
             with self.assertRaisesRegex(

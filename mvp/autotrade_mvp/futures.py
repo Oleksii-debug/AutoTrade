@@ -136,11 +136,14 @@ def _install_futures_contract_lifecycle_authority():
             tuple[str, str, datetime, datetime, datetime],
         ],
     ] = {}
+    canonical_tuple = tuple
 
     def prune_dead() -> None:
         dead = [
             object_id
-            for object_id, (value_ref, _snapshot) in tuple(authorities.items())
+            for object_id, (value_ref, _snapshot) in canonical_tuple(
+                authorities.items()
+            )
             if value_ref() is None
         ]
         for object_id in dead:
@@ -1077,6 +1080,16 @@ def lifecycle_gate(
 
     if type(contract) is not FuturesContract:
         raise FuturesError("lifecycle gate requires exact FuturesContract")
+    try:
+        version = object.__getattribute__(contract, "canonical_instrument")
+    except AttributeError as error:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentVersion"
+        ) from error
+    if type(version) is not InstrumentVersion:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentVersion"
+        )
 
     for field_name in (
         "instrument",
@@ -1105,11 +1118,6 @@ def lifecycle_gate(
                 f"lifecycle contract {field_name} must be exact UTC datetime"
             )
 
-    version = contract.canonical_instrument
-    if type(version) is not InstrumentVersion:
-        raise FuturesError(
-            "futures lifecycle requires exact canonical InstrumentVersion"
-        )
     if (
         type(version.instrument_id) is not str
         or type(version.version) is not int

@@ -31,3 +31,7 @@ credentials/
 artifacts/
 build/
 dist/
+historical-data/
+local-models/
+local-state/
+historical-zero-state*/

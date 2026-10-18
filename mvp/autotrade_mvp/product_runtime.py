@@ -32,8 +32,15 @@ from .security import SecurityBoundary
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
 from .simulation_status import SimulationStateChanging, inspect_canonical_simulation
 from .simulation_commands import _protocol
+from .diagnostic_export import (
+    agent_report_zip,
+    runtime_diagnostic_zip,
+    technical_diagnostic_zip,
+)
+from .runtime_diagnostic_sampler import RuntimeDiagnosticSampler
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
 from .windows_host_session import persist_desktop_owner_session
+from .whitebit_public_status import read_whitebit_public_status
 
 ROOT = Path(__file__).resolve().parents[2]
 PRICES = ['100', '101', '103', '102', '100', '100', '101', '103']
@@ -140,9 +147,14 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         state_dir,
         pairing_code,
         desktop_session_sink,
+        diagnostic_sampler,
         **kwargs,
     ):
         self.state_dir = state_dir
+        self._diagnostic_journal = journal
+        if type(diagnostic_sampler) is not RuntimeDiagnosticSampler:
+            raise TypeError('diagnostic_sampler must be the canonical runtime sampler')
+        self._diagnostic_sampler = diagnostic_sampler
         self._pairing_code = pairing_code
         self._pairing_lock = Lock()
         if not callable(desktop_session_sink):
@@ -166,6 +178,46 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         super().__init__(journal, web_bundle=web_bundle(), **kwargs)
 
     def dispatch(self, *, method, target, headers, body=b''):
+        diagnostic_routes = {
+            '/api/v1/agent-report': lambda: agent_report_zip(
+                self._diagnostic_journal,
+                Path(self.state_dir),
+                source_revision=source_revision(),
+            ),
+            '/api/v1/technical-diagnostics': lambda: technical_diagnostic_zip(
+                self._diagnostic_sampler,
+                source_revision=source_revision(),
+            ),
+            # Compatibility for already shipped clients. New UI versions never
+            # use this combined route.
+            '/api/v1/local-diagnostics': lambda: runtime_diagnostic_zip(
+                self._diagnostic_journal,
+                Path(self.state_dir),
+                source_revision=source_revision(),
+            ),
+        }
+        if target in diagnostic_routes:
+            if method != 'GET' or body:
+                return TransportResponse(405, 'application/json', b'{"error":"METHOD_NOT_ALLOWED"}')
+            try:
+                normalized = _headers(headers)
+                if normalized.get('origin') not in (None, self._origin):
+                    raise PermissionError('diagnostic export requires same origin')
+                _principal, role = self._principal(normalized)
+                if role != 'OWNER':
+                    raise PermissionError('diagnostic export requires owner')
+                prepared = diagnostic_routes[target]()
+                return TransportResponse(200, 'application/zip', prepared.data,
+                    (('Content-Disposition', 'attachment; filename="' + prepared.filename + '"'),
+                     ('X-Content-Type-Options', 'nosniff'),
+                     ('Cache-Control', 'no-store'),
+                     ('X-AutoTrade-Diagnostic-SHA256', prepared.sha256)))
+            except PermissionError:
+                return TransportResponse(403, 'application/json', b'{"error":"AUTHENTICATION_OR_AUTHORIZATION_FAILED"}',
+                    (('Cache-Control', 'no-store'),))
+            except (OSError, TypeError, ValueError):
+                return TransportResponse(409, 'application/json', b'{"error":"DIAGNOSTIC_EVIDENCE_UNAVAILABLE"}',
+                    (('Cache-Control', 'no-store'),))
         if target == '/api/v1/session' and method == 'POST':
             try:
                 normalized = _headers(headers)
@@ -255,7 +307,13 @@ def _owned_desktop_session_sink(*, origin, actor, token):
     del origin, actor, token
 
 
-def build_product(data_dir, *, port=0, desktop_session_sink=None):
+def build_product(
+    data_dir,
+    *,
+    port=0,
+    desktop_session_sink=None,
+    whitebit_public_state_dir=None,
+):
     if port == 0:
         import socket
         # Reserve a candidate ephemeral port. The real listener still performs
@@ -267,6 +325,12 @@ def build_product(data_dir, *, port=0, desktop_session_sink=None):
     data = Path(data_dir).resolve()
     state = data / 'state'
     state.mkdir(parents=True, exist_ok=True)
+    if whitebit_public_state_dir is None:
+        whitebit_public_state_dir = os.environ.get(
+            'AUTOTRADE_WHITEBIT_PUBLIC_STATE_DIR',
+            str(data / 'whitebit-public-supervisor'),
+        )
+    whitebit_public_state = Path(whitebit_public_state_dir).resolve(strict=False)
     origin = f'http://127.0.0.1:{port}'
     pairing = secrets.token_urlsafe(32)
     vault = ProtectedCredentialVault(data / 'credentials.json',
@@ -303,7 +367,16 @@ def build_product(data_dir, *, port=0, desktop_session_sink=None):
             'server_time': now, 'host_id': 'local-simulation', 'account_id': ACCOUNT, 'environment': ENVIRONMENT,
             'permission_summary': {'actor': principal.actor, 'session': principal.session, 'role': principal.role,
                 'capabilities': ['START_SIMULATION', 'RECOVER_SIMULATION', 'BACKUP_SIMULATION', 'BLOCK_NEW_EXPOSURE']},
-            'connection_freshness': {'host': 'CURRENT', 'as_of': now},
+            'connection_freshness': {
+                'host': 'CURRENT',
+                'as_of': now,
+                # Read-only public process evidence. This projection grants no
+                # provider capability and is deliberately independent of the
+                # command/financial authority in this snapshot.
+                'whitebit_public': read_whitebit_public_status(
+                    whitebit_public_state
+                ),
+            },
             'portfolio': {'status': status, 'economic_report': report, 'orders': orders, 'fills': fills},
             'risk': {'mode': 'ZERO', 'real_order_submission': 'UNAVAILABLE',
                 'active_reservations': status.get('active_reservations', []),
@@ -324,13 +397,21 @@ def build_product(data_dir, *, port=0, desktop_session_sink=None):
     )
     if not callable(session_sink):
         raise TypeError('desktop_session_sink must be callable')
+    diagnostic_sampler = RuntimeDiagnosticSampler(state / 'technical-diagnostics')
     runtime = build_production_host(config, security_boundary=boundary, principal_resolver=cookie_principal,
         snapshot_provider=snapshot, application_factory=partial(
             ProviderFreeApplication,
             state_dir=state,
             pairing_code=pairing,
             desktop_session_sink=session_sink,
+            diagnostic_sampler=diagnostic_sampler,
         ))
+    runtime.bind_terminal_finalizer(diagnostic_sampler.stop)
+    try:
+        diagnostic_sampler.start()
+    except BaseException:
+        runtime.close()
+        raise
     return runtime, origin + '/#pair=' + pairing
 
 

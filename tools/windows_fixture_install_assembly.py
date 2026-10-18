@@ -29,6 +29,7 @@ from research.autotrade_research.artifacts.durable_publish import (
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
     _assert_open_file_identity,
+    _is_reparse,
     _open_stable_regular_file,
     _sha256_stream,
     _verify_release_bundle_stream,
@@ -46,21 +47,64 @@ _MANIFEST = "fixture-inventory.json"
 _SELECT = "selected-fixture.json"
 
 
+def _path_is_reparse(path: Path) -> bool:
+    try:
+        return _is_reparse(path.lstat())
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise FixtureAssemblyError(
+            f"installation path identity is unavailable: {path}"
+        ) from error
+
+
+def _assert_no_reparse_path(path: Path, *, label: str) -> None:
+    """Reject symlink, mount-point and junction traversal to an install path."""
+
+    for node in (path, *path.parents):
+        if _path_is_reparse(node):
+            raise FixtureAssemblyError(f"{label} traverses a reparse point")
+
+
+def _assert_tree_has_no_reparse(root: Path, *, label: str) -> None:
+    """Walk without following reparse directories and reject any discovered one."""
+
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        _assert_no_reparse_path(directory, label=label)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise FixtureAssemblyError(f"{label} cannot be inspected safely") from error
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise FixtureAssemblyError(
+                    f"{label} entry identity is unavailable"
+                ) from error
+            if _is_reparse(info):
+                raise FixtureAssemblyError(f"{label} contains a reparse point")
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(path)
+
+
 def _root(path: Path, *, fixture_only: bool) -> Path:
     if fixture_only is not True or type(path) is not type(Path()):
         raise FixtureAssemblyError("fixture_only=True and exact Path are mandatory")
     if not path.is_absolute() or path.name != _ROOT:
         raise FixtureAssemblyError("fixture root must be an absolute autotrade-fixture-only path")
-    for node in (path, *path.parents):
-        if node.is_symlink():
-            raise FixtureAssemblyError("fixture root traverses a symlink")
+    _assert_no_reparse_path(path, label="fixture root")
     path.mkdir(parents=True, exist_ok=True)
+    _assert_no_reparse_path(path, label="fixture root")
     return path
 
 
 def _read_checked(path: Path, *, limit: int = 2_000_000) -> dict:
-    if path.is_symlink():
-        raise FixtureAssemblyError("fixture record must not be a symlink")
+    if _path_is_reparse(path):
+        raise FixtureAssemblyError("fixture record must not be a reparse point")
     try:
         with _open_stable_regular_file(path, name="fixture record") as held:
             before = os.fstat(held.fileno())
@@ -116,8 +160,9 @@ def _check_inventory(root: Path, version: str) -> dict:
         raise FixtureAssemblyError("fixture version label is not content-addressed")
     versions = root / "versions"
     product = versions / version
-    if versions.is_symlink() or product.is_symlink() or not product.is_dir():
+    if _path_is_reparse(versions) or _path_is_reparse(product) or not product.is_dir():
         raise FixtureAssemblyError("fixture installed version is unavailable")
+    _assert_no_reparse_path(product, label="fixture installed version")
     inventory = _read_checked(product / _MANIFEST)
     if (
         set(inventory) != {
@@ -147,8 +192,11 @@ def _check_inventory(root: Path, version: str) -> dict:
             raise FixtureAssemblyError("fixture file inventory path invalid")
         seen.add(rel)
         f = product / "payload" / rel
-        if any(p.is_symlink() for p in (f, *list(f.parents)[:len(Path(rel).parts)])):
-            raise FixtureAssemblyError("fixture installed file path is a symlink")
+        if any(
+            _path_is_reparse(p)
+            for p in (f, *list(f.parents)[:len(Path(rel).parts)])
+        ):
+            raise FixtureAssemblyError("fixture installed file path is a reparse point")
         try:
             with _open_stable_regular_file(f, name="fixture payload") as held:
                 before = os.fstat(held.fileno())
@@ -164,10 +212,16 @@ def _check_inventory(root: Path, version: str) -> dict:
             raise FixtureAssemblyError("fixture file is not regular") from error
         if before.st_size != item["size"] or digest != item["sha256"]:
             raise FixtureAssemblyError("installed fixture payload differs from verified bytes")
+    # Reject redirection before any recursive enumeration; Path.rglob has
+    # platform-dependent junction traversal behavior across Python releases.
+    _assert_tree_has_no_reparse(product, label="fixture installed version")
     allowed = {(Path("payload") / p).as_posix() for p in seen} | {_MANIFEST}
     found = {f.relative_to(product).as_posix() for f in product.rglob("*") if f.is_file() or f.is_symlink()}
     if found != allowed:
         raise FixtureAssemblyError("fixture installation has untracked or missing files")
+    # Recheck after enumeration so a concurrently introduced reparse point is
+    # never accepted as a verified inventory.
+    _assert_tree_has_no_reparse(product, label="fixture installed version")
     return inventory
 
 
@@ -218,9 +272,12 @@ def fixture_install_bundle(
         raise FixtureAssemblyError("failure injection must be an exact nonnegative integer")
     versions = root / "versions"
     with durable_path_lock(root / "fixture-install-operation"):
-        if versions.is_symlink():
-            raise FixtureAssemblyError("version directory cannot be a symlink")
+        if _path_is_reparse(versions):
+            raise FixtureAssemblyError(
+                "version directory cannot be a symlink or reparse point"
+            )
         versions.mkdir(parents=True, exist_ok=True)
+        _assert_no_reparse_path(versions, label="version directory")
         old = _selection(root)
         with _open_stable_regular_file(bundle, name="release bundle") as held:
             opened = os.fstat(held.fileno())
@@ -240,6 +297,9 @@ def fixture_install_bundle(
                         relative = _safe_relative(item["target_relative_path"])
                         target = temporary / "payload" / relative
                         target.parent.mkdir(parents=True, exist_ok=True)
+                        _assert_no_reparse_path(
+                            target.parent, label="fixture staging path"
+                        )
                         with archive.open("payload/" + relative) as reader, target.open("xb") as writer:
                             digest = sha256()
                             size = 0
@@ -306,12 +366,16 @@ def fixture_uninstall(fixture_root: Path, *, fixture_only: bool) -> dict:
     with durable_path_lock(root / "fixture-install-operation"):
         selected = _selection(root)
         versions = root / "versions"
-        if versions.is_symlink():
-            raise FixtureAssemblyError("version root is a symlink")
+        if _path_is_reparse(versions):
+            raise FixtureAssemblyError("version root is a reparse point")
         for version in (versions.iterdir() if versions.exists() else []):
-            if version.is_symlink() or not version.is_dir() or version.name.startswith("."):
+            if _path_is_reparse(version) or not version.is_dir() or version.name.startswith("."):
                 raise FixtureAssemblyError("untracked fixture version directory blocks uninstall")
             _check_inventory(root, version.name)
+        if versions.exists():
+            _assert_tree_has_no_reparse(
+                versions, label="fixture uninstall inventory"
+            )
         if selected is not None:
             (root / _SELECT).unlink()
         # Durable state is at root/state and NEVER traversed, reset or touched.

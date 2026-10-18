@@ -6,6 +6,7 @@ using System.Windows.Threading;
 using System.IO;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
+using Microsoft.Win32;
 
 namespace AutoTrade.Desktop;
 
@@ -195,7 +196,37 @@ public partial class MainWindow : Window
             };
             core.FrameNavigationStarting += (_, e) => e.Cancel = true;
             core.NewWindowRequested += (_, e) => e.Handled = true;
-            core.DownloadStarting += (_, e) => e.Cancel = true;
+            core.DownloadStarting += (_, e) =>
+            {
+                e.Cancel = true;
+                e.Handled = true;
+                string suggestedFileName = e.ResultFilePath is null
+                    ? ""
+                    : Path.GetFileName(e.ResultFilePath);
+                if (!IsCurrentWebGeneration(webView, generation)
+                    || !policy.AllowsDiagnosticDownload(
+                        e.DownloadOperation.Uri,
+                        suggestedFileName,
+                        _trustedWebDocumentActive))
+                {
+                    return;
+                }
+
+                SaveFileDialog dialog = new()
+                {
+                    Title = "Save AutoTrade report",
+                    Filter = "ZIP archives (*.zip)|*.zip",
+                    DefaultExt = ".zip",
+                    AddExtension = true,
+                    FileName = suggestedFileName,
+                    OverwritePrompt = true,
+                };
+                if (dialog.ShowDialog(this) == true)
+                {
+                    e.ResultFilePath = dialog.FileName;
+                    e.Cancel = false;
+                }
+            };
             core.PermissionRequested += (_, e) =>
                 e.State = CoreWebView2PermissionState.Deny;
             core.ServerCertificateErrorDetected += (_, e) =>

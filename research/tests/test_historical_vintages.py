@@ -37,6 +37,7 @@ class HistoricalVintageTests(unittest.TestCase):
         base = {
             "event_id": event_id,
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "BAR",
             "source_event_at": "2026-01-01T10:00:00Z",
             "availability_basis": "provider-history",
@@ -75,6 +76,7 @@ class HistoricalVintageTests(unittest.TestCase):
         row = {
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:01:00Z",
@@ -101,6 +103,7 @@ class HistoricalVintageTests(unittest.TestCase):
         first = {
             "event_id": event_id,
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "BAR",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:01:00Z",
@@ -136,6 +139,7 @@ class HistoricalVintageTests(unittest.TestCase):
         earlier_source = {
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:05:00Z",
@@ -149,6 +153,7 @@ class HistoricalVintageTests(unittest.TestCase):
         later_source_but_earlier_available = {
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:01:00Z",
             "available_at": "2026-01-01T10:02:00Z",
@@ -176,6 +181,7 @@ class HistoricalVintageTests(unittest.TestCase):
         common = {
             "event_id": event_id,
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "availability_basis": "provider",
             "quality_flags": [],
@@ -209,6 +215,7 @@ class HistoricalVintageTests(unittest.TestCase):
         first = {
             "event_id": event_id,
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:01:00Z",
@@ -240,6 +247,7 @@ class HistoricalVintageTests(unittest.TestCase):
         common = {
             "event_id": event_id,
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:00:01Z",
@@ -260,6 +268,7 @@ class HistoricalVintageTests(unittest.TestCase):
         common = {
             "event_id": event_id,
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:00Z",
             "availability_basis": "provider",
@@ -291,6 +300,7 @@ class HistoricalVintageTests(unittest.TestCase):
         row = {
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:02Z",
             "available_at": "2026-01-01T10:00:03Z",
@@ -314,6 +324,7 @@ class HistoricalVintageTests(unittest.TestCase):
         row = {
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:00:01Z",
@@ -334,6 +345,7 @@ class HistoricalVintageTests(unittest.TestCase):
         row = {
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
+            "adapter_version": "research-fixture@1",
             "kind": "TRADE",
             "source_event_at": "2026-01-01T10:00:02Z",
             "available_at": "2026-01-01T10:00:01Z",

@@ -8,7 +8,10 @@
     submitCommand: '/api/v1/commands',
     getOperation: '/api/v1/operations/{operation_id}',
     streamEvents: '/api/v1/events',
-    getHealth: '/api/v1/health'
+    getHealth: '/api/v1/health',
+    downloadLocalDiagnostics: '/api/v1/local-diagnostics',
+    downloadTechnicalDiagnostics: '/api/v1/technical-diagnostics',
+    downloadAgentReport: '/api/v1/agent-report'
   });
 
   function encodePathSegment(raw) {

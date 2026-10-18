@@ -807,8 +807,8 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             candidate = _event("evt-hostile-sequence")
             candidate["aggregate_version"] = _HostileText("1")
             with self.assertRaisesRegex(
-                ValueError,
-                "aggregate_version must be a positive canonical integer sequence string",
+                TypeError,
+                "persistent JSON values must use exact built-in JSON containers and scalars",
             ):
                 store.append_event(candidate)
             self.assertEqual(store.current_journal_sequence(), 0)

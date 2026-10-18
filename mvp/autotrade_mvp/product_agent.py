@@ -14,11 +14,14 @@ from .product_research import prepare_research
 
 
 def decide(journal, protocol, *, episode, strategy_side, position, timestamp):
-    research = prepare_research(journal, protocol)
+    next_open = 'signal_prices' in protocol
+    research = prepare_research(journal, protocol,
+                                through_episode=episode if next_open else None)
     # Every admitted input was available at this observation. Later research
     # rows in the retained offline dataset never enter the specialist snapshot.
     input_digest = payload_digest({'protocol_digest': payload_digest(protocol),
-        'episode': episode, 'prices': protocol['prices'][:episode],
+        'episode': episode,
+        'prices': (protocol['signal_prices'] if next_open else protocol['prices'])[:episode],
         'research': research['proposals'][:episode], 'position': str(position),
         'strategy_side': strategy_side})
     specs = (SpecialistSpec('deterministic-trend', 'one-strategy', Decimal('0'), Decimal('1'),

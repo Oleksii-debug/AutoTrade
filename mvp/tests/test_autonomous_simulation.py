@@ -32,6 +32,44 @@ def run(directory, prices=PRICES, **kwargs):
 
 
 class AutonomousSimulationTests(unittest.TestCase):
+    def test_independent_virtual_budgets_resume_and_bind_financial_protocol(self):
+        with TemporaryDirectory() as small, TemporaryDirectory() as large:
+            paused = run(small, virtual_cash="200", stop_after_episodes=2)
+            self.assertEqual(paused["status"], "PAUSED")
+            self.assertEqual(paused["cash"], "200")
+            self.assertEqual(paused["new_outbound_requests"], 0)
+            with self.assertRaisesRegex(ValueError, "protocol/input identity changed"):
+                run(small, virtual_cash="1000")
+            resumed = run(small, virtual_cash="200")
+            full = run(large, virtual_cash="1000")
+            self.assertEqual(resumed["status"], "COMPLETED")
+            self.assertEqual(full["status"], "COMPLETED")
+            self.assertNotEqual(resumed["protocol_digest"], full["protocol_digest"])
+            self.assertEqual(resumed["new_outbound_requests"], 3)
+            self.assertEqual(full["new_outbound_requests"], 3)
+            small_book = DurableProviderEconomicBook(
+                JournalStore(Path(small) / "journal.sqlite3"),
+                provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
+            )
+            self.assertEqual(small_book.cash("USD"), Decimal(resumed["cash"]))
+            self.assertEqual(small_book.position(INSTRUMENT), Decimal(resumed["position"]))
+            # Different available capital may change admission and fill timing;
+            # neither account may borrow the other's virtual cash.
+            self.assertLess(Decimal(resumed["cash"]), Decimal("200"))
+            self.assertLess(Decimal(full["cash"]), Decimal("1000"))
+            self.assertNotEqual(resumed["decisions"], full["decisions"])
+            replay = run(small, virtual_cash="200")
+            self.assertEqual(replay["new_outbound_requests"], 0)
+            self.assertEqual(replay["decisions"], resumed["decisions"])
+
+    def test_invalid_virtual_budget_fails_before_state_creation(self):
+        with TemporaryDirectory() as directory:
+            for invalid in ("0", "201", "200.0", "1001", 200, True):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, "virtual_cash"):
+                        run(directory, virtual_cash=invalid)
+            self.assertFalse((Path(directory) / "journal.sqlite3").exists())
+
     def test_host_pause_callback_stops_only_at_next_financial_boundary_and_resumes(self):
         with TemporaryDirectory() as directory:
             checks = []
@@ -218,6 +256,26 @@ class AutonomousSimulationTests(unittest.TestCase):
             self.assertEqual(result["position"], "1")
             self.assertEqual(result["new_outbound_requests"], 1)
             self.assertGreater(sum(x["decision"] == "NO_TRADE" for x in result["decisions"]), 10)
+            loop_events = JournalStore(Path(d) / "journal.sqlite3").load_events(
+                "canonical_autonomous_simulation",
+                "acceptance",
+            )
+            completions = [
+                event for event in loop_events
+                if event["event_type"] == "AutonomousEpisodeCompleted"
+            ]
+            observed = [
+                event for event in loop_events
+                if event["event_type"] == "AutonomousEpisodeFillObserved"
+            ]
+            self.assertTrue(completions)
+            self.assertTrue(observed)
+            self.assertTrue(
+                all("provider_state" not in event["payload"] for event in completions)
+            )
+            self.assertTrue(
+                all(type(event["payload"].get("provider_state")) is dict for event in observed)
+            )
 
     def test_120_episode_unattended_scenario_and_resume_match_fresh_execution(self):
         prices = (["100", "101", "103", "102", "100", "98", "100", "103"] * 15)

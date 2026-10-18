@@ -228,6 +228,27 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
         self.assertTrue(mutated)
 
+    def test_reparse_marked_release_bundle_is_rejected_before_admission(self):
+        bundle = self.release_bundle("reparse-release.zip")
+        original = installer_manifest_module._is_reparse
+
+        def mark_only_bundle_path(info):
+            return original(info) or (
+                getattr(info, "st_ino", None) == bundle.lstat().st_ino
+                and getattr(info, "st_dev", None) == bundle.lstat().st_dev
+            )
+
+        with patch.object(
+            installer_manifest_module,
+            "_is_reparse",
+            side_effect=mark_only_bundle_path,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "must not be a reparse point",
+            ):
+                verify_release_bundle(bundle)
+
     def test_compressed_payload_is_rejected_as_noncanonical_bundle(self):
         source = self.release_bundle()
         tampered = self.root / "compressed.zip"

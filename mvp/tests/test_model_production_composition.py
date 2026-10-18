@@ -117,7 +117,7 @@ def budget(directory):
         budget_id="production-model-budget",
         ceiling="5",
         environment="PAPER",
-        clock=lambda: NOW,
+        clock=lambda: NOW.replace("Z", "+00:00"),
     )
 
 

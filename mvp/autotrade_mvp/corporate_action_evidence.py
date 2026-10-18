@@ -414,6 +414,7 @@ def _authoritative_corporate_action_operations():
     canonical_action_type = AuthoritativeCorporateAction
     canonical_event_type = CorporateEvent
     canonical_event_create = CorporateEvent.create
+    canonical_datetime_type = datetime
 
     def event_snapshot(event: CorporateEvent) -> tuple[object, ...]:
         if type(event) is not canonical_event_type:
@@ -433,7 +434,10 @@ def _authoritative_corporate_action_operations():
             raise CorporateActionEvidenceError(
                 "authoritative corporate-action source_sequence must remain exact int"
             )
-        if event.effective_at is not None and type(event.effective_at) is not datetime:
+        if (
+            event.effective_at is not None
+            and type(event.effective_at) is not canonical_datetime_type
+        ):
             raise CorporateActionEvidenceError(
                 "authoritative corporate-action effective_at must remain exact datetime"
             )

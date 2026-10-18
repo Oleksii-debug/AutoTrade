@@ -614,6 +614,9 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
     completed = []
     active = None
     observed_fill = None
+    provider_state = first["payload"].get("provider_state")
+    if type(provider_state) is not dict:
+        raise ValueError("autonomous start lacks provider restart state")
     for event in loops[1:]:
         payload = event["payload"]
         if payload.get("protocol_digest") != first["payload"]["protocol_digest"]:
@@ -640,10 +643,15 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
                     "autonomous retained fill observation is malformed"
                 )
             observed_fill = payload
+            provider_state = payload["provider_state"]
             from .simulation_session import _retained_autonomous_fills
             _retained_autonomous_fills(payload, protocol)
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)
+            if "provider_state" in payload:
+                if type(payload["provider_state"]) is not dict:
+                    raise ValueError("autonomous completion provider state is malformed")
+                provider_state = payload["provider_state"]
             active = None
             observed_fill = None
         else:
@@ -686,7 +694,7 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
     report = None
     if active is None and completed:
         latest = completed[-1]
-        provider = SimulatedProvider.from_state(latest["provider_state"])
+        provider = SimulatedProvider.from_state(provider_state)
         if cash != provider.cash or position != provider.positions.get(INSTRUMENT, Decimal("0")):
             raise ValueError("autonomous provider/economic cut differs")
         if _decimal(latest["cash"]) != cash or _decimal(latest["position"]) != position:

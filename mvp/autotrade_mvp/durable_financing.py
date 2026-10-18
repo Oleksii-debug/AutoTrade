@@ -1102,6 +1102,12 @@ class DurableFinancingBook:
             )
             cut_after = self.store.current_journal_sequence()
             if cut_before == cut_after:
+                # Keep the public durable facade synchronized after a stable
+                # cross-book read.  Conservation is still evaluated against
+                # the sealed ``economic_cut`` above; refresh only publishes
+                # the successfully authenticated durable projection to later
+                # readers of this same facade.
+                self.economic_book.refresh()
                 return cut_before, durable_events, economic_cut.transactions, book
         raise FinancingConflict(
             "financing authority could not obtain a stable JournalStore cut"
@@ -1192,11 +1198,53 @@ class DurableFinancingBook:
             raise FinancingConflict(
                 "durable financing revision economic posting does not match canonical financing delta"
             )
-        if expected not in economic_transactions:
+        if not self._economic_transaction_has_canonical_batch(
+            expected.transaction_id
+        ):
             raise FinancingConflict(
                 "durable financing revision is missing its canonical economic batch"
             )
         return expected
+
+    def _economic_transaction_has_canonical_batch(
+        self,
+        transaction_id: str,
+    ) -> bool:
+        """Require the financing posting to occupy its own durable batch.
+
+        The flattened economic projection proves the transaction's arithmetic,
+        but it cannot prove its atomic batch boundary.  Read the same canonical
+        economic events; the surrounding stable-cut sequence fence makes any
+        concurrent change retry or fail closed.
+        """
+
+        target = _text(transaction_id, name="economic transaction_id")
+        matches = 0
+        for event in self.economic_book._events():
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                return False
+            if event.get("event_type") == self.economic_book._SINGLE_EVENT:
+                raw_transactions = (payload.get("transaction"),)
+            elif event.get("event_type") == self.economic_book._BATCH_EVENT:
+                raw = payload.get("transactions")
+                if not isinstance(raw, list) or not raw:
+                    return False
+                raw_transactions = tuple(raw)
+            else:
+                return False
+            transaction_ids = tuple(
+                item.get("transaction_id")
+                for item in raw_transactions
+                if isinstance(item, Mapping)
+            )
+            if len(transaction_ids) != len(raw_transactions):
+                return False
+            if target in transaction_ids:
+                matches += 1
+                if transaction_ids != (target,):
+                    return False
+        return matches == 1
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
         _require_durable_financing_authority(self)

@@ -26,6 +26,10 @@ on:
       - 'tools/plan6_offline_sections.py'
       - '.github/workflows/plan6-section5-qualification-harness.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

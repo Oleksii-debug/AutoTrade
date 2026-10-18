@@ -26,6 +26,23 @@ from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
 from mvp.tests.test_autonomous_simulation import PRICES, run
 
 
+def provider_state_before_episode(events, episode):
+    state = events[0]["payload"]["provider_state"]
+    for event in events[1:]:
+        payload = event["payload"]
+        if payload.get("episode", episode) >= episode:
+            continue
+        if event["event_type"] == "AutonomousEpisodeFillObserved":
+            state = payload["provider_state"]
+        elif (
+            event["event_type"] == "AutonomousEpisodeCompleted"
+            and type(payload.get("provider_state")) is dict
+        ):
+            # Legacy journals repeated the restart image in completions.
+            state = payload["provider_state"]
+    return state
+
+
 class AutonomousObservedFillRecoveryTests(unittest.TestCase):
     def test_zero_wire_rejects_forged_lifecycle_cost_without_mutation(self):
         # A frozen HOLD/NO_TRADE event is not a new financial admission.
@@ -56,11 +73,7 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 and event["payload"]["episode"] == 4
             )
             protocol = events[0]["payload"]["protocol"]
-            completed = [
-                event["payload"] for event in events
-                if event["event_type"] == "AutonomousEpisodeCompleted"
-            ]
-            prior = completed[-1]["provider_state"]
+            prior = provider_state_before_episode(events, 4)
             before = store.current_journal_sequence()
             for key in (
                 "lifecycle_cost_digest",
@@ -114,15 +127,8 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 event["payload"] for event in events
                 if event["event_type"] == "AutonomousEpisodeFillObserved"
             )
-            completed = [
-                event["payload"] for event in events
-                if event["event_type"] == "AutonomousEpisodeCompleted"
-            ]
             protocol = events[0]["payload"]["protocol"]
-            prior = (
-                completed[-1]["provider_state"] if completed
-                else events[0]["payload"]["provider_state"]
-            )
+            prior = provider_state_before_episode(events, 3)
             self.assertNotEqual(active["lifecycle_cost_digest"], "sha256:" + "0" * 64)
             forged = {**active, "lifecycle_cost_digest": "sha256:" + "0" * 64}
             before = store.current_journal_sequence()

@@ -440,11 +440,56 @@ def _autonomous_event_owned(
     )
 
 
+def _journal_events_at_cut(store: JournalStore) -> tuple[dict[str, object], ...]:
+    """Read the append-only journal through one fixed sequence cut.
+
+    Runtime checkpointing used to open the Windows-protected SQLite namespace
+    once for the loop and once for every component aggregate type.  A single
+    historical observation produces several checkpoints, so that approach
+    multiplied expensive handle/identity verification by the number of
+    component types and became the dominant campaign cost.
+
+    Journal rows are immutable and globally sequenced.  Freeze the target
+    sequence first, then page only through that prefix.  Concurrent later
+    appends cannot rewrite the captured prefix and are intentionally left for
+    the next checkpoint.  Each page still goes through JournalStore's canonical
+    row/hash decoder and contiguous-sequence validation.
+    """
+
+    if type(store) is not JournalStore:
+        raise TypeError("runtime checkpoint requires the canonical JournalStore")
+    target = store.current_journal_sequence()
+    after = 0
+    captured: list[dict[str, object]] = []
+    while after < target:
+        page = JournalStore.load_events_after_journal_sequence(
+            store,
+            after,
+            limit=min(100000, target - after),
+        )
+        prefix = [
+            event for event in page
+            if event.get("journal_sequence") <= target
+        ]
+        if not prefix:
+            raise AutonomousRuntimeCheckpointError(
+                "runtime checkpoint journal prefix is incomplete"
+            )
+        captured.extend(prefix)
+        after = prefix[-1]["journal_sequence"]
+    if len(captured) != target:
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint journal prefix is not contiguous"
+        )
+    return tuple(captured)
+
+
 def _runtime_scope_snapshot(
     store: JournalStore,
     *,
     run_id: str,
     completion_event_id: str | None = None,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[
     dict[str, object],
     list[dict[str, object]],
@@ -459,13 +504,13 @@ def _runtime_scope_snapshot(
     caller so a concurrent financial/runtime mutation still fails closed.
     """
 
+    if journal_events is None:
+        journal_events = _journal_events_at_cut(store)
     loop_events = [
         _event_identity(event)
-        for event in JournalStore.load_events(
-            store,
-            "canonical_autonomous_simulation",
-            run_id,
-        )
+        for event in journal_events
+        if event.get("aggregate_type") == "canonical_autonomous_simulation"
+        and event.get("aggregate_id") == run_id
     ]
     if completion_event_id is not None:
         if (
@@ -479,14 +524,46 @@ def _runtime_scope_snapshot(
             )
         loop_events = loop_events[:-1]
 
-    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+    financial_scope = None
+    if loop_events and loop_events[0].get("event_type") == "AutonomousSimulationStarted":
+        first_payload = loop_events[0].get("payload")
+        durable_protocol = (
+            first_payload.get("protocol")
+            if type(first_payload) is dict
+            else None
+        )
+        raw_scope = (
+            durable_protocol.get("financial_scope")
+            if type(durable_protocol) is dict
+            else None
+        )
+        if type(raw_scope) is not dict:
+            raise AutonomousRuntimeCheckpointError(
+                "autonomous simulation start lacks durable financial scope"
+            )
+        financial_scope = {
+            "account_id": _text(
+                raw_scope.get("account_id"),
+                field="financial_scope.account_id",
+            ),
+            "provider_id": _text(
+                raw_scope.get("provider_id"),
+                field="financial_scope.provider_id",
+            ),
+            "environment": _text(
+                raw_scope.get("environment"),
+                field="financial_scope.environment",
+            ),
+        }
+        if financial_scope["environment"] != "SIMULATION":
+            raise AutonomousRuntimeCheckpointError(
+                "autonomous simulation financial scope must be SIMULATION"
+            )
     authority_events = {
         aggregate_type: [
             _event_identity(event)
-            for event in JournalStore.load_events_by_aggregate_type(
-                store,
-                aggregate_type,
-            )
+            for event in journal_events
+            if event.get("aggregate_type") == aggregate_type
             if _autonomous_event_owned(
                 event,
                 run_id=run_id,
@@ -556,25 +633,49 @@ def _autonomous_owned_publication_events(
     store: JournalStore,
     *,
     run_id: str,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Identify exact ZERO-owned events and canonical routes without bounded scans."""
 
-    events = list(
-        JournalStore.load_events(
-            store,
-            "canonical_autonomous_simulation",
-            run_id,
+    if journal_events is None:
+        journal_events = _journal_events_at_cut(store)
+    events = [
+        event for event in journal_events
+        if event.get("aggregate_type") == "canonical_autonomous_simulation"
+        and event.get("aggregate_id") == run_id
+    ]
+    financial_scope = None
+    if events and events[0].get("event_type") == "AutonomousSimulationStarted":
+        first_payload = events[0].get("payload")
+        durable_protocol = (
+            first_payload.get("protocol")
+            if type(first_payload) is dict
+            else None
         )
-    )
-    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+        scope = (
+            durable_protocol.get("financial_scope")
+            if type(durable_protocol) is dict
+            else None
+        )
+        if type(scope) is not dict:
+            raise AutonomousRuntimeCheckpointError(
+                "autonomous simulation start lacks durable financial scope"
+            )
+        financial_scope = {
+            "account_id": _text(scope.get("account_id"), field="financial_scope.account_id"),
+            "provider_id": _text(scope.get("provider_id"), field="financial_scope.provider_id"),
+            "environment": _text(scope.get("environment"), field="financial_scope.environment"),
+        }
+        if financial_scope["environment"] != "SIMULATION":
+            raise AutonomousRuntimeCheckpointError(
+                "autonomous simulation financial scope must be SIMULATION"
+            )
     if financial_scope is not None:
         for aggregate_type in _COMPONENT_AGGREGATE_TYPES:
             events.extend(
                 event
-                for event in JournalStore.load_events_by_aggregate_type(
-                    store,
-                    aggregate_type,
-                )
+                for event in journal_events
+                if event.get("aggregate_type") == aggregate_type
                 if _component_publication_matches_run_scope(
                     event,
                     financial_scope=financial_scope,
@@ -592,18 +693,25 @@ def _autonomous_owned_pending_publications(
     store: JournalStore,
     *,
     run_id: str,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    for event in _autonomous_owned_publication_events(store, run_id=run_id):
-        # The canonical event, not caller input, chooses the only trusted topic.
-        # Non-published component events must not be treated as outbox rows.
-        topic = _canonical_publication_topic(event)
-        if topic is None:
-            continue
-        state = JournalStore.outbox_delivery_state(
-            store, event["event_id"], topic=topic,
+    events = _autonomous_owned_publication_events(
+        store,
+        run_id=run_id,
+        journal_events=journal_events,
+    )
+    try:
+        states = JournalStore.outbox_delivery_states(
+            store,
+            tuple((event["event_id"], _canonical_publication_topic(event)) for event in events),
         )
+    except ValueError as error:
+        raise AutonomousRuntimeCheckpointError(str(error)) from error
+    for event, state in zip(events, states, strict=True):
+        if state is None:
+            continue
         # The JournalStore's authenticated single-cut read returns only
         # validated delivery metadata, not a second caller-visible envelope.
         # The original canonical journal event remains the ownership authority;
@@ -655,10 +763,15 @@ def _require_checkpoint_outbox_state(
     *,
     run_id: str,
     completion_event_id: str | None,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
     """Require ZERO-owned publication completion; ignore foreign Host/UI backlog."""
 
-    pending = _autonomous_owned_pending_publications(store, run_id=run_id)
+    pending = _autonomous_owned_pending_publications(
+        store,
+        run_id=run_id,
+        journal_events=journal_events,
+    )
     if not pending:
         return
     if (
@@ -696,15 +809,18 @@ def _stable_runtime_components(
         )
     )
     store_identity = _journal_store_identity_document(identity)
+    captured_events = _journal_events_at_cut(store)
     _require_checkpoint_outbox_state(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=captured_events,
     )
     captured_cut, loop_events, authority_events = _runtime_scope_snapshot(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=captured_events,
     )
 
     completed_values: list[dict[str, object]] = []
@@ -737,9 +853,15 @@ def _stable_runtime_components(
             "reconciled": True,
         }
     )
+    retained_provider_states = [
+        event["payload"]["provider_state"]
+        for event in loop_events
+        if type(event.get("payload")) is dict
+        and type(event["payload"].get("provider_state")) is dict
+    ]
     provider_state = (
-        last.get("provider_state")
-        if last is not None
+        retained_provider_states[-1]
+        if retained_provider_states
         else {
             "bootstrap": "simulated-provider-unstarted",
             "initial_cash": protocol.get("initial_cash"),
@@ -850,15 +972,18 @@ def _stable_runtime_components(
         ),
     }
 
+    after_events = _journal_events_at_cut(store)
     after_cut, _after_loop, _after_authority = _runtime_scope_snapshot(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=after_events,
     )
     _require_checkpoint_outbox_state(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=after_events,
     )
     if after_cut != captured_cut:
         raise AutonomousRuntimeCheckpointError(

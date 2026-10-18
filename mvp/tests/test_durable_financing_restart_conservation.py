@@ -33,14 +33,14 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         self.store = JournalStore(self.path)
         self.economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         self.financing = DurableFinancingBook(
             self.store,
             self.economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -71,7 +71,7 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         update = book.record(event)
         aggregate_id = self.financing._aggregate_id(event.charge_id)
         payload = _event_payload(
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
             event=event,
@@ -102,14 +102,14 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         store = JournalStore(self.path)
         economic = DurableProviderEconomicBook(
             store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         financing = DurableFinancingBook(
             store,
             economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -209,7 +209,7 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         # leaving self.economic intentionally stale until financing replay refreshes it.
         separate_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )

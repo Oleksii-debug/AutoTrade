@@ -5,6 +5,7 @@ import os
 from hashlib import sha256, sha512
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -100,14 +101,44 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             self.assertIn('contracts/bindings/python/common_scalars.py', selected)
             collected = {path for path, _absolute, _content in candidate._collect(root / 'product')}
             self.assertIn('mvp/autotrade_mvp/diagnostics.py', collected)
+            self.assertIn('mvp/autotrade_mvp/diagnostic_export.py', collected)
             self.assertIn('mvp/autotrade_mvp/decision_trace.py', collected)
             self.assertIn('autotrade_runtime/artifacts/__init__.py', selected)
             self.assertIn('autotrade_runtime/artifacts/store.py', collected)
             self.assertIn('autotrade_runtime/resource_lock.py', collected)
+            self.assertTrue(candidate.HISTORICAL_SOURCE.issubset(selected))
+            # Run from the staged package, without the checkout on PYTHONPATH.
+            # The Windows embedded Python uses these same two product roots.
+            env = os.environ.copy()
+            env['PYTHONPATH'] = os.pathsep.join(
+                (str(root / 'product'), str(root / 'product' / 'research')))
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.run_historical_walkforward', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--first-holdout', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.export_historical_diagnostics', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--output', result.stdout)
 
     def test_canonical_runtime_source_selector_only_adds_python_modules(self):
         self.assertTrue(candidate._source_path_selected('autotrade_runtime/artifacts/store.py'))
         self.assertTrue(candidate._source_path_selected('autotrade_runtime/resource_lock.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_historical_walkforward.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_historical_supervisor.py'))
+        self.assertTrue(candidate._source_path_selected('tools/historical_diagnostic_sampler.py'))
+        self.assertTrue(candidate._source_path_selected('tools/export_historical_diagnostics.py'))
+        self.assertTrue(candidate._source_path_selected('tools/probe_whitebit_public.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_whitebit_public_supervisor.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_whitebit_alpha_research.py'))
+        self.assertTrue(candidate._source_path_selected('tools/configure_mistral.py'))
+        self.assertTrue(candidate._source_path_selected('tools/configure_model_provider.py'))
+        self.assertTrue(candidate._source_path_selected('tools/configure_whitebit.py'))
+        self.assertFalse(candidate._source_path_selected('tools/build_provider_free_candidate.py'))
         self.assertFalse(candidate._source_path_selected('autotrade_runtime/private-key.pem'))
         self.assertFalse(candidate._source_path_selected('autotrade_runtime/credentials.json'))
         self.assertFalse(candidate._source_path_selected('other/autotrade_runtime/artifacts/store.py'))

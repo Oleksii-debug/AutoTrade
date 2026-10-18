@@ -9,7 +9,6 @@ from .persistence import JournalStore, payload_digest
 from .simulation_runtime_checkpoint import autonomous_protocol_digest
 from .simulation_commands import (
     _protocol,
-    _require_explicit_recovery_for_unknown_start,
     validate_simulation_payload,
 )
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
@@ -126,8 +125,6 @@ def main():
         or action_payload.get('stop_after_episodes') != args.stop
     ):
         raise ValueError('worker invocation differs from durable lifecycle contract')
-    _require_explicit_recovery_for_unknown_start(store, args.action)
-
     def pause_requested():
         # Finish any retained financial observation, then pause before the next
         # market observation/admission when canonical emergency truth requires it.
@@ -137,7 +134,8 @@ def main():
         fault_at_episode=protocol['fault_at_episode'], emergency_at_episode=protocol['emergency_at_episode'],
         execution_profile=protocol.get('execution_profile', 'IMMEDIATE'),
         target_quantity=protocol.get('target_quantity', '1'),
-        should_pause=pause_requested)
+        should_pause=pause_requested,
+        _lifecycle_action=args.action)
     print(json.dumps({k: v for k, v in result.items() if k != 'decisions'}))
     return 2 if result['status'] == 'UNKNOWN' else 0
 

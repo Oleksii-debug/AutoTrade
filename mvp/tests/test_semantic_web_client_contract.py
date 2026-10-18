@@ -20,6 +20,64 @@ class _ElementParser(HTMLParser):
 
 
 class SemanticWebClientContractTests(unittest.TestCase):
+    def test_whitebit_public_status_is_semantic_nvda_readable_and_non_authoritative(self):
+        parser = _ElementParser()
+        parser.feed(INDEX.read_text(encoding="utf-8"))
+        by_id = {
+            attrs["id"]: (tag, attrs)
+            for tag, attrs in parser.elements
+            if "id" in attrs
+        }
+        tag, attrs = by_id["whitebit-public-status"]
+        self.assertEqual(tag, "section")
+        self.assertEqual(attrs.get("aria-labelledby"), "whitebit-public-heading")
+        self.assertNotIn("role", attrs)
+        self.assertNotIn("aria-live", attrs)
+        for field in (
+            "whitebit-public-health",
+            "whitebit-public-phase",
+            "whitebit-public-heartbeat",
+            "whitebit-public-latest",
+            "whitebit-public-authority",
+        ):
+            self.assertIn(field, by_id)
+
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function parseWhitebitPublicStatus(value)", js)
+        self.assertIn("status.public_data_only !== true", js)
+        self.assertIn("status.trading_authority !== false", js)
+        self.assertIn("WhiteBIT READY requires heartbeat and latest evidence", js)
+        self.assertIn("Public data only. Trading authority: none.", js)
+        self.assertIn("renderWhitebitPublicStatus(null)", js)
+
+    def test_diagnostic_downloads_are_distinct_native_buttons_with_nvda_status(self):
+        parser = _ElementParser()
+        parser.feed(INDEX.read_text(encoding="utf-8"))
+        by_id = {
+            attrs["id"]: (tag, attrs)
+            for tag, attrs in parser.elements
+            if "id" in attrs
+        }
+        for button_id, status_id in (
+            (
+                "download-technical-diagnostics",
+                "technical-diagnostic-download-status",
+            ),
+            ("download-agent-report", "agent-report-download-status"),
+        ):
+            tag, attrs = by_id[button_id]
+            self.assertEqual(tag, "button")
+            self.assertEqual(attrs.get("type"), "button")
+            self.assertEqual(attrs.get("aria-describedby"), status_id)
+            self.assertNotIn("tabindex", attrs)
+            self.assertIn(status_id, by_id)
+
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('route: HOST_API.route("downloadTechnicalDiagnostics")', js)
+        self.assertIn('route: HOST_API.route("downloadAgentReport")', js)
+        self.assertIn("button.focus();", js)
+        self.assertIn("queuePoliteAnnouncement(preparing);", js)
+
     def test_page_has_landmarks_skip_link_labels_and_table_headers(self):
         html = INDEX.read_text(encoding="utf-8")
         self.assertIn('href="#main">Skip to main content</a>', html)

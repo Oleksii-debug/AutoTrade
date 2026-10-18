@@ -254,123 +254,138 @@ class JournalStore(_JournalStoreImpl):
         *,
         topic: str,
     ) -> dict[str, Any]:
-        """Read one event's exact outbox publication and delivery state.
+        """Read one exact event/topic publication with the batch authority checks."""
+        topic = _impl._require_canonical_durable_text(topic, name="outbox topic")
+        return JournalStore.outbox_delivery_states(self, ((event_id, topic),))[0]
 
-        Recovery code must distinguish a legitimately delivered row from a
-        missing/corrupt publication record.  This read keeps the authoritative
-        event envelope and its outbox row in one SQLite snapshot and validates
-        their exact byte binding before reporting delivery state.
+    def outbox_delivery_states(
+        self,
+        publications: tuple[tuple[str, str | None], ...],
+    ) -> tuple[dict[str, Any] | None, ...]:
+        """Authenticate requested publications in one SQLite read snapshot.
+
+        None means the canonical event must have no publication, not any topic.
+        Every published row still passes the exact envelope/hash/topic checks,
+        including delivered rows. No cached result or delivery mutation is used.
         """
-
         identity = require_exact_journal_store_authority(
-            self,
-            subject="outbox delivery-state store",
+            self, subject="outbox delivery-state store",
         )
-        event_id = _impl._require_canonical_durable_text(
-            event_id,
-            name="event_id",
-        )
-        topic = _impl._require_canonical_durable_text(
-            topic,
-            name="outbox topic",
-        )
+        if type(publications) is not tuple:
+            raise TypeError("outbox publications must be an exact tuple")
+        for publication in publications:
+            if type(publication) is not tuple or len(publication) != 2:
+                raise TypeError("outbox publication must be an exact event/topic pair")
+            event_id, topic = publication
+            _impl._require_canonical_durable_text(event_id, name="event_id")
+            if topic is not None:
+                _impl._require_canonical_durable_text(topic, name="outbox topic")
         with journal_store_authority_scope(self, identity):
             with JournalStore._connect(self) as connection:
                 connection.execute("BEGIN")
                 try:
-                    row = connection.execute(
-                        """
-                        SELECT
-                            outbox.outbox_id,
-                            outbox.event_id,
-                            outbox.topic,
-                            outbox.payload_json AS outbox_payload_json,
-                            outbox.envelope_hash,
-                            outbox.delivered_at,
-                            events.event_type,
-                            events.aggregate_type,
-                            events.aggregate_id,
-                            events.aggregate_version,
-                            events.payload_json AS event_payload_json,
-                            events.payload_hash,
-                            events.committed_at,
-                            events.envelope_json AS event_envelope_json,
-                            events.envelope_hash AS event_envelope_hash,
-                            events.journal_sequence
-                        FROM outbox
-                        JOIN events ON events.event_id = outbox.event_id
-                        WHERE outbox.event_id = ? AND outbox.topic = ?
-                        """,
-                        (event_id, topic),
-                    ).fetchone()
-                    if row is None:
-                        raise ValueError(
-                            "durable outbox publication is missing for bootstrap event"
+                    results = []
+                    for event_id, topic in publications:
+                        row = connection.execute(
+                            """
+                            SELECT
+                                outbox.outbox_id,
+                                outbox.event_id,
+                                outbox.topic,
+                                outbox.payload_json AS outbox_payload_json,
+                                outbox.envelope_hash,
+                                outbox.delivered_at,
+                                events.event_type,
+                                events.aggregate_type,
+                                events.aggregate_id,
+                                events.aggregate_version,
+                                events.payload_json AS event_payload_json,
+                                events.payload_hash,
+                                events.committed_at,
+                                events.envelope_json AS event_envelope_json,
+                                events.envelope_hash AS event_envelope_hash,
+                                events.journal_sequence
+                            FROM outbox
+                            JOIN events ON events.event_id = outbox.event_id
+                            WHERE outbox.event_id = ?
+                            """,
+                            (event_id,),
+                        ).fetchone()
+                        if topic is None:
+                            if row is not None:
+                                raise ValueError("canonical event forbids an outbox publication")
+                            if connection.execute(
+                                "SELECT event_id FROM events WHERE event_id = ?", (event_id,),
+                            ).fetchone() is None:
+                                raise ValueError("canonical outbox event is missing")
+                            results.append(None)
+                            continue
+                        if row is None:
+                            raise ValueError("durable outbox publication is missing for canonical event")
+                        raw_outbox_payload = row["outbox_payload_json"]
+                        if type(raw_outbox_payload) is not str:
+                            raise ValueError("outbox payload authority is not exact text")
+                        stored_topic = _impl._require_canonical_durable_text(
+                            row["topic"],
+                            name="outbox topic",
                         )
+                        if stored_topic != topic:
+                            raise ValueError(
+                                "outbox topic does not match requested recovery route"
+                            )
+                        actual_outbox_hash = _impl._outbox_envelope_digest(
+                            stored_topic,
+                            raw_outbox_payload,
+                        )
+                        if row["envelope_hash"] != actual_outbox_hash:
+                            raise ValueError(
+                                "outbox envelope hash does not match stored payload"
+                            )
 
-                    raw_outbox_payload = row["outbox_payload_json"]
-                    if type(raw_outbox_payload) is not str:
-                        raise ValueError("outbox payload authority is not exact text")
-                    stored_topic = _impl._require_canonical_durable_text(
-                        row["topic"],
-                        name="outbox topic",
-                    )
-                    if stored_topic != topic:
-                        raise ValueError(
-                            "outbox topic does not match requested recovery route"
+                        event_row = {
+                            "event_id": row["event_id"],
+                            "event_type": row["event_type"],
+                            "aggregate_type": row["aggregate_type"],
+                            "aggregate_id": row["aggregate_id"],
+                            "aggregate_version": row["aggregate_version"],
+                            "payload_json": row["event_payload_json"],
+                            "payload_hash": row["payload_hash"],
+                            "committed_at": row["committed_at"],
+                            "envelope_json": row["event_envelope_json"],
+                            "envelope_hash": row["event_envelope_hash"],
+                            "journal_sequence": row["journal_sequence"],
+                        }
+                        event = JournalStore._decode_event_row(event_row)
+                        authoritative_envelope = dict(event)
+                        authoritative_envelope.pop("journal_sequence", None)
+                        authoritative_envelope["aggregate_version"] = str(
+                            authoritative_envelope["aggregate_version"]
                         )
-                    actual_outbox_hash = _impl._outbox_envelope_digest(
-                        stored_topic,
-                        raw_outbox_payload,
-                    )
-                    if row["envelope_hash"] != actual_outbox_hash:
-                        raise ValueError(
-                            "outbox envelope hash does not match stored payload"
-                        )
+                        if _impl.canonical_json(authoritative_envelope) != raw_outbox_payload:
+                            raise ValueError(
+                                "outbox payload does not match authoritative journal event envelope"
+                            )
 
-                    event_row = {
-                        "event_id": row["event_id"],
-                        "event_type": row["event_type"],
-                        "aggregate_type": row["aggregate_type"],
-                        "aggregate_id": row["aggregate_id"],
-                        "aggregate_version": row["aggregate_version"],
-                        "payload_json": row["event_payload_json"],
-                        "payload_hash": row["payload_hash"],
-                        "committed_at": row["committed_at"],
-                        "envelope_json": row["event_envelope_json"],
-                        "envelope_hash": row["event_envelope_hash"],
-                        "journal_sequence": row["journal_sequence"],
-                    }
-                    event = JournalStore._decode_event_row(event_row)
-                    authoritative_envelope = dict(event)
-                    authoritative_envelope.pop("journal_sequence", None)
-                    authoritative_envelope["aggregate_version"] = str(
-                        authoritative_envelope["aggregate_version"]
-                    )
-                    if _impl.canonical_json(authoritative_envelope) != raw_outbox_payload:
-                        raise ValueError(
-                            "outbox payload does not match authoritative journal event envelope"
+                        delivered_at = row["delivered_at"]
+                        if delivered_at is not None:
+                            _impl._require_canonical_durable_text(
+                                delivered_at,
+                                name="outbox delivered_at",
+                            )
+                        stored_outbox_id = _impl._require_canonical_durable_text(
+                            row["outbox_id"],
+                            name="outbox_id",
                         )
-
-                    delivered_at = row["delivered_at"]
-                    if delivered_at is not None:
-                        _impl._require_canonical_durable_text(
-                            delivered_at,
-                            name="outbox delivered_at",
-                        )
-                    stored_outbox_id = _impl._require_canonical_durable_text(
-                        row["outbox_id"],
-                        name="outbox_id",
-                    )
-                    result = {
-                        "outbox_id": stored_outbox_id,
-                        "event_id": event_id,
-                        "topic": stored_topic,
-                        "envelope_hash": actual_outbox_hash,
-                        "delivered": delivered_at is not None,
-                    }
+                        result = {
+                            "outbox_id": stored_outbox_id,
+                            "event_id": event_id,
+                            "topic": stored_topic,
+                            "envelope_hash": actual_outbox_hash,
+                            "delivered": delivered_at is not None,
+                        }
+                        results.append(result)
                     connection.commit()
-                    return result
+                    return tuple(results)
                 except Exception:
                     connection.rollback()
                     raise

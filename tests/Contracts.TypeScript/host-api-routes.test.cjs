@@ -13,6 +13,9 @@ const expected = new Map([
   ["submitCommand", "/api/v1/commands"],
   ["streamEvents", "/api/v1/events"],
   ["getHealth", "/api/v1/health"],
+  ["downloadLocalDiagnostics", "/api/v1/local-diagnostics"],
+  ["downloadTechnicalDiagnostics", "/api/v1/technical-diagnostics"],
+  ["downloadAgentReport", "/api/v1/agent-report"],
 ]);
 for (const [operationId, route] of expected) {
   if (api.route(operationId) !== route) {

@@ -1,5 +1,18 @@
-"""Causal replay primitives."""
+"""Causal replay and blinded historical-evaluation primitives."""
 
+from .blinding import (
+    BlindedCausalFeeder,
+    BlindedDataView,
+    BlindedEvent,
+    BlindedFeederCheckpoint,
+    BlindedInputEvidence,
+    BlindedReplayDataset,
+    BlindingError,
+    BlindingProfile,
+    CalendarField,
+    IdentityField,
+    blind_dataset,
+)
 from .feeder import (
     CausalDataView,
     CausalDataset,
@@ -12,6 +25,17 @@ from .feeder import (
 )
 
 __all__ = [
+    "BlindedCausalFeeder",
+    "BlindedDataView",
+    "BlindedEvent",
+    "BlindedFeederCheckpoint",
+    "BlindedInputEvidence",
+    "BlindedReplayDataset",
+    "BlindingError",
+    "BlindingProfile",
+    "CalendarField",
+    "IdentityField",
+    "blind_dataset",
     "CausalDataView",
     "CausalDataset",
     "CausalEvent",

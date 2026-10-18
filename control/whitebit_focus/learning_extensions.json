@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "reviewed_at": "2026-10-18",
+  "parent_registry": "control/whitebit_focus/reuse_priorities.json",
+  "new_candidate_count": 5,
+  "combined_unique_repositories": 79,
+  "count_definition": "60 historical candidates + 14 additional entries in reuse_priorities + 5 here; not an installed or integrated component count",
+  "automatic_install": false,
+  "model_weights_install": false,
+  "entries": [
+    {
+      "repository": "adaptive-machine-learning/CapyMOA",
+      "url": "https://github.com/adaptive-machine-learning/CapyMOA",
+      "license": "BSD-3-Clause root; review MOA/Java and other transitive licenses separately",
+      "license_blob": "e7ba1d70285d32b23da7372c83d8b9c267ce69b9",
+      "owner": "W09",
+      "status": "CANDIDATE_NOT_IMPORTED",
+      "priority": "P2_ALTERNATIVE_TO_RIVER",
+      "purpose_uk": "Потокове та поступове навчання, адаптивні ансамблі й перевірка змін розподілу.",
+      "adoption_gate": "Compare a real River baseline and CapyMOA on the same chronological WhiteBIT-derived features, label times, CPU/RAM and retention tests. Adopt only if the measured residual-cost benefit justifies the Java/MOA runtime. Do not install both merely to increase model count."
+    },
+    {
+      "repository": "fidelity/mabwiser",
+      "url": "https://github.com/fidelity/mabwiser",
+      "license": "Apache-2.0",
+      "license_blob": "f49a4e16e68b128803cc2dcea614603632b04eac",
+      "owner": "W10",
+      "status": "CANDIDATE_NOT_IMPORTED",
+      "priority": "P1_BOUNDED_STRATEGY_SELECTION",
+      "purpose_uk": "Вибір між уже перевіреними стратегіями за контекстом; готові алгоритми bandit замість власної реалізації.",
+      "adoption_gate": "Compare with Vowpal Wabbit and fixed allocation. Log chosen action, policy revision, propensity where defined, mature after-cost reward and no-trade option. Exploration only in simulation; no leverage or permission expansion."
+    },
+    {
+      "repository": "scikit-learn-contrib/MAPIE",
+      "url": "https://github.com/scikit-learn-contrib/MAPIE",
+      "license": "BSD-3-Clause",
+      "license_blob": "b21fc64411494ec1f50371e8b530fd792a84a1d2",
+      "owner": "W11",
+      "status": "CANDIDATE_NOT_IMPORTED",
+      "priority": "P1_UNCERTAINTY_CALIBRATION",
+      "purpose_uk": "Калібрування невизначеності прогнозів, щоб агент міг відмовлятися від рішення за недостатньої впевненості.",
+      "adoption_gate": "Use chronology-aware calibration and held-out realized coverage tests. Time dependence and distribution drift can invalidate assumptions; do not present intervals as guaranteed trading loss bounds or use held-out labels in model selection."
+    },
+    {
+      "repository": "lightgbm-org/LightGBM",
+      "url": "https://github.com/lightgbm-org/LightGBM",
+      "previous_repository": "microsoft/LightGBM",
+      "license": "MIT; exact adopted release and dependencies still require pinning",
+      "readme_blob": "dabb272a1791698e3e28d1cd7f960029b6c12846",
+      "owner": "W09",
+      "status": "CANDIDATE_NOT_IMPORTED",
+      "priority": "P1_CPU_TABULAR_BASELINE",
+      "purpose_uk": "Недорогий сильний контрольний прогнозувач для числових ринкових ознак; не потребує написання власних дерев.",
+      "adoption_gate": "Compare with existing logistic/River baseline using after-cost and calibration metrics, not training accuracy. This is tree boosting, not a financial neural model or per-observation partial_fit replacement. Pin the current official repository after its March 2026 move."
+    },
+    {
+      "repository": "takuseno/d3rlpy",
+      "url": "https://github.com/takuseno/d3rlpy",
+      "license": "MIT",
+      "readme_blob": "766d74b39f13215b2d360e77723dc5789ace547e",
+      "owner": "W10",
+      "status": "CANDIDATE_NOT_IMPORTED",
+      "priority": "P2_OFFLINE_RL_AFTER_BASELINE",
+      "purpose_uk": "Готові алгоритми навчання торгової policy на збережених траєкторіях, без дослідів реальними грошима.",
+      "adoption_gate": "Use versioned state/action/reward trajectories from the canonical simulator; audit dataset coverage, support mismatch, delayed outcomes and held-out policy evaluation. Package dependencies must remain isolated; no new live sender or autonomous promotion."
+    }
+  ]
+}

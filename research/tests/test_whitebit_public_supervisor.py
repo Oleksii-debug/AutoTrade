@@ -11,7 +11,11 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.durable_publish import atomic_write_json
+from research.autotrade_research.artifacts.store import (
+    ArtifactStore,
+    _manifest_integrity_hash,
+)
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from tools.run_whitebit_public_supervisor import (
     SCHEMA,
@@ -95,6 +99,38 @@ class Connector:
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_removes_authenticated_prepared_crash_orphan(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ArtifactStore(root / "artifacts")
+
+            def publish(update_id: int) -> dict:
+                return store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=_ticker(update_id),
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[SOURCE_URI],
+                    metadata={"provider": "WHITEBIT", "market": "BTC_USDT"},
+                )
+
+            protected = publish(1)
+            orphan = publish(2)
+            orphan_path = store.manifests / (orphan["artifact_id"] + ".json")
+            manifest = json.loads(orphan_path.read_text(encoding="utf-8"))
+            manifest["publication_state"] = "PREPARED"
+            manifest["manifest_hash"] = _manifest_integrity_hash(manifest)
+            atomic_write_json(orphan_path, manifest)
+
+            quota = WhiteBitArtifactQuota(store, market="BTC_USDT", maximum=2)
+            quota.recover(protected_artifact_id=protected["artifact_id"])
+
+            self.assertFalse(orphan_path.exists())
+            self.assertTrue(
+                (store.manifests / (protected["artifact_id"] + ".json")).is_file()
+            )
+            self.assertEqual(len(quota._entries), 1)
+
     async def test_atomic_publication_retries_transient_windows_reader_lease(self):
         with TemporaryDirectory() as directory:
             destination = Path(directory) / "latest-market.json"

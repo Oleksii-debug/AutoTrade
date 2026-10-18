@@ -26,7 +26,11 @@ from research.autotrade_research.artifacts.durable_publish import (
     sync_parent_directory,
 )
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    _verify_manifest_integrity,
+)
 from research.autotrade_research.integrations.whitebit_public import _symbol
 from research.autotrade_research.integrations.whitebit_websocket import SOURCE_URI
 from research.autotrade_research.integrations.whitebit_websocket import (
@@ -511,6 +515,35 @@ class WhiteBitArtifactQuota:
             raise ValueError("artifact quota encountered foreign evidence")
         return manifest["created_at"], artifact_id, manifest["sha256"]
 
+    def _prepared_crash_orphan(
+        self,
+        path: Path,
+    ) -> tuple[str, str, str] | None:
+        """Authenticate one v2 PREPARED manifest left by a killed publisher."""
+
+        try:
+            manifest = strict_json_loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            return None
+        if (
+            type(manifest) is not dict
+            or manifest.get("schema_version") != 2
+            or manifest.get("publication_state") != "PREPARED"
+            or manifest.get("artifact_id") != path.stem
+        ):
+            return None
+        try:
+            ArtifactStore._validate_manifest_contract(
+                manifest,
+                authenticated=True,
+            )
+            if not _verify_manifest_integrity(manifest, required=False):
+                return None
+            self.artifacts._manifest_object_contract(manifest)
+        except (ArtifactIntegrityError, TypeError, ValueError):
+            return None
+        return manifest["created_at"], path.stem, manifest["sha256"]
+
     def _remove_manifest(self, entry: tuple[str, str, str]) -> None:
         _created_at, artifact_id, _digest = entry
         path = self.artifacts.manifests / (artifact_id + ".json")
@@ -532,7 +565,13 @@ class WhiteBitArtifactQuota:
             entries: list[tuple[str, str, str]] = []
             for path in sorted(self.artifacts.manifests.glob("*.json")):
                 _ordinary_owned_file(path, parent=self.artifacts.manifests)
-                entries.append(self._entry(path.stem))
+                try:
+                    entries.append(self._entry(path.stem))
+                except ArtifactIntegrityError:
+                    prepared = self._prepared_crash_orphan(path)
+                    if prepared is None or prepared[1] == protected_artifact_id:
+                        raise
+                    self._remove_manifest(prepared)
             by_newest = sorted(entries, reverse=True)
             retained: set[str] = set()
             if protected_artifact_id is not None:

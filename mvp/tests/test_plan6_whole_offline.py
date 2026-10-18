@@ -26,11 +26,11 @@ from tools.qualify_plan6_whole_offline import (
 SHA = "a" * 40
 
 
-def result(section, *, code=0, **changes):
+def result(requested_section, *, code=0, **changes):
     receipt = {
         "schema_version": "plan6-offline-suite.v1",
-        "section": section,
-        "test_modules": list(dict.fromkeys(SECTION_MODULES[section])),
+        "section": requested_section,
+        "test_modules": list(dict.fromkeys(SECTION_MODULES[requested_section])),
         "test_count": 100,
         "status": "PASS",
         "network": "DENIED",
@@ -166,3 +166,4 @@ class Plan6WholeOfflineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

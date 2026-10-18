@@ -724,7 +724,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 raise AssertionError("subclass at must not execute")
 
         source = sealed_dividend()
-        forged = ForgedRegistry(versions=(canonical_instrument(),))
+        forged = object.__new__(ForgedRegistry)
         with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
             resolve(
                 source,
@@ -1011,7 +1011,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             source.observed_at,
         )
         self.assertIn(
-            accepted.provenance_digest,
+            accepted.provider_fact_digest,
             accepted.event.source_revision,
         )
 
@@ -1081,7 +1081,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         accepted = resolve(source)
         self.assertEqual(accepted.corrects_external_event_id, "corp-old")
         self.assertEqual(accepted.provider_revision, "2")
-        self.assertIn(accepted.provenance_digest, accepted.event.source_revision)
+        self.assertIn(accepted.provider_fact_digest, accepted.event.source_revision)
 
 
 
@@ -1594,7 +1594,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             journal, durable = self._store(path)
             durable.record(original)
             with self.assertRaisesRegex(
-                CorporateActionEvidenceConflict, "reused with changed evidence"
+                CorporateActionEvidenceConflict, "reused with changed provider fact"
             ):
                 durable.record(changed)
             self.assertEqual(
@@ -1709,20 +1709,15 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             source_sequence=correction.event.source_sequence,
             payload={"numerator": "2", "denominator": "1"},
         )
-        changed = type(correction)(
-            **{
-                **correction.__dict__,
-                "event": changed_event,
-            }
-        )
+        object.__setattr__(correction, "event", changed_event)
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             journal, durable = self._store(path)
             durable.record(original)
             with self.assertRaisesRegex(
-                CorporateActionEvidenceConflict, "immutable action identity"
+                CorporateActionEvidenceError, "changed after resolver issuance"
             ):
-                durable.record(changed)
+                durable.record(correction)
             self.assertEqual(
                 len(
                     journal.load_events(
@@ -1914,3 +1909,4 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

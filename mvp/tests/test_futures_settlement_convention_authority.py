@@ -127,7 +127,11 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
                 return super().__getattribute__(name)
 
         base = inverse_future(settlement_convention=settlement_convention())
-        hostile = HostileInstrumentVersion(**base.__dict__)
+        payload = {field.name: getattr(base, field.name) for field in fields(base)}
+        payload["metadata_evidence"] = tuple(
+            dict(item) for item in base.metadata_evidence
+        )
+        hostile = HostileInstrumentVersion(**payload)
         calls.clear()
 
         with self.assertRaisesRegex(TypeError, "exact InstrumentVersion"):
@@ -235,3 +239,4 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

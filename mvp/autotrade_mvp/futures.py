@@ -136,11 +136,14 @@ def _install_futures_contract_lifecycle_authority():
             tuple[str, str, datetime, datetime, datetime],
         ],
     ] = {}
+    canonical_tuple = tuple
 
     def prune_dead() -> None:
         dead = [
             object_id
-            for object_id, (value_ref, _snapshot) in tuple(authorities.items())
+            for object_id, (value_ref, _snapshot) in canonical_tuple(
+                authorities.items()
+            )
             if value_ref() is None
         ]
         for object_id in dead:
@@ -1299,3 +1302,4 @@ def require_open_for_new_exposure(
         "new futures exposure requires product-selected instrument registry "
         "composition authority; caller-supplied InstrumentRegistry is diagnostic only"
     )
+

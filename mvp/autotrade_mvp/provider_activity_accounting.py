@@ -244,12 +244,22 @@ def book_external_provider_cash_activity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=activity.provider_environment,
         activity_id=activity.activity_id,
     )
     book_id = _impl._book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=activity.provider_environment,
+    )
+    _impl._require_unambiguous_provider_economic_history(
+        store,
+        store_identity,
+        provider_id=provider,
+        account_id=account,
+        environment=scope,
+        scoped_book_id=book_id,
     )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
@@ -283,6 +293,9 @@ def book_external_provider_cash_activity(
         },
         "amount": amount_text,
     }
+    if activity.provider_environment != scope:
+        request["provider_environment"] = activity.provider_environment
+        request["activity"]["provider_environment"] = activity.provider_environment
     result = {
         "provider_id": provider,
         "account_id": account,
@@ -292,6 +305,8 @@ def book_external_provider_cash_activity(
         "amount": amount_text,
         "currency": activity.currency,
     }
+    if activity.provider_environment != scope:
+        result["provider_environment"] = activity.provider_environment
 
     imported_event_id = str(
         uuid5(
@@ -410,6 +425,11 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or economic_payload.get("provider_environment")
+            != _impl._provider_environment_payload(
+                provider_environment=activity.provider_environment,
+                environment=scope,
+            )
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _impl._transaction_payload(transaction)
@@ -492,6 +512,8 @@ def book_external_provider_cash_activity(
         "observed_at": observed_text,
         "transaction": _impl._transaction_payload(transaction),
     }
+    if activity.provider_environment != scope:
+        economic_payload["provider_environment"] = activity.provider_environment
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
@@ -733,3 +755,4 @@ def commit_economic_batch_with_reservation_consumption(
 # Install provider-fill provenance only when the financial surface is loaded.
 # Foundation-only JournalStore imports must remain independent of research.
 from . import _provider_fill_atomic_authority as _provider_fill_atomic_authority  # noqa: E402,F401
+

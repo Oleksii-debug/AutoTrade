@@ -54,6 +54,12 @@ class HostApiRouteCodegenTests(unittest.TestCase):
                     "getHealth",
                     (),
                 ),
+                Operation(
+                    "get",
+                    "/api/v1/local-diagnostics",
+                    "downloadLocalDiagnostics",
+                    (),
+                ),
             ),
         )
 

@@ -789,7 +789,7 @@
   }
 
   function captureTableSelection(body) {
-    const selection = window.getSelection();
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
     const focus = selectedCellEndpoint(body, selection.focusNode, selection.focusOffset);
@@ -861,7 +861,7 @@
     const anchor = findPoint(bookmark.anchor);
     const focus = findPoint(bookmark.focus);
     if (anchor === null || focus === null) return;
-    const selection = window.getSelection();
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
     if (!selection) return;
     selection.removeAllRanges();
     if (typeof selection.setBaseAndExtent === "function") {
@@ -2368,8 +2368,9 @@ function renderOperation(operation) {
       const button = byId("download-diagnostics");
       button.disabled = true;
       text("diagnostic-download-status", "Preparing the durable diagnostic report.");
+      queuePoliteAnnouncement("Preparing the durable diagnostic report.");
       try {
-        const response = await fetch("/api/v1/local-diagnostics", {
+        const response = await fetch(HOST_API.route("downloadLocalDiagnostics"), {
           method: "GET", credentials: "same-origin", cache: "no-store",
           headers: {"Accept": "application/json"}
         });
@@ -2379,16 +2380,18 @@ function renderOperation(operation) {
         try {
           const link = document.createElement("a");
           link.href = url;
-          link.download = "autotrade-diagnostics.json";
+          link.download = "autotrade-diagnostics.zip";
           document.body.appendChild(link);
           link.click();
           link.remove();
-          text("diagnostic-download-status", "Diagnostic report downloaded. You can attach the JSON file to our conversation.");
+          text("diagnostic-download-status", "Diagnostic ZIP download requested. You can attach the ZIP file to our conversation.");
+          queuePoliteAnnouncement("Diagnostic ZIP download requested.");
         } finally {
           window.setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
       } catch (error) {
         text("diagnostic-download-status", "Diagnostic download failed. Pair the local owner session and retry; the journal was not changed.");
+        queuePoliteAnnouncement("Diagnostic download failed. Pair the local owner session and retry.");
       } finally {
         button.disabled = false;
         button.focus();

@@ -5,6 +5,8 @@ This is provider-free process/UI-API evidence, not Windows/NVDA qualification.
 from concurrent.futures import ThreadPoolExecutor
 import http.client
 import json
+from io import BytesIO
+from zipfile import ZipFile
 import os
 from pathlib import Path
 import socket
@@ -72,7 +74,9 @@ class ProductClient:
         try:
             connection.request(method, path, None if payload is None else json.dumps(payload), headers)
             response = connection.getresponse(); raw = response.read()
-            data = json.loads(raw) if 'json' in response.getheader('Content-Type', '') else raw.decode()
+            content_type = response.getheader('Content-Type', '')
+            data = (json.loads(raw) if 'json' in content_type else
+                    raw if 'zip' in content_type else raw.decode())
             return response.status, data, dict(response.getheaders())
         finally: connection.close()
 
@@ -125,11 +129,15 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 status, report, headers = client.request('GET', '/api/v1/local-diagnostics')
                 self.assertEqual(status, 200, report)
                 self.assertEqual(headers['Content-Disposition'],
-                    'attachment; filename="autotrade-diagnostics.json"')
-                self.assertEqual(report['event_count'], len(report['events']))
-                self.assertGreater(report['event_count'], 0)
-                first_ids = [event['event_id'] for event in report['events']]
-                self.assertIn('journal_sequence', report['events'][0])
+                    'attachment; filename="autotrade-diagnostics.zip"')
+                with ZipFile(BytesIO(report)) as archive:
+                    manifest = json.loads(archive.read('manifest.json'))
+                    events = [json.loads(line) for line in archive.read('journal-events.jsonl').splitlines()]
+                    self.assertEqual(manifest['journal_event_count'], len(events))
+                    self.assertGreater(len(events), 0)
+                    self.assertIn('journal_sequence', events[0])
+                    self.assertFalse(manifest['technical_sampling_complete'])
+                    first_ids = [event['event_id'] for event in events]
                 # Browser same-origin GET requests normally omit Origin.
                 connection = http.client.HTTPConnection('127.0.0.1', client.port, timeout=30)
                 try:
@@ -137,7 +145,8 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                         headers={'Cookie': client.cookie})
                     response = connection.getresponse()
                     self.assertEqual(response.status, 200)
-                    self.assertEqual(json.loads(response.read())['event_count'], report['event_count'])
+                    with ZipFile(BytesIO(response.read())) as archive:
+                        self.assertEqual(json.loads(archive.read('manifest.json'))['journal_event_count'], len(events))
                 finally:
                     connection.close()
                 client.cookie = None
@@ -149,8 +158,10 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
             try:
                 status, after, _ = restarted.request('GET', '/api/v1/local-diagnostics')
                 self.assertEqual(status, 200)
+                with ZipFile(BytesIO(after)) as archive:
+                    recovered = [json.loads(line) for line in archive.read('journal-events.jsonl').splitlines()]
                 self.assertEqual(first_ids,
-                    [event['event_id'] for event in after['events']][:len(first_ids)])
+                    [event['event_id'] for event in recovered][:len(first_ids)])
             finally:
                 restarted.close()
 

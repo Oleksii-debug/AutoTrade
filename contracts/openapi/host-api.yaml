@@ -85,6 +85,18 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/provider.schema.json#/$defs/HealthResult
+  /api/v1/local-diagnostics:
+    get:
+      operationId: downloadLocalDiagnostics
+      description: Owner-only local simulation evidence export; never grants trading authority.
+      responses:
+        "200":
+          description: Complete diagnostic ZIP from the durable local journal
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
 
 components:
   securitySchemes:

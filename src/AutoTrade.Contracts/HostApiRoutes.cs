@@ -44,4 +44,9 @@ public static class HostApiRoutes
     /// </summary>
     public const string GetHealth = "api/v1/health";
 
+    /// <summary>
+    /// Relative route for OpenAPI operation downloadLocalDiagnostics.
+    /// </summary>
+    public const string DownloadLocalDiagnostics = "api/v1/local-diagnostics";
+
 }

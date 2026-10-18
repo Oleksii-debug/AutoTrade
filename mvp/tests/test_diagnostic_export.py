@@ -1,11 +1,14 @@
 """Shareable reports must remain faithful to durable evidence and inert."""
 import json
+from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from zipfile import ZipFile
 
 from mvp.autotrade_mvp.diagnostic_export import (
-    historical_diagnostic_export, runtime_diagnostic_export,
+    historical_diagnostic_export, runtime_diagnostic_export, runtime_diagnostic_zip,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
@@ -37,6 +40,25 @@ class DiagnosticExportTests(unittest.TestCase):
             (models / "linked.json").symlink_to(outside)
             with self.assertRaisesRegex(ValueError, "symlink"):
                 historical_diagnostic_export(workspace)
+
+    def test_full_zip_carries_integrity_and_explicit_telemetry_coverage(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            run_vertical_slice([100, 101, 102, 103], state)
+            (state / "checkpoint.json").write_text(
+                '{"api_key":"secret-sentinel-453"}', encoding="utf-8")
+            report = runtime_diagnostic_zip(
+                JournalStore(state / "journal.sqlite3"), state,
+                source_revision="a" * 40)
+            self.assertNotIn(b"secret-sentinel-453", report.data)
+            with ZipFile(BytesIO(report.data)) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                self.assertFalse(manifest["technical_sampling_complete"])
+                self.assertTrue(manifest["complete_journal"])
+                for name, evidence in manifest["members"].items():
+                    self.assertEqual(sha256(archive.read(name)).hexdigest(), evidence["sha256"])
+                self.assertEqual(len(archive.read("journal-events.jsonl").splitlines()),
+                                 manifest["journal_event_count"])
 
 
 if __name__ == "__main__":

@@ -227,6 +227,14 @@ internal static class Program
     static void WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest()
     {
         WebExperienceSecurityPolicy policy = new(HostOrigin);
+        Check.True(policy.AllowsSessionHeaderForwarding(
+            "GET", new Uri(HostOrigin, "/" + HostApiRoutes.DownloadLocalDiagnostics),
+            new Uri(HostOrigin, "/index.html")),
+            "paired diagnostic request cannot obtain authenticated owner session");
+        Check.True(!policy.AllowsSessionHeaderForwarding(
+            "POST", new Uri(HostOrigin, "/" + HostApiRoutes.DownloadLocalDiagnostics),
+            new Uri(HostOrigin, "/index.html")),
+            "diagnostic route admitted a mutating method");
 
         Check.True(
             !policy.AllowsWebMessageCommandAuthority,
@@ -240,6 +248,19 @@ internal static class Program
         Check.True(
             !policy.AllowsDownloads,
             "embedded downloads were admitted by the trust policy");
+        const string reportBlob = "blob:http://127.0.0.1:8765/123e4567-e89b-12d3-a456-426614174000";
+        Check.True(
+            policy.AllowsDiagnosticDownload(reportBlob, "autotrade-diagnostics.zip", true),
+            "paired diagnostic ZIP was blocked by the trusted download path");
+        Check.True(
+            !policy.AllowsDiagnosticDownload(reportBlob, "autotrade-diagnostics.zip", false)
+            && !policy.AllowsDiagnosticDownload(reportBlob, "payload.exe", true)
+            && !policy.AllowsDiagnosticDownload(
+                "blob:http://127.0.0.1:8766/123e4567-e89b-12d3-a456-426614174000",
+                "autotrade-diagnostics.zip", true)
+            && !policy.AllowsDiagnosticDownload(
+                "https://example.com/report.zip", "autotrade-diagnostics.zip", true),
+            "untrusted download source entered the diagnostic save path");
         Check.True(
             !policy.AllowsNewWindow(new Uri(HostOrigin, "/app/help")),
             "same-origin popup was silently admitted as trusted content");

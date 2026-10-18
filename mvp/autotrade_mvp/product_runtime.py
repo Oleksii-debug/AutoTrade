@@ -32,7 +32,7 @@ from .security import SecurityBoundary
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
 from .simulation_status import SimulationStateChanging, inspect_canonical_simulation
 from .simulation_commands import _protocol
-from .diagnostic_export import runtime_diagnostic_export
+from .diagnostic_export import runtime_diagnostic_zip
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
 from .windows_host_session import persist_desktop_owner_session
 
@@ -178,8 +178,9 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                 _principal, role = self._principal(normalized)
                 if role != 'OWNER':
                     raise PermissionError('diagnostic export requires owner')
-                prepared = runtime_diagnostic_export(self._diagnostic_journal, Path(self.state_dir))
-                return TransportResponse(200, 'application/json; charset=utf-8', prepared.data,
+                prepared = runtime_diagnostic_zip(self._diagnostic_journal, Path(self.state_dir),
+                    source_revision=source_revision())
+                return TransportResponse(200, 'application/zip', prepared.data,
                     (('Content-Disposition', 'attachment; filename="' + prepared.filename + '"'),
                      ('X-Content-Type-Options', 'nosniff'),
                      ('Cache-Control', 'no-store'),

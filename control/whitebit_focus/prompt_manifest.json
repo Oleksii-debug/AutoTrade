@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "date": "2026-10-18",
+  "scope": "WHITEBIT_EXECUTION_SCOPE.md",
+  "prompt_count": 15,
+  "required_min_characters": 15000,
+  "actual_min_characters": 25054,
+  "total_characters": 382670,
+  "tasks_per_worker": 20,
+  "total_primary_tasks": 300,
+  "delivery": "15 standalone copyable text blocks in owner chat",
+  "state": "PREPARED_NOT_AGENTS_LAUNCHED",
+  "common_control": "control/whitebit_focus/workers.json",
+  "entries": [
+    {"worker":"W01","role":"Головний інтегратор: WhiteBIT, готові блоки та завершення продукту","characters":26671,"sha256":"39c081bfc84fa479261c6ee60eea52021aad07aa1503b81c317c2e50dee3021c","status_file":"control/whitebit_focus/status/W01.json"},
+    {"worker":"W02","role":"WhiteBIT: офіційний SDK, захищене приватне читання та рахунок","characters":26161,"sha256":"675c5efc404f4f01904fade278127f27c1913dc2083278894d4be38acf340ad5","status_file":"control/whitebit_focus/status/W02.json"},
+    {"worker":"W03","role":"WhiteBIT: справжні ринкові дані, REST, WebSocket і характеристики інструментів","characters":25479,"sha256":"13eb8ed4fcd9e8f285ad43d6df23abb1b5c2fe889bdc105e257723e7b5fef1bd","status_file":"control/whitebit_focus/status/W03.json"},
+    {"worker":"W04","role":"WhiteBIT: життєвий цикл заявок, виконання, скасування та UNKNOWN","characters":25675,"sha256":"62d33c28078753e8b3e54b9a8463868a19c3e8c80b9e5eeb928c94cfca05cb35","status_file":"control/whitebit_focus/status/W04.json"},
+    {"worker":"W05","role":"Фінансова істина: баланс, комісії, резерви, ризики й звірка WhiteBIT","characters":25439,"sha256":"9da3b18ee8138cccdbb01150a1b120c3722d87efa12037d76863ea15ee3b05cc","status_file":"control/whitebit_focus/status/W05.json"},
+    {"worker":"W06","role":"Runtime: спільний потік даних, сховища, Host та відновлення","characters":25214,"sha256":"73b77a1194c1a9c5eb2c3422361033e1457bf44a69b5ef492755e0ed16ef780d","status_file":"control/whitebit_focus/status/W06.json"},
+    {"worker":"W07","role":"Історична й поточна симуляція: один реальний навчальний контур","characters":25054,"sha256":"94d8e69c721a8c0e93df1ffe20cd826cd88549413b7e6ceac903948f3af91ed5","status_file":"control/whitebit_focus/status/W07.json"},
+    {"worker":"W08","role":"Команда агентів: спеціалісти, координування, досвід і пам’ять","characters":25075,"sha256":"0f88b532ee0dc3f157ea4bede5ca072df525c6a541c89e41a1b7048b4ab0591b","status_file":"control/whitebit_focus/status/W08.json"},
+    {"worker":"W09","role":"Поступове навчання: реальні оновлення моделей, drift і збереження навичок","characters":25471,"sha256":"05dd03c9ccdebe600f10429e8d4ba10427b1a42e40bf618a64870066f56aeb29","status_file":"control/whitebit_focus/status/W09.json"},
+    {"worker":"W10","role":"Дослідницька петля: оптимізація, bandits, RL і відбір стратегій","characters":25423,"sha256":"244fbb6df7121f65bab826c50421bb272e847408995dac3c197967150260be57","status_file":"control/whitebit_focus/status/W10.json"},
+    {"worker":"W11","role":"Незалежний науковий контроль: причинність, витрати, uncertainty та доказ покращення","characters":25143,"sha256":"172472578c49ac4315bce6f97ddfc9ccfd4585e23a3d7433032e5dc6fef07d0c","status_file":"control/whitebit_focus/status/W11.json"},
+    {"worker":"W12","role":"Доступний ручний інтерфейс: повноцінне використання Accessible Trading Terminal","characters":25546,"sha256":"df5cf604209f90dcd0a65e89ab42e22b4a64dc1b511de8f0ae36f62d76b05ba7","status_file":"control/whitebit_focus/status/W12.json"},
+    {"worker":"W13","role":"Діалоговий помічник, модельний шлюз і контроль витрат","characters":25360,"sha256":"e36a757de029d7121f26ff34b5df9ef5a6196b9856458ea5ce27cd221a961870","status_file":"control/whitebit_focus/status/W13.json"},
+    {"worker":"W14","role":"Безпека: секрети, довіра до компонентів і контроль запозиченого коду","characters":25513,"sha256":"b5a4d906898bcd1c864508e9f98a2f9e2d4aed4d8ce7ce4070d19a790ee301d0","status_file":"control/whitebit_focus/status/W14.json"},
+    {"worker":"W15","role":"Кінцеві сценарії, Windows/NVDA, навантаження і готовність до використання","characters":25446,"sha256":"5c033e594d32dfc45c9470e853944bcd68b63b0ecc3c820dfa970b01a6168b2f","status_file":"control/whitebit_focus/status/W15.json"}
+  ]
+}

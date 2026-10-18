@@ -229,27 +229,27 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             connector = Connector([first, second])
             stop = asyncio.Event()
 
-            async def stop_after_snapshot():
-                deadline = time.monotonic() + 2
-                while not (root / "latest-market.json").is_file():
-                    if time.monotonic() >= deadline:
-                        self.fail("supervisor did not publish a market snapshot")
-                    await asyncio.sleep(0.01)
-                stop.set()
+            def stop_after_snapshot(path, value):
+                # Observe the actual successful disk publication, not a race
+                # between a polling deadline and Windows namespace/fsync I/O.
+                _atomic_write_json_with_reader_retry(path, value)
+                if path == root / "latest-market.json":
+                    stop.set()
 
-            stopper = asyncio.create_task(stop_after_snapshot())
-            outcome = await asyncio.wait_for(
-                supervise(
-                    market="BTC_USDT",
-                    state_dir=root,
-                    connector=connector,
-                    stop=stop,
-                    install_signals=False,
-                    heartbeat_seconds=0.1,
-                ),
-                timeout=3,
-            )
-            await stopper
+            with patch("tools.run_whitebit_public_supervisor._atomic_write_json_with_reader_retry",
+                       side_effect=stop_after_snapshot):
+                outcome = await asyncio.wait_for(
+                    supervise(
+                        market="BTC_USDT",
+                        state_dir=root,
+                        connector=connector,
+                        stop=stop,
+                        install_signals=False,
+                        heartbeat_seconds=0.1,
+                    ),
+                    # Deadlock guard, not a filesystem latency requirement.
+                    timeout=15,
+                )
             self.assertEqual(outcome["phase"], "STOPPED")
             self.assertEqual(outcome["observation_count"], 1)
             self.assertEqual(len(connector.calls), 2)

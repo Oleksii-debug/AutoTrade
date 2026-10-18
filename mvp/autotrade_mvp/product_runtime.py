@@ -322,7 +322,11 @@ def build_product(
     desktop_session_sink=None,
     whitebit_public_state_dir=None,
     whitebit_learning_state_dir=None,
+    public_learning=False,
 ):
+    if type(public_learning) is not bool:
+        raise TypeError('public_learning must be an exact boolean')
+    research_owner = None
     if port == 0:
         import socket
         # Reserve a candidate ephemeral port. The real listener still performs
@@ -346,6 +350,11 @@ def build_product(
             str(data / 'whitebit-live-zero-learning'),
         )
     whitebit_learning_state = Path(whitebit_learning_state_dir).resolve(strict=False)
+    if public_learning and (
+        whitebit_public_state != data / 'whitebit-public-supervisor'
+        or whitebit_learning_state != data / 'whitebit-live-zero-learning'
+    ):
+        raise ValueError('Owned research must use the product data directories')
     origin = f'http://127.0.0.1:{port}'
     pairing = secrets.token_urlsafe(32)
     vault = ProtectedCredentialVault(data / 'credentials.json',
@@ -400,6 +409,11 @@ def build_product(
                 'decisions': [{k: v for k, v in e.items() if k != 'provider_state'} for e in completed[-100:]],
                 'agent_decisions': [e['payload'] for e in store.load_events_by_aggregate_type('simulation_agent_decision')[-100:]],
                 'economic_edge_status': 'INCONCLUSIVE',
+                'owned_numerical_research': (
+                    research_owner.status() if research_owner is not None else
+                    {'status': 'NOT_STARTED', 'checkpoint_confirmed': False,
+                     'network_orders': False, 'model_calls': 0}
+                ),
                 'whitebit_learning': read_whitebit_live_learning_status(
                     whitebit_learning_state
                 )},
@@ -425,9 +439,32 @@ def build_product(
             diagnostic_sampler=diagnostic_sampler,
             whitebit_learning_state_dir=whitebit_learning_state,
         ))
-    runtime.bind_terminal_finalizer(diagnostic_sampler.stop)
+    def finalize_owned_work():
+        # A failed research drain must retain the Host fence and block a clean
+        # shutdown/update claim. Never terminate a worker here to report success.
+        if research_owner is not None:
+            result = research_owner.stop()
+            if result.get('checkpoint_confirmed') is not True:
+                raise RuntimeError('Numerical research checkpoint is unconfirmed')
+        diagnostic_sampler.stop()
+
+    runtime.bind_terminal_finalizer(finalize_owned_work)
     try:
         diagnostic_sampler.start()
+        if public_learning:
+            from .owned_numerical_research import OwnedNumericalResearch, OwnedResearchError
+            candidate = OwnedNumericalResearch(data)
+            try:
+                candidate.start()
+            except BaseException:
+                # Startup has not admitted a user session. Retire only our own
+                # failed child; this is not successful checkpoint evidence.
+                try:
+                    candidate.stop()
+                except OwnedResearchError:
+                    candidate.terminate_after_failed_stop()
+                raise
+            research_owner = candidate
     except BaseException:
         runtime.close()
         raise
@@ -584,6 +621,8 @@ def main(argv=None):
     parser.add_argument('--data-dir', default=str(Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'AutoTrade-ZERO'))
     parser.add_argument('--port', type=int, default=0)
     parser.add_argument('--no-browser', action='store_true')
+    parser.add_argument('--public-learning', action='store_true',
+        help='Own WhiteBIT public-data collection and numerical ZERO learning; no model calls or real orders')
     parser.add_argument('--desktop-child', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--parent-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--restore-backup', help='Verify and restore a backup into a NEW data directory; real trading stays gated')
@@ -596,6 +635,7 @@ def main(argv=None):
     runtime, launch_url = build_product(
         args.data_dir,
         port=args.port,
+        public_learning=args.public_learning,
         desktop_session_sink=_owned_desktop_session_sink if args.desktop_child else None,
     )
     def stop(*_):

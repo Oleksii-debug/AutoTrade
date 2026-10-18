@@ -1,4 +1,5 @@
 using System.Windows;
+using Velopack;
 
 namespace AutoTrade.Desktop;
 
@@ -7,6 +8,10 @@ public partial class App : Application
     [STAThread]
     private static void Main(string[] args)
     {
+        VelopackApp.Build()
+            .SetAutoApplyOnStartup(false)
+            .Run();
+
         App app = new();
         app.InitializeComponent();
         app.Run();

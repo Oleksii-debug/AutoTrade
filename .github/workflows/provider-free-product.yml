@@ -394,7 +394,10 @@ jobs:
             --composed artifacts/freeze/composed/m1-s5-composed.json \
             --output artifacts/freeze/m1-s6-nonrelease-freeze.json
         env:
-          PYTHONPATH: research
+          # The gate imports both the repo-root `research` namespace and the
+          # package exposed from `research/`; keep both explicit because a
+          # script launched by path otherwise places only `tools/` on sys.path.
+          PYTHONPATH: research:.
       - name: Issue same-source non-release engineering evidence only after all real jobs passed
         run: >-
           python tools/write_ci_evidence.py

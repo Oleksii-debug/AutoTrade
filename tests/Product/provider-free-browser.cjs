@@ -669,4 +669,3 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   clearTimeout(deadline);
   fs.rmSync(scratch, {recursive: true, force: true});
 });
-

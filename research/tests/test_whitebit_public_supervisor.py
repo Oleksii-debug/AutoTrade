@@ -18,6 +18,7 @@ from tools.run_whitebit_public_supervisor import (
     SOURCE_URI,
     WhiteBitArtifactQuota,
     WhiteBitPublicDiagnosticJournal,
+    _atomic_write_json_with_reader_retry,
     supervise,
 )
 
@@ -94,6 +95,56 @@ class Connector:
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_atomic_publication_retries_transient_windows_reader_lease(self):
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "latest-market.json"
+            attempts = []
+
+            def transient_reader_lease(path, value):
+                attempts.append((path, value))
+                if len(attempts) < 3:
+                    raise PermissionError("simulated Windows reader lease")
+
+            with patch(
+                "tools.run_whitebit_public_supervisor.atomic_write_json",
+                side_effect=transient_reader_lease,
+            ):
+                _atomic_write_json_with_reader_retry(destination, {"ready": True})
+
+            self.assertEqual(len(attempts), 3)
+            self.assertTrue(all(item[0] == destination for item in attempts))
+
+    async def test_failed_latest_publication_does_not_checkpoint_unpublished_cut(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            connector = Connector([FakeSocket([_subscription(), _ticker(42)])])
+            real_publish = __import__(
+                "tools.run_whitebit_public_supervisor", fromlist=["atomic_write_json"]
+            ).atomic_write_json
+
+            def fail_latest(path, value):
+                if path.name == "latest-market.json":
+                    raise PermissionError("persistent simulated reader lease")
+                return real_publish(path, value)
+
+            with patch(
+                "tools.run_whitebit_public_supervisor._atomic_write_json_with_reader_retry",
+                side_effect=fail_latest,
+            ):
+                with self.assertRaises(PermissionError):
+                    await supervise(
+                        market="BTC_USDT",
+                        state_dir=root,
+                        connector=connector,
+                        install_signals=False,
+                    )
+
+            state = json.loads((root / "supervisor-state.json").read_text("utf-8"))
+            self.assertEqual(state["phase"], "FAILED")
+            self.assertEqual(state["observation_count"], 0)
+            self.assertIsNone(state["latest_evidence_ref"])
+            self.assertFalse((root / "latest-market.json").exists())
+
     async def test_artifact_eviction_retries_transient_windows_reader_lease(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

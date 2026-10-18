@@ -362,7 +362,7 @@ def _checkpoint(
     latest: dict[str, Any] | None,
     clock: Callable[[], datetime],
 ) -> None:
-    atomic_write_json(
+    _atomic_write_json_with_reader_retry(
         path,
         {
             "schema": SCHEMA,
@@ -375,6 +375,26 @@ def _checkpoint(
             "trading_authority": False,
         },
     )
+
+
+def _atomic_write_json_with_reader_retry(path: Path, value: Any) -> None:
+    """Publish through brief Windows read leases without losing the feed.
+
+    The status and learning readers intentionally consume immutable cuts without
+    taking the writer lock. A Windows CRT reader can temporarily deny the
+    atomic replace even though it only holds the file for a few milliseconds.
+    Retry only that narrow OS condition; every other publication failure still
+    fails closed.
+    """
+
+    for attempt in range(64):
+        try:
+            atomic_write_json(path, value)
+            return
+        except PermissionError:
+            if attempt == 63:
+                raise
+            time.sleep(min(0.005 * (2 ** attempt), 0.1))
 
 
 def _read_restart_state(
@@ -647,8 +667,11 @@ async def supervise(
 
             def publish(update: Any) -> None:
                 nonlocal latest, observations
-                latest = _snapshot(update)
-                atomic_write_json(state_dir / "latest-market.json", latest)
+                candidate = _snapshot(update)
+                _atomic_write_json_with_reader_retry(
+                    state_dir / "latest-market.json", candidate
+                )
+                latest = candidate
                 observations += 1
                 journal.observation(latest["available_at"], latest["stream_generation"])
                 _checkpoint(

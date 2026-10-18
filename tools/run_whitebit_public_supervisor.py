@@ -443,6 +443,28 @@ def _ordinary_owned_file(path: Path, *, parent: Path) -> None:
         raise ValueError("artifact quota entry must be an ordinary unaliased file")
 
 
+def _unlink_owned_file(path: Path, *, parent: Path) -> None:
+    """Remove one owned artifact despite a short Windows reader lease.
+
+    Authenticated readers open manifests and objects without taking the writer
+    quota lock.  Windows can therefore reject an otherwise valid unlink for a
+    few milliseconds while a reader verifies the file.  Revalidate ownership
+    before every bounded retry so the recovery does not weaken namespace or
+    alias protections.
+    """
+
+    for attempt in range(8):
+        _ordinary_owned_file(path, parent=parent)
+        try:
+            path.unlink()
+            sync_parent_directory(path)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(min(0.01 * (2 ** attempt), 0.1))
+
+
 class WhiteBitArtifactQuota:
     """Bounded raw-frame retention with one full scan only at restart."""
 
@@ -472,9 +494,7 @@ class WhiteBitArtifactQuota:
     def _remove_manifest(self, entry: tuple[str, str, str]) -> None:
         _created_at, artifact_id, _digest = entry
         path = self.artifacts.manifests / (artifact_id + ".json")
-        _ordinary_owned_file(path, parent=self.artifacts.manifests)
-        path.unlink()
-        sync_parent_directory(path)
+        _unlink_owned_file(path, parent=self.artifacts.manifests)
 
     def _remove_object_if_unreferenced(self, digest_value: str) -> None:
         if any(item[2] == digest_value for item in self._entries):
@@ -483,9 +503,7 @@ class WhiteBitArtifactQuota:
         path = self.artifacts._object_path(digest)
         if not path.exists() and not path.is_symlink():
             return
-        _ordinary_owned_file(path, parent=path.parent)
-        path.unlink()
-        sync_parent_directory(path)
+        _unlink_owned_file(path, parent=path.parent)
 
     def recover(self, *, protected_artifact_id: str | None) -> None:
         """Validate the retained set, repair crash orphans, and apply the cap."""
@@ -518,9 +536,7 @@ class WhiteBitArtifactQuota:
                 expected = self.artifacts._object_path(path.name)
                 if path != expected:
                     raise ValueError("artifact quota encountered a non-canonical object")
-                _ordinary_owned_file(path, parent=path.parent)
-                path.unlink()
-                sync_parent_directory(path)
+                _unlink_owned_file(path, parent=path.parent)
 
     def admit(self, artifact_id: str) -> None:
         """Admit one just-published frame and evict at most one old frame."""

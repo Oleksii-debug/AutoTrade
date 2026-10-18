@@ -8,10 +8,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
+from uuid import uuid4
 
+from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from tools.run_whitebit_public_supervisor import (
     SCHEMA,
+    SOURCE_URI,
+    WhiteBitArtifactQuota,
     WhiteBitPublicDiagnosticJournal,
     supervise,
 )
@@ -89,6 +94,46 @@ class Connector:
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_artifact_eviction_retries_transient_windows_reader_lease(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ArtifactStore(root / "artifacts")
+
+            def publish(update_id: int) -> dict:
+                artifact_id = str(uuid4())
+                return store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=_ticker(update_id),
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[SOURCE_URI],
+                    metadata={"provider": "WHITEBIT", "market": "BTC_USDT"},
+                )
+
+            first = publish(1)
+            quota = WhiteBitArtifactQuota(store, market="BTC_USDT", maximum=1)
+            quota.recover(protected_artifact_id=first["artifact_id"])
+            second = publish(2)
+            first_path = store.manifests / (first["artifact_id"] + ".json")
+            real_unlink = Path.unlink
+            rejected = []
+
+            def transient_reader_lease(path, *args, **kwargs):
+                if path == first_path and not rejected:
+                    rejected.append(True)
+                    raise PermissionError("simulated Windows reader lease")
+                return real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", autospec=True,
+                              side_effect=transient_reader_lease):
+                quota.admit(second["artifact_id"])
+
+            self.assertEqual(rejected, [True])
+            self.assertFalse(first_path.exists())
+            self.assertTrue(
+                (store.manifests / (second["artifact_id"] + ".json")).is_file()
+            )
+
     async def test_reconnect_snapshot_and_clean_checkpoint_are_durable(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "state"

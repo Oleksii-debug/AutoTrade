@@ -12,6 +12,24 @@ from research.autotrade_research.jobs import ResearchJobStore
 ORIGIN = "https://local.autotrade.invalid"
 
 
+class HostileText(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile str.strip() executed")
+
+
+class JobStoreSubstitute(ResearchJobStore):
+    pass
+
+
+class SecurityBoundarySubstitute(SecurityBoundary):
+    pass
+
+
+class HostileJobRecord(dict):
+    def get(self, *args, **kwargs):
+        raise AssertionError("hostile job mapping get() executed")
+
+
 class DeterministicProtector:
     PREFIX = b"research-job-host-test-v1:"
 
@@ -269,6 +287,79 @@ class ResearchJobHostServiceTests(unittest.TestCase):
         self.assertEqual(self.jobs.get(legacy["job_id"])["state"], "PAUSED")
 
 
+
+
+    def test_authority_ingress_rejects_polymorphic_store_and_security(self):
+        with self.assertRaisesRegex(TypeError, "canonical ResearchJobStore"):
+            ResearchJobHostService(
+                jobs=object.__new__(JobStoreSubstitute),
+                security=self.security,
+                request_origin_provider=lambda: ORIGIN,
+            )
+        with self.assertRaisesRegex(TypeError, "canonical SecurityBoundary"):
+            ResearchJobHostService(
+                jobs=self.jobs,
+                security=object.__new__(SecurityBoundarySubstitute),
+                request_origin_provider=lambda: ORIGIN,
+            )
+
+    def test_hostile_text_subclasses_fail_before_virtual_strip_dispatch(self):
+        enqueue_kwargs = dict(
+            kind="research.replay",
+            input_hashes=[digest("dataset")],
+            resource_budget={"wall_seconds": 60},
+        )
+        with self.assertRaisesRegex(ValueError, "actor"):
+            self.host.enqueue(
+                session=self.researcher.token,
+                actor=HostileText("researcher"),
+                dedupe_key="hostile-actor",
+                **enqueue_kwargs,
+            )
+        with self.assertRaisesRegex(ValueError, "dedupe_key"):
+            self.host.enqueue(
+                session=self.researcher.token,
+                actor="researcher",
+                dedupe_key=HostileText("hostile-dedupe"),
+                **enqueue_kwargs,
+            )
+        with self.assertRaisesRegex(ValueError, "session"):
+            self.host.enqueue(
+                session=HostileText(self.researcher.token),
+                actor="researcher",
+                dedupe_key="hostile-session",
+                **enqueue_kwargs,
+            )
+
+        hostile_origin_host = ResearchJobHostService(
+            jobs=self.jobs,
+            security=self.security,
+            request_origin_provider=lambda: HostileText(ORIGIN),
+        )
+        with self.assertRaisesRegex(ValueError, "request origin"):
+            hostile_origin_host.enqueue(
+                session=self.researcher.token,
+                actor="researcher",
+                dedupe_key="hostile-origin",
+                **enqueue_kwargs,
+            )
+
+    def test_researcher_control_rejects_polymorphic_job_record_before_get_dispatch(self):
+        created, _ = self.enqueue()
+        canonical_get = self.jobs.get
+        self.jobs.get = lambda job_id: HostileJobRecord(
+            {"submitted_by": "researcher"}
+        )
+        try:
+            with self.assertRaisesRegex(PermissionError, "not canonical"):
+                self.host.pause(
+                    created["job_id"],
+                    session=self.researcher.token,
+                    actor="researcher",
+                )
+        finally:
+            self.jobs.get = canonical_get
+        self.assertEqual(canonical_get(created["job_id"])["state"], "QUEUED")
 
 if __name__ == "__main__":
     unittest.main()

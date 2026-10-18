@@ -5,11 +5,13 @@ from decimal import Decimal
 from hashlib import sha256
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from autotrade_mvp.mistral_model_adapter import (
     MistralAdapterError, MistralInferenceAdapter, MistralSettings,
+    _transport,
 )
 from autotrade_mvp.model_call import ModelCallBinding
 from autotrade_mvp.model_credentials import _target
@@ -38,6 +40,53 @@ def _binding(settings: MistralSettings) -> ModelCallBinding:
 
 
 class MistralAdapterTests(unittest.TestCase):
+    def captured_inference(self, headers):
+        response = Mock(status=200)
+        response.getheaders.return_value = headers
+        response.read.return_value = json.dumps({
+            "id": "completion-body-id", "request_id": "untrusted-body-id",
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+            "choices": [{"message": {"content": "HOLD"}}],
+        }).encode()
+        connection = Mock()
+        connection.getresponse.return_value = response
+        settings = _settings()
+        with patch("autotrade_mvp.mistral_model_adapter.http.client.HTTPSConnection", return_value=connection):
+            adapter = MistralInferenceAdapter(settings,
+                key_resolver=lambda **kwargs: "private-key-value", transport=_transport)
+            result = adapter.inference(_binding(settings), lambda: False, prompt="Observe")
+        connection.close.assert_called_once()
+        return result
+
+    def test_actual_header_request_identity_is_distinct_from_response_body(self):
+        result = self.captured_inference([
+            ("X-Kong-Request-ID", "provider-request-123"),
+            ("Set-Cookie", "private-key-value"),
+            ("Authorization", "Bearer private-key-value"),
+        ])
+        self.assertEqual(result.provider_request_id, "provider-request-123")
+        self.assertEqual(result.provider_response_id, "completion-body-id")
+        self.assertNotIn("private-key-value", repr(result))
+        self.assertNotIn("untrusted-body-id", repr(result))
+
+    def test_absent_header_does_not_synthesize_request_identity(self):
+        result = self.captured_inference([
+            ("x-request-id", "unconfirmed-header-id"),
+            ("mistral-correlation-id", "correlation-only-id")])
+        self.assertIsNone(result.provider_request_id)
+        self.assertEqual(result.provider_response_id, "completion-body-id")
+
+    def test_malformed_duplicate_or_secret_header_is_rejected_redacted(self):
+        cases = [[("x-kong-request-id", "bad\r\nprivate-key-value")],
+                 [("x-kong-request-id", "")], [("x-kong-request-id", "a" * 129)],
+                 [("x-kong-request-id", "private-key-value")],
+                 [("x-kong-request-id", "id-1"), ("X-Kong-Request-ID", "id-1")]]
+        for headers in cases:
+            with self.subTest(headers=len(headers)), self.assertRaises(MistralAdapterError) as caught:
+                self.captured_inference(headers)
+            self.assertNotIn("private-key-value", str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
+
     def test_probe_and_inference_use_only_mistral_no_secret_in_result(self):
         calls = []
 
@@ -61,6 +110,7 @@ class MistralAdapterTests(unittest.TestCase):
         result = adapter.inference(_binding(settings), lambda: False, prompt="Observe")
         self.assertEqual(result.estimated_unbilled, Decimal("0.000008"))
         self.assertEqual(result.incurred_cost, Decimal(0))
+        self.assertIsNone(result.provider_request_id)
         self.assertEqual(
             result.output,
             {"text": "HOLD", "prompt_tokens": 4, "completion_tokens": 2},

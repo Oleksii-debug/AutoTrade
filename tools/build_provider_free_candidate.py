@@ -54,6 +54,7 @@ HISTORICAL_SOURCE = frozenset({
     'tools/run_whitebit_live_zero_learning.py',
     'tools/create_goal_directed_organism.py',
     'tools/run_goal_directed_attention.py',
+    'tools/evaluate_historical_objectives.py',
     'tools/configure_mistral.py',
     'tools/configure_model_provider.py',
     'tools/configure_whitebit.py',

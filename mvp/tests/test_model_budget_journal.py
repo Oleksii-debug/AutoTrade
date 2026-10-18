@@ -11,7 +11,9 @@ import mvp.autotrade_mvp.model_budget_journal as model_budget_module
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
+    ModelRateLimitSnapshot,
     ModelRequest,
+    ProviderRateLimit,
     RouteStatus,
     RoutingMode,
     RoutingPolicy,
@@ -74,6 +76,77 @@ class RejectingInitializationJournal(JournalStore):
 
 
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_cost_aware_route_binds_agent_and_rate_snapshot_durably(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            policy = RoutingPolicy(
+                RoutingMode.COST_AWARE,
+                allowed_model_ids=("free-remote",),
+                allow_remote=True,
+                maximum_cost="1",
+            )
+            request = ModelRequest(
+                request_id="shared-specialist-request",
+                allowed_model_ids=("free-remote",),
+                privacy_remote_allowed=True,
+                budget_remaining="1",
+                deadline_utc=ROUTE_NOW + timedelta(minutes=5),
+                agent_id="math-agent",
+                rate_limit_snapshot=ModelRateLimitSnapshot(
+                    "math-agent",
+                    1,
+                    (ProviderRateLimit("groq", 1),),
+                ),
+            )
+            descriptor = ModelDescriptor(
+                "free-remote", "groq", None, True, "0", 20, "0.8",
+            )
+
+            first = budget.admit_route(
+                policy,
+                request,
+                (descriptor,),
+                now_utc=ROUTE_NOW,
+            )
+            self.assertEqual(RouteStatus.ADMITTED, first.status)
+            restarted = DurableModelBudget(
+                journal=journal,
+                budget_id=budget.budget_id,
+                ceiling="1",
+                environment="SIMULATION",
+                clock=lambda: NOW,
+            )
+            self.assertEqual(
+                first,
+                restarted.admit_route(
+                    policy,
+                    request,
+                    (descriptor,),
+                    now_utc=ROUTE_NOW,
+                ),
+            )
+
+            changed_agent = ModelRequest(
+                request_id=request.request_id,
+                allowed_model_ids=request.allowed_model_ids,
+                privacy_remote_allowed=True,
+                budget_remaining="1",
+                deadline_utc=request.deadline_utc,
+                agent_id="critic-agent",
+                rate_limit_snapshot=ModelRateLimitSnapshot(
+                    "critic-agent",
+                    1,
+                    (ProviderRateLimit("groq", 1),),
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "identity conflicts"):
+                restarted.admit_route(
+                    policy,
+                    changed_agent,
+                    (descriptor,),
+                    now_utc=ROUTE_NOW,
+                )
+
     def test_clock_object_truthiness_is_never_consulted(self):
         class Clock:
             truth_calls = 0

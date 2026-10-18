@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext, ROUND_DOWN, ROUND_UP, Inexact, Rounded
 import unittest
@@ -5,7 +6,9 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
+    ModelRateLimitSnapshot,
     ModelRequest,
+    ProviderRateLimit,
     RouteStatus,
     RoutingMode,
     RoutingPolicy,
@@ -39,6 +42,186 @@ def request(*ids, budget="10", remote=True, deadline=None):
 
 
 class ModelGatewayTests(unittest.TestCase):
+    def test_cost_aware_prefers_local_then_free_then_paid_remote(self):
+        policy = RoutingPolicy(
+            RoutingMode.COST_AWARE,
+            allowed_model_ids=("paid", "free", "local"),
+            allow_remote=True,
+            maximum_cost="1",
+            maximum_latency_ms=500,
+        )
+        req = ModelRequest(
+            request_id="agent-a-request",
+            allowed_model_ids=("paid", "free", "local"),
+            privacy_remote_allowed=True,
+            budget_remaining="1",
+            deadline_utc=NOW + timedelta(minutes=1),
+            agent_id="agent-a",
+            rate_limit_snapshot=ModelRateLimitSnapshot(
+                agent_id="agent-a",
+                remaining_agent_requests=1,
+                provider_limits=(
+                    ProviderRateLimit("groq", 1),
+                    ProviderRateLimit("deepseek", 1),
+                ),
+            ),
+        )
+        descriptors = (
+            ModelDescriptor("paid", "deepseek", None, True, "0.2", 10, "1"),
+            ModelDescriptor("free", "groq", None, True, "0", 5, "0.9"),
+            ModelDescriptor("local", "local-runtime", None, False, "0.1", 100, "0.2"),
+        )
+
+        self.assertEqual(
+            route_model(policy, req, descriptors, now_utc=NOW).model_id,
+            "local",
+        )
+        remote_only = replace(
+            req,
+            allowed_model_ids=("paid", "free"),
+        )
+        self.assertEqual(
+            route_model(policy, remote_only, descriptors, now_utc=NOW).model_id,
+            "free",
+        )
+
+    def test_cost_aware_remote_routing_requires_exact_agent_rate_snapshot(self):
+        policy = RoutingPolicy(
+            RoutingMode.COST_AWARE,
+            allowed_model_ids=("free",),
+            allow_remote=True,
+            maximum_cost="0",
+        )
+        no_snapshot = request("free", budget="0")
+        decision = route_model(
+            policy,
+            no_snapshot,
+            [model("free", remote=True, cost="0")],
+            now_utc=NOW,
+        )
+        self.assertEqual(RouteStatus.REJECTED, decision.status)
+        self.assertEqual("rate_limit_unavailable", decision.reason)
+
+        mismatched = replace(
+            no_snapshot,
+            agent_id="critic",
+            rate_limit_snapshot=ModelRateLimitSnapshot("coordinator", 1),
+        )
+        decision = route_model(
+            policy,
+            mismatched,
+            [model("free", remote=True, cost="0")],
+            now_utc=NOW,
+        )
+        self.assertEqual(RouteStatus.REJECTED, decision.status)
+        self.assertEqual("rate_limit_unavailable", decision.reason)
+
+    def test_cost_aware_agents_use_independent_explicit_provider_capacity(self):
+        policy = RoutingPolicy(
+            RoutingMode.COST_AWARE,
+            allowed_model_ids=("groq-model", "openrouter-model"),
+            allow_remote=True,
+            maximum_cost="1",
+        )
+        descriptors = (
+            ModelDescriptor("groq-model", "groq", None, True, "0", 20, "0.5"),
+            ModelDescriptor(
+                "openrouter-model", "openrouter", None, True, "0.01", 30, "0.8",
+            ),
+        )
+
+        def agent_request(agent_id, groq, openrouter):
+            return ModelRequest(
+                request_id=f"{agent_id}-request",
+                allowed_model_ids=("groq-model", "openrouter-model"),
+                privacy_remote_allowed=True,
+                budget_remaining="1",
+                deadline_utc=NOW + timedelta(minutes=1),
+                agent_id=agent_id,
+                rate_limit_snapshot=ModelRateLimitSnapshot(
+                    agent_id,
+                    1,
+                    (
+                        ProviderRateLimit("groq", groq),
+                        ProviderRateLimit("openrouter", openrouter),
+                    ),
+                ),
+            )
+
+        self.assertEqual(
+            "groq-model",
+            route_model(
+                policy, agent_request("math-agent", 1, 1), descriptors, now_utc=NOW,
+            ).model_id,
+        )
+        self.assertEqual(
+            "openrouter-model",
+            route_model(
+                policy, agent_request("critic-agent", 0, 1), descriptors, now_utc=NOW,
+            ).model_id,
+        )
+
+    def test_cost_aware_rate_exhaustion_falls_back_only_to_admissible_local(self):
+        policy = RoutingPolicy(
+            RoutingMode.COST_AWARE,
+            allowed_model_ids=("remote", "local"),
+            allow_remote=True,
+            maximum_cost="1",
+            maximum_latency_ms=100,
+        )
+        req = ModelRequest(
+            request_id="critic-request",
+            allowed_model_ids=("remote", "local"),
+            privacy_remote_allowed=True,
+            budget_remaining="1",
+            deadline_utc=NOW + timedelta(minutes=1),
+            agent_id="critic",
+            rate_limit_snapshot=ModelRateLimitSnapshot(
+                "critic", 1, (ProviderRateLimit("groq", 0),),
+            ),
+        )
+        descriptors = (
+            ModelDescriptor("remote", "groq", None, True, "0", 10, "1"),
+            ModelDescriptor("local", "local-runtime", None, False, "0", 50, "0.1"),
+        )
+        decision = route_model(policy, req, descriptors, now_utc=NOW)
+        self.assertEqual(RouteStatus.ADMITTED, decision.status)
+        self.assertEqual("local", decision.model_id)
+
+        exhausted = replace(
+            req,
+            rate_limit_snapshot=ModelRateLimitSnapshot(
+                "critic", 0, (ProviderRateLimit("groq", 1),),
+            ),
+        )
+        decision = route_model(policy, exhausted, descriptors, now_utc=NOW)
+        self.assertEqual(RouteStatus.NO_MODEL, decision.status)
+        self.assertEqual("agent_rate_limit_exhausted", decision.reason)
+
+    def test_rate_limit_aliases_and_duplicate_providers_fail_closed(self):
+        with self.assertRaises(ValueError):
+            ProviderRateLimit("groq", True)
+        with self.assertRaises(ValueError):
+            ModelRateLimitSnapshot("agent", True)
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            ModelRateLimitSnapshot(
+                "agent",
+                1,
+                (ProviderRateLimit("groq", 1), ProviderRateLimit(" groq ", 2)),
+            )
+        with self.assertRaises(TypeError):
+            ModelRateLimitSnapshot("agent", 1, [ProviderRateLimit("groq", 1)])
+        with self.assertRaisesRegex(ValueError, "outside the allowed range"):
+            ProviderRateLimit("groq", 1_000_001)
+        with self.assertRaisesRegex(ValueError, "outside the allowed range"):
+            ModelRateLimitSnapshot("agent", 1_000_001)
+        with self.assertRaisesRegex(ValueError, "inventory exceeds"):
+            ModelRateLimitSnapshot(
+                "agent",
+                1,
+                tuple(ProviderRateLimit(f"provider-{index}", 1) for index in range(257)),
+            )
+
     def test_descriptor_latency_rejects_int_subclass_without_comparison(self):
         class HostileInt(int):
             compare_calls = 0

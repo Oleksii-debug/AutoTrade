@@ -146,6 +146,13 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('--episode-limit', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.run_whitebit_live_zero_learning', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--supervisor-state-dir', result.stdout)
+            self.assertIn('--state-dir', result.stdout)
 
     def test_canonical_runtime_source_selector_only_adds_python_modules(self):
         self.assertTrue(candidate._source_path_selected('autotrade_runtime/artifacts/store.py'))
@@ -162,6 +169,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
         self.assertTrue(candidate._source_path_selected('tools/probe_whitebit_public.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_whitebit_public_supervisor.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_whitebit_alpha_research.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_whitebit_live_zero_learning.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_mistral.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_model_provider.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_whitebit.py'))

@@ -1403,6 +1403,27 @@ class DurableModelBudget:
                 for item in sorted(descriptors, key=lambda value: value.model_id)
             ],
         }
+        if policy.mode.value == "COST_AWARE":
+            snapshot = request.rate_limit_snapshot
+            material["request"]["agent_id"] = request.agent_id
+            material["request"]["rate_limit_snapshot"] = (
+                None
+                if snapshot is None
+                else {
+                    "agent_id": snapshot.agent_id,
+                    "remaining_agent_requests": snapshot.remaining_agent_requests,
+                    "provider_limits": [
+                        {
+                            "provider_id": item.provider_id,
+                            "remaining_requests": item.remaining_requests,
+                        }
+                        for item in sorted(
+                            snapshot.provider_limits,
+                            key=lambda value: value.provider_id,
+                        )
+                    ],
+                }
+            )
         context = _reservation_context(reservation_context)
         if context is not None:
             material["reservation_context"] = context
@@ -1465,6 +1486,8 @@ class DurableModelBudget:
             budget_remaining=request.budget_remaining,
             deadline_utc=request.deadline_utc,
             cancelled=request.cancelled,
+            agent_id=request.agent_id,
+            rate_limit_snapshot=request.rate_limit_snapshot,
         )
         now = _route_now(now_utc)
 
@@ -1544,6 +1567,8 @@ class DurableModelBudget:
             budget_remaining=effective_budget,
             deadline_utc=request.deadline_utc,
             cancelled=request.cancelled,
+            agent_id=request.agent_id,
+            rate_limit_snapshot=request.rate_limit_snapshot,
         )
         decision = route_model(
             policy,

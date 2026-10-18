@@ -22,9 +22,12 @@ The functional priority order is:
 
 ## WhiteBIT authority
 
-WhiteBIT is the current primary exchange. The protected private credential has the
-logical name `whitebit-primary`; its value must never be committed, logged, placed
-in diagnostics, or copied into an ordinary settings file.
+WhiteBIT is the current primary exchange. The owner confirmed that a private API
+key was created on 2026-10-17 for the logical secure record `whitebit-primary`.
+This records external setup status only: it does not prove that the record is
+present or resolvable on this host, available to the runtime, authenticated, or
+authorized for any account capability. Its value must never be committed, logged,
+placed in diagnostics, or copied into an ordinary settings file.
 
 Allowed without private credentials:
 

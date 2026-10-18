@@ -51,6 +51,7 @@ HISTORICAL_SOURCE = frozenset({
     'tools/probe_whitebit_public.py',
     'tools/run_whitebit_public_supervisor.py',
     'tools/run_whitebit_alpha_research.py',
+    'tools/run_whitebit_live_zero_learning.py',
     'tools/configure_mistral.py',
     'tools/configure_model_provider.py',
     'tools/configure_whitebit.py',

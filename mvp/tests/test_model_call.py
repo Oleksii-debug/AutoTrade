@@ -22,7 +22,9 @@ from mvp.autotrade_mvp.model_call import (
 )
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
+    ModelRateLimitSnapshot,
     ModelRequest,
+    ProviderRateLimit,
     RoutingMode,
     RoutingPolicy,
 )
@@ -2342,6 +2344,79 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     policy=policy,
                     request=widened_request,
                     descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+
+    def test_cost_aware_fallback_cannot_change_agent_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            policy = RoutingPolicy(
+                RoutingMode.COST_AWARE,
+                allowed_model_ids=("model-a",),
+                maximum_cost="2",
+            )
+            parent_spec = spec()
+            parent_request = ModelRequest(
+                request_id=orchestrator.attempt_id(parent_spec),
+                allowed_model_ids=("model-a",),
+                privacy_remote_allowed=False,
+                budget_remaining="2",
+                deadline_utc=NOW + timedelta(hours=1),
+                agent_id="coordinator",
+                rate_limit_snapshot=ModelRateLimitSnapshot(
+                    "coordinator",
+                    1,
+                    (ProviderRateLimit("local-runtime", 1),),
+                ),
+            )
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=policy,
+                request=parent_request,
+                descriptors=[descriptor(provider_id="local-runtime", remote=False)],
+                call=lambda *_args: observation(
+                    provider_id="local-runtime",
+                    incurred="0.1",
+                    unbilled="0",
+                    output={"invalid": True},
+                    billing_id=None,
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            changed_agent = ModelRequest(
+                request_id=orchestrator.attempt_id(fallback),
+                allowed_model_ids=("model-a",),
+                privacy_remote_allowed=False,
+                budget_remaining="2",
+                deadline_utc=NOW + timedelta(hours=1),
+                agent_id="critic",
+                rate_limit_snapshot=ModelRateLimitSnapshot(
+                    "critic",
+                    1,
+                    (ProviderRateLimit("local-runtime", 1),),
+                ),
+            )
+            calls = []
+            with self.assertRaisesRegex(ModelCallError, "cannot change cost-aware agent"):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=policy,
+                    request=changed_agent,
+                    descriptors=[descriptor(provider_id="local-runtime", remote=False)],
                     call=lambda *_args: calls.append(True),
                     validate_result=lambda _value: True,
                     now_utc=NOW,

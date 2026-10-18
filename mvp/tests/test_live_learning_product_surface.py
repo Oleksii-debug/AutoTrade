@@ -18,12 +18,14 @@ SCHEMA = ROOT / "contracts" / "jsonschema" / "ui.schema.json"
 class LiveLearningProductSurfaceTests(unittest.TestCase):
     def test_snapshot_contract_and_missing_state_are_explicit(self):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["$defs"]["UiSnapshot"]
-        self.assertIn("whitebit_learning", schema["required"])
-        self.assertEqual(schema["properties"]["whitebit_learning"]["type"], "object")
+        self.assertNotIn("whitebit_learning", schema["required"])
+        self.assertNotIn("whitebit_learning", schema["properties"])
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)
             try:
-                learning = client.state()["whitebit_learning"]
+                state = client.state()
+                self.assertNotIn("whitebit_learning", state)
+                learning = state["strategy"]["whitebit_learning"]
                 self.assertEqual(learning["status"], "MISSING")
                 self.assertFalse(learning["network_orders"])
                 self.assertFalse(learning["trading_authority"])
@@ -37,7 +39,10 @@ class LiveLearningProductSurfaceTests(unittest.TestCase):
                      app.index("function parseCommandResult")]
         renderer = app[app.index("function renderWhitebitLearning"):
                        app.index("function normalizedTableQuery")]
-        self.assertIn('snapshot.whitebit_learning, "whitebit_learning"', parser)
+        self.assertIn("const learningValue = strategy.whitebit_learning;", parser)
+        self.assertIn("learningValue === undefined", parser)
+        self.assertIn('key !== "whitebit_learning"', parser)
+        self.assertNotIn('"risk", "strategy", "whitebit_learning",', parser)
         self.assertIn('"learning-body"', renderer)
         self.assertIn('"models-body"', renderer)
         self.assertIn("WhiteBIT ZERO learning status is unavailable.", renderer)
@@ -74,7 +79,10 @@ class LiveLearningProductSurfaceTests(unittest.TestCase):
             client = ProductClient(directory)
             try:
                 state = client.state()
-                self.assertEqual(state["whitebit_learning"]["phase"], projected["phase"])
+                self.assertEqual(
+                    state["strategy"]["whitebit_learning"]["phase"],
+                    projected["phase"],
+                )
                 status, body, _headers = client.request("GET", "/api/v1/agent-report")
                 self.assertEqual(status, 200)
                 with ZipFile(BytesIO(body)) as archive:

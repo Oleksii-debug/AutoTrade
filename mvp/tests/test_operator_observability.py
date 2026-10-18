@@ -57,7 +57,6 @@ def _snapshot():
         ),
         risk=dict(active_reservations=[dict(secret="secret-reservation")]),
         strategy=dict(model=dict(api_key="secret-model"), decisions=["secret-decision"]),
-        whitebit_learning=dict(status="MISSING"),
         jobs=[dict(password="secret-job")],
         reason_codes=[],
     )

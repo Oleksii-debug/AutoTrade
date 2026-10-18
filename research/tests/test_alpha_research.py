@@ -8,6 +8,15 @@ from decimal import localcontext
 from hashlib import sha1
 from pathlib import Path
 import unittest
+from importlib.util import find_spec
+
+# These CPU packages are deliberately opt-in, not default release dependencies.
+# Discovery without them is explicitly SKIPPED, never reported as a passing test.
+_REQUIRED = ('numpy', 'scipy', 'sklearn', 'threadpoolctl', 'torch', 'xgboost',
+             'catboost', 'statsmodels', 'shap')
+_MISSING = [name for name in _REQUIRED if find_spec(name) is None]
+if _MISSING:
+    raise unittest.SkipTest('optional alpha research dependencies missing: ' + ', '.join(_MISSING))
 
 import numpy as np
 

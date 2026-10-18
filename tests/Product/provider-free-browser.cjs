@@ -145,12 +145,31 @@ async function command(page, action) {
       "UI must either display durable success or disclose that operation rows were withheld");
     assert.match(feedback, /was accepted for processing\. It is not yet a completed financial outcome/);
   }
+  // submitCommand performs its own canonical snapshot refresh before its
+  // finally block re-enables commands. Do not start the explicit keyboard
+  // refresh while that automatic refresh is still in flight: overlapping
+  // snapshot epochs can legitimately discard one response and leave the test
+  // observing the pre-operation projection even though the durable operation
+  // already succeeded.
+  await page.waitForFunction(() => {
+    const refresh = document.querySelector("#refresh-state");
+    const submit = document.querySelector("#submit-command");
+    return refresh && !refresh.disabled && submit && !submit.disabled;
+  }, undefined, { timeout: 120_000 });
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
     "refresh-state",
     action + " refresh reverse focus");
+  const refreshedResponse = page.waitForResponse(response =>
+    response.request().method() === "GET" &&
+    new URL(response.url()).pathname === "/api/v1/state",
+  {timeout: 120_000});
   await page.keyboard.press("Enter");
+  const refreshResponse = await refreshedResponse;
+  assert.ok(
+    refreshResponse.status() === 200 || refreshResponse.status() === 503,
+    action + " canonical snapshot refresh must succeed or report transient busy");
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled
     && !document.querySelector("#submit-command").disabled
     && document.querySelector("#freshness").textContent.includes("host=CURRENT"),
@@ -650,3 +669,4 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   clearTimeout(deadline);
   fs.rmSync(scratch, {recursive: true, force: true});
 });
+

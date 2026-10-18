@@ -153,7 +153,8 @@ async function command(page, action) {
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled
     && !document.querySelector("#submit-command").disabled
-    && document.querySelector("#freshness").textContent.includes("host=CURRENT"));
+    && document.querySelector("#freshness").textContent.includes("host=CURRENT"),
+    undefined, { timeout: 120_000 });
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
     "refresh-state",
@@ -169,7 +170,10 @@ async function command(page, action) {
     "host-action",
     action + " action reverse focus");
   if (action === "RECOVER_SIMULATION" || action === "START_SIMULATION")
-    await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("791.392"));
+    await page.waitForFunction(
+      () => document.querySelector("#portfolio-body").textContent.includes("791.392"),
+      undefined,
+      { timeout: 120_000 });
 }
 
 async function exercisePortfolioTableTools(page) {

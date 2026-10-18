@@ -160,21 +160,21 @@ NVDA version is optional compatibility QA. AutoTrade is private local software.
 | 5 | **DONE: 2/2** | CLOSED reconciled ZERO outcomes drive existing ExperienceMemory/specialist DAG; frozen seed/version/embargo, no-change replay and leakage/outcome-reuse rejection integrated. |
 | 6 | **DONE: 2/2** | Independent cash/buy-hold walk-forward plus causal regime/missed-fill/Wilson/bootstrap uncertainty integrated; insufficient evidence stays INCONCLUSIVE. |
 | 7 | **DONE: 2/2** | Canonical semantic Web/Windows surface now uses authenticated historical status/results/trades plus OWNER-only start/pause/stop/resume/export Host contracts, with one ZERO lifecycle authority and no provider-order route. |
-| 8 | **1/2 DONE; 1 PARTIAL** | Exact PRIVATE/ZERO Windows candidate PASS; next candidate will rebuild after Plan10 integration. |
+| 8 | **DONE: 2/2** | Exact PRIVATE/ZERO Windows package at source `2f0dd1a6a9c08e468f07524a513b40e908096784` passed hosted build, extraction, Desktop/Host launch, embedded Python, keyboard and crash/restart/backup/restore qualification; product SHA-256 `0ea6f64eb2c978d774d9cacb041194cdab0c42bbd90601d488eee6d85fe2e6a5`. |
 | 9 | **DONE: 2/2** | Bounded incremental historical public-data refresh, inventory, gap/retry/restart proof integrated. |
-| 10 | **1/2 DONE; 1 WAITING** | 10A real-data bounded whole-system E2E, restart and dual-diagnostic qualification passed at source `65553fde420bd50d5a7fa2a49da51af90bb95411`; 10B awaits exact-head hosted CI and Windows package evidence. |
+| 10 | **DONE: 2/2** | 10A real-data bounded whole-system E2E, restart and dual-diagnostic qualification passed at source `65553fde420bd50d5a7fa2a49da51af90bb95411`; 10B exact hosted Windows package/CI passed and PR #2396 merged to `main` as `e62a1757a2147543409ece729f4a023fccea343c`, identical tree `f0b3792e851cfddf3947ad5f572f572ec7988fc9`. |
 
-**2026-10-18 atomic checkpoint:** The 23 independent status rows in
-`ATOMIC_OPEN_SECTIONS_2026-10-13.md` are authoritative: **21/23 DONE, 1
-PARTIAL, 1 WAITING exact hosted Windows convergence.** The former protected-workflow
-blocker is removed; #2394 is merged and exact packaged Windows qualification
-passed. BTCUSDT and ETHUSDT Q1 2024 train/validation/holdout campaigns are
-running as durable local processes. A persisted real BTCUSDT bounded E2E now
-passes all nine exact identity, learning, campaign, separation, runtime, journal,
-restart, diagnostics and secret-leakage checks. Current next integration adds
-bounded diagnostic retention, durable WhiteBIT supervisor checkpoints, canonical causal
-execution, closed-outcome learning and conservative holdout uncertainty. No PAPER/LIVE, economic edge or
-external product claim is inferred or required.
+**2026-10-18 terminal checkpoint:** The 23 independent status rows in
+`ATOMIC_OPEN_SECTIONS_2026-10-13.md` are authoritative: **23/23 DONE.** PR #2396
+exact source `2f0dd1a6a9c08e468f07524a513b40e908096784` passed the hosted Windows
+package qualification and applicable hosted suites, then merged to `main` as
+`e62a1757a2147543409ece729f4a023fccea343c`; main and candidate share exact tree
+`f0b3792e851cfddf3947ad5f572f572ec7988fc9`. BTCUSDT and ETHUSDT Q1 2024
+train/validation/holdout campaigns plus the WhiteBIT public-data live ZERO learner
+continue as durable local processes. A persisted real BTCUSDT bounded E2E passes
+all nine identity, learning, campaign, separation, runtime, journal, restart,
+diagnostics and secret-leakage checks. No PAPER/LIVE, economic edge or external
+product claim is inferred or required.
 
 **Owner-authorized Plan10 independent work:** continue unfinished functional
 sections without broker credentials or manual NVDA-version testing

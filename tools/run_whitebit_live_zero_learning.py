@@ -55,7 +55,11 @@ def authenticated_latest(state_dir: Path) -> dict:
 
 
 def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
-        max_new_observations: int | None = None, stop: Event | None = None) -> dict:
+        max_new_observations: int | None = None, stop: Event | None = None,
+        cycle_episodes: int = 20, cycle_seconds: int = 1200,
+        evaluation_episodes: int = 12, max_drawdown_usdt: str = "2",
+        cooldown_seconds: int = 3600, max_trials: int = 3,
+        max_observation_gap_seconds: int = 180, min_evaluation_trades: int = 3) -> dict:
     if (isinstance(interval_seconds, bool) or not isinstance(interval_seconds, (int, float))
             or not 0.1 <= float(interval_seconds) <= 3600):
         raise ValueError("poll interval must be 0.1..3600 seconds")
@@ -67,8 +71,15 @@ def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
     processed = duplicates = unavailable = 0
     state_dir.mkdir(parents=True, exist_ok=True)
     with ResourceLock(state_dir / "whitebit-live-zero-learning.lock"):
-        learner = WhiteBitLiveZeroLearning(state_dir)
+        learner = WhiteBitLiveZeroLearning(state_dir, cycle_episodes=cycle_episodes,
+            cycle_seconds=cycle_seconds, evaluation_episodes=evaluation_episodes,
+            max_drawdown_usdt=max_drawdown_usdt, cooldown_seconds=cooldown_seconds,
+            max_trials=max_trials, max_observation_gap_seconds=max_observation_gap_seconds,
+            min_evaluation_trades=min_evaluation_trades)
         while not stop.is_set():
+            if (state_dir / "learning-cycle.pause.json").exists():
+                stop.set()
+                break
             try:
                 snapshot = authenticated_latest(supervisor_state_dir)
             except ValueError:
@@ -107,6 +118,14 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--interval-seconds", type=float, default=60.0)
     parser.add_argument("--max-new-observations", type=int)
+    parser.add_argument("--cycle-episodes", type=int, default=20)
+    parser.add_argument("--cycle-seconds", type=int, default=1200)
+    parser.add_argument("--evaluation-episodes", type=int, default=12)
+    parser.add_argument("--max-drawdown-usdt", default="2")
+    parser.add_argument("--cooldown-seconds", type=int, default=3600)
+    parser.add_argument("--max-trials", type=int, default=3)
+    parser.add_argument("--max-observation-gap-seconds", type=int, default=180)
+    parser.add_argument("--min-evaluation-trades", type=int, default=3)
     args = parser.parse_args(argv)
     stop = Event()
     for name in ("SIGINT", "SIGTERM"):
@@ -120,6 +139,12 @@ def main(argv=None) -> int:
             interval_seconds=args.interval_seconds,
             max_new_observations=args.max_new_observations,
             stop=stop,
+            cycle_episodes=args.cycle_episodes, cycle_seconds=args.cycle_seconds,
+            evaluation_episodes=args.evaluation_episodes,
+            max_drawdown_usdt=args.max_drawdown_usdt,
+            cooldown_seconds=args.cooldown_seconds, max_trials=args.max_trials,
+            max_observation_gap_seconds=args.max_observation_gap_seconds,
+            min_evaluation_trades=args.min_evaluation_trades,
         )
         print(json.dumps(result, sort_keys=True, ensure_ascii=False, indent=2))
         return 0

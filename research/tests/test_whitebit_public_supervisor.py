@@ -223,7 +223,11 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_snapshot_and_clean_checkpoint_are_durable(self):
         with TemporaryDirectory() as directory:
-            root = Path(directory) / "state"
+            # supervise resolves its state directory. Compare publication paths
+            # using that same canonical namespace (Windows TEMP may be 8.3).
+            root = (Path(directory) / "state").resolve()
+            # Exercise normalization even on hosts with already canonical TEMP.
+            state_argument = root / ".." / root.name
             first = FakeSocket([_subscription(), Disconnect("credential=hidden")])
             second = FakeSocket([_subscription(2), _ticker(42)])
             connector = Connector([first, second])
@@ -241,7 +245,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                 outcome = await asyncio.wait_for(
                     supervise(
                         market="BTC_USDT",
-                        state_dir=root,
+                        state_dir=state_argument,
                         connector=connector,
                         stop=stop,
                         install_signals=False,

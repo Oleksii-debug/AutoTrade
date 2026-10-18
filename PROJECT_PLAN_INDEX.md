@@ -10,7 +10,7 @@ https://drive.google.com/drive/folders/1c4iSaT9hxgGbEzROpsGkedpZzVlzllsc
 
 Plans 1–7 are independent engineering plans with no priority order.
 Plan 8 is provider-free M1 whole-product convergence.
-Plan 9 is the final dependency-aware release/NVDA/M2 plan with an optional later external-provider activation track.
+Plan 9 is the final dependency-aware private-local package/accessibility/M2 plan with an optional later external-provider activation track. Standard semantic and keyboard accessibility is binding; a manual run with one specific NVDA version is optional compatibility QA and is not a functional completion blocker.
 
 ## Plans
 
@@ -38,13 +38,13 @@ https://docs.google.com/document/d/1Di1lglr6A_NRw2I3hvKy2vXF3WiV2eLSlpbjW4TlQQ4/
 8. Восьмий план — Provider-free M1 whole-product convergence
 https://docs.google.com/document/d/1pebBXU4mdFMnFpCC7cc1fStkpV1vnUNr4U4EppOKqns/edit
 
-9. Дев’ятий план — External qualification, signed release, NVDA та M2
+9. Дев’ятий план — Private-local package, standard accessibility, optional external qualification та M2
 https://docs.google.com/document/d/1sbCFL7NeCK5AfUvZFkGJ2FbOGBAAfHqPcj5-99j9qFw/edit
 
 10. Десятий план — Автономна історична симуляція та навчання без брокерів (2024+)
 https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
 
-**Plan 10 is newly owner-authorized independent ACTIONABLE provider-free historical simulation work.** It reuses terminal Plans 1–8 and is not blocked by parked real-provider Plan 9; do not misclassify its first data-intake Section as WAITING_EXTERNAL. No real money or credentials. Plan 9 remains the final signed/NVDA provider-free release and optional external-provider qualification without invented DONE. Plan 10 statuses live in MULTI_PLAN_CLOSURE_STATE.md; strict historical causality and legal data provenance are binding.
+**Plan 10 is owner-authorized independent ACTIONABLE provider-free historical simulation work.** It reuses terminal Plans 1–8 and is not blocked by optional real-provider/manual-screen-reader work in Plan 9. No real money or credentials. Plan 10 statuses live in MULTI_PLAN_CLOSURE_STATE.md; strict historical causality and technical data provenance are binding.
 
 ## Worker selection
 
@@ -67,7 +67,7 @@ Plan 9 uses per-Section dependencies. Provider Sections 2–6 are optional parke
 Legacy Sections 0–1 and 3–14 retain their accepted DONE engineering evidence in their new owners.
 Legacy Section 2 is split:
 - repository-controllable dependency/provenance engineering -> Plan 4 / Section 2, internally complete;
-- final external/delivered-release rights/trust/SBOM facts -> Plan 9 / Section 1, WAITING_EXTERNAL.
+- private-local provenance/SBOM/trust facts -> Plan 9 / Section 1, DONE.
 
 Legacy Section 15 -> Plan 1 / Section 10 — DONE; canonical PR #2318 accepted, final evidence in MULTI_PLAN_CLOSURE_STATE.md.
 Legacy Section 16 -> Plan 2 / Section 2 — DONE; original PR #1631 is historic source, current closure evidence in MULTI_PLAN_CLOSURE_STATE.md.

@@ -16,6 +16,7 @@ from .exact_decimal import parse_bounded_exact_decimal
 
 
 SCHEMA = "autotrade-causal-ma-training-v1"
+CLOSED_SIMULATION_SCHEMA = "autotrade-closed-simulation-training-v2"
 EXPERTS = ((2, 3), (3, 5), (5, 8))
 UPDATE_RATE = Decimal("0.05")
 
@@ -113,6 +114,13 @@ def train_closed_candles(
 
 def verify_model(model: dict, *, symbol: str, interval: str,
                  holdout_start_open: datetime) -> tuple[int, int, str]:
+    if type(model) is dict and model.get("schema") == CLOSED_SIMULATION_SCHEMA:
+        return _verify_closed_simulation_model(
+            model,
+            symbol=symbol,
+            interval=interval,
+            holdout_start_open=holdout_start_open,
+        )
     if type(model) is not dict or set(model) != {
         "schema", "strategy_id", "strategy_version", "source_dataset_sha256",
         "symbol", "interval", "training_start_open_utc", "training_last_close_utc",
@@ -159,6 +167,132 @@ def verify_model(model: dict, *, symbol: str, interval: str,
         parse_bounded_exact_decimal(candidates[i]["weight"]), -i
     ))]:
         raise ValueError("trained selected policy conflicts with weights")
+    return pair[0], pair[1], digest
+
+
+def _verify_closed_simulation_model(
+    model: dict, *, symbol: str, interval: str,
+    holdout_start_open: datetime,
+) -> tuple[int, int, str]:
+    """Verify a frozen history-only candidate without granting routing authority."""
+    expected = {
+        "schema", "strategy_id", "strategy_version", "model_registry",
+        "source_dataset_sha256", "symbol", "interval",
+        "training_start_open_utc", "training_last_close_utc", "training_split",
+        "embargo_seconds", "rng_seed", "label_rule", "update_rule",
+        "candidates", "selected_parameters", "learning_audit",
+        "economic_edge_status", "model_sha256",
+    }
+    if set(model) != expected:
+        raise ValueError("trained closed-simulation model schema differs")
+    payload = {key: value for key, value in model.items() if key != "model_sha256"}
+    digest = model["model_sha256"]
+    if type(digest) is not str or sha256(_canonical(payload)).hexdigest() != digest:
+        raise ValueError("trained model integrity differs")
+    if (
+        model["strategy_id"] != "moving-average-closed-simulation-experts"
+        or model["strategy_version"] != "2"
+        or model["symbol"] != symbol
+        or model["interval"] != interval
+        or model["training_split"] != "TRAIN"
+        or model["label_rule"] != "CLOSED_SIMULATION_POSITION_CYCLE_ONLY"
+        or model["update_rule"] != "CLOSED_RECONCILED_CYCLE_MULTIPLICATIVE_SCORE_V1"
+        or model["economic_edge_status"]
+        != "NOT_EVALUATED_USE_INDEPENDENT_VALIDATION_AND_HOLDOUT"
+    ):
+        raise ValueError("trained closed-simulation model identity differs")
+    source = model["source_dataset_sha256"]
+    if type(source) is not str or len(source) != 64 or any(
+        character not in "0123456789abcdef" for character in source
+    ):
+        raise ValueError("trained model source digest is malformed")
+    if type(model["rng_seed"]) is not int or isinstance(model["rng_seed"], bool) or model["rng_seed"] < 0:
+        raise ValueError("trained model seed is malformed")
+    embargo = model["embargo_seconds"]
+    if type(embargo) is not int or isinstance(embargo, bool) or embargo < 3600:
+        raise ValueError("trained model embargo is malformed")
+    try:
+        training_start = datetime.fromisoformat(model["training_start_open_utc"])
+        last_close = datetime.fromisoformat(model["training_last_close_utc"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("trained model clock is invalid") from exc
+    if (
+        training_start.tzinfo is None or last_close.tzinfo is None
+        or training_start.utcoffset() != timezone.utc.utcoffset(training_start)
+        or last_close.utcoffset() != timezone.utc.utcoffset(last_close)
+        or training_start > last_close
+        or type(holdout_start_open) is not datetime
+        or holdout_start_open.tzinfo is None
+    ):
+        raise ValueError("trained model clock is not UTC")
+    from datetime import timedelta
+    if last_close + timedelta(seconds=embargo) > holdout_start_open:
+        raise ValueError("training plus embargo overlaps the independent holdout")
+    registry = model["model_registry"]
+    if (
+        type(registry) is not dict
+        or set(registry) != {"candidate_id", "version", "routing_status"}
+        or registry.get("routing_status") != "FROZEN_CANDIDATE_NOT_PROMOTED"
+        or type(registry.get("candidate_id")) is not str
+        or not registry["candidate_id"].startswith(f"historical-ma:{symbol}:")
+        or type(registry.get("version")) is not str
+        or not registry["version"]
+        or not registry["candidate_id"].endswith(registry["version"])
+    ):
+        raise ValueError("trained model registry freeze is malformed")
+    audit = model["learning_audit"]
+    if (
+        type(audit) is not dict
+        or set(audit) != {
+            "trail", "population_root", "episode_count", "input_digest",
+            "dag_snapshot_id", "dag_scheduled_roles", "replay_contract",
+        }
+        or audit["trail"] != "EXPERIENCE_MEMORY_APPEND_ONLY"
+        or type(audit["population_root"]) is not str
+        or not audit["population_root"].startswith("sha256:")
+        or type(audit["episode_count"]) is not int
+        or audit["episode_count"] < len(EXPERTS)
+        or audit["dag_snapshot_id"] != "sha256:" + audit["input_digest"]
+        or audit["dag_scheduled_roles"]
+        != [f"moving-average-{fast}-{slow}" for fast, slow in EXPERTS]
+        or audit["replay_contract"]
+        != "IDENTICAL_INPUT_AND_MEMORY_PATH_MUST_NOT_APPEND_OR_CHANGE_MODEL"
+    ):
+        raise ValueError("trained model learning audit is malformed")
+    candidates = model["candidates"]
+    if type(candidates) is not list or len(candidates) != len(EXPERTS):
+        raise ValueError("trained candidate weights are malformed")
+    for row, expert in zip(candidates, EXPERTS):
+        if (
+            type(row) is not dict
+            or set(row) != {
+                "fast", "slow", "weight", "closed_outcomes",
+                "positive_outcomes", "negative_outcomes", "audit_episode_hashes",
+            }
+            or (row["fast"], row["slow"]) != expert
+            or type(row["closed_outcomes"]) is not int
+            or type(row["positive_outcomes"]) is not int
+            or type(row["negative_outcomes"]) is not int
+            or row["closed_outcomes"] < 1
+            or row["positive_outcomes"] + row["negative_outcomes"] > row["closed_outcomes"]
+            or type(row["audit_episode_hashes"]) is not list
+            or len(row["audit_episode_hashes"]) != row["closed_outcomes"]
+            or any(type(value) is not str or not value.startswith("sha256:")
+                   for value in row["audit_episode_hashes"])
+            or parse_bounded_exact_decimal(row["weight"]) < 0
+        ):
+            raise ValueError("trained candidate closed outcomes are malformed")
+    if sum(row["closed_outcomes"] for row in candidates) != audit["episode_count"]:
+        raise ValueError("trained model audit population count differs")
+    selected = model["selected_parameters"]
+    if type(selected) is not dict or set(selected) != {"fast", "slow"}:
+        raise ValueError("trained model parameters are malformed")
+    pair = (selected["fast"], selected["slow"])
+    winner = EXPERTS[max(range(len(EXPERTS)), key=lambda index: (
+        parse_bounded_exact_decimal(candidates[index]["weight"]), -index
+    ))]
+    if pair != winner:
+        raise ValueError("trained selected policy conflicts with closed outcomes")
     return pair[0], pair[1], digest
 
 

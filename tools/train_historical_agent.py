@@ -2,7 +2,9 @@
 
 This training command never sends an order or opens a financial account.
 Source archive validation and immutable feeder identity are shared with the
-existing historical runner; only a later independent period can evaluate it.
+existing historical runner. Learning consumes only completed, reconciled ZERO
+position cycles supplied by the existing simulator; later candle direction is
+never used as a substitute outcome label.
 """
 from __future__ import annotations
 
@@ -13,9 +15,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from autotrade_runtime.artifacts import ArtifactStore
-from mvp.autotrade_mvp.adaptive_ma import train_closed_candles, verify_model
+from mvp.autotrade_mvp.adaptive_ma import verify_model
 from research.autotrade_research.io.strict_json import strict_json_loads
 from tools.historical_causal_replay import closed_candle_simulation_input
+from tools.historical_learning_adapter import train_closed_simulation_outcomes
 from tools.historical_public_klines import HistoricalArchiveError, _reject_symlink_ancestors
 
 
@@ -64,6 +67,15 @@ def main(argv=None) -> int:
     parser.add_argument("--from-month", default="2024-01")
     parser.add_argument("--through-month", required=True)
     parser.add_argument("--model-out", required=True)
+    parser.add_argument(
+        "--simulation-results", required=True,
+        help=("bounded JSON object containing candidate_simulations produced by "
+              "completed canonical ZERO runs"),
+    )
+    parser.add_argument("--memory-path", default=None,
+                        help="append-only ExperienceMemory trail; defaults beside model")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--embargo-seconds", type=int, default=3600)
     args = parser.parse_args(argv)
     try:
         root = Path(args.data_root)
@@ -72,22 +84,43 @@ def main(argv=None) -> int:
             from_month=args.from_month, through_month=args.through_month,
             artifact_store=ArtifactStore(root / ".artifact-store"),
         )
-        model = train_closed_candles(
-            dates=dates, prices=closes, dataset_sha256=dataset_digest,
-            symbol=args.symbol, interval=args.interval,
+        results_path = Path(args.simulation_results)
+        _reject_symlink_ancestors(results_path)
+        if (results_path.is_symlink() or not results_path.is_file()
+                or results_path.stat().st_size > 5_000_000):
+            raise ValueError("simulation result bundle is missing, redirected or unbounded")
+        bundle = strict_json_loads(results_path.read_text(encoding="utf-8"))
+        if type(bundle) is not dict or set(bundle) != {"candidate_simulations"}:
+            raise ValueError("simulation result bundle schema differs")
+        model_out = Path(args.model_out)
+        memory_path = (Path(args.memory_path) if args.memory_path is not None
+                       else model_out.with_suffix(model_out.suffix + ".memory.sqlite3"))
+        model = train_closed_simulation_outcomes(
+            candidate_simulations=bundle["candidate_simulations"],
+            memory_path=memory_path,
+            dataset_sha256=dataset_digest,
+            symbol=args.symbol,
+            interval=args.interval,
+            first_execution_at=dates[1],
+            seed=args.seed,
+            embargo_seconds=args.embargo_seconds,
+            expected_execution_count=len(dates) - 1,
         )
-        from datetime import timedelta
-        from tools.historical_public_klines import INTERVAL_SECONDS
+        from datetime import datetime, timedelta
+        last_close = datetime.fromisoformat(model["training_last_close_utc"])
         verify_model(model, symbol=args.symbol, interval=args.interval,
-                     holdout_start_open=dates[-1] + timedelta(seconds=INTERVAL_SECONDS[args.interval]))
-        save_model(Path(args.model_out), model)
+                     holdout_start_open=last_close + timedelta(seconds=args.embargo_seconds))
+        save_model(model_out, model)
         print(json.dumps({
             "status": "TRAINED_CANDIDATE_NOT_PROFITABILITY_EVIDENCE",
             "model_path": str(args.model_out),
             "model_sha256": model["model_sha256"],
+            "model_version": model["model_registry"]["version"],
             "strategy_parameters": model["selected_parameters"],
             "training_last_close_utc": model["training_last_close_utc"],
-            "matured_labels": [row["matured_labels"] for row in model["candidates"]],
+            "closed_outcomes": [row["closed_outcomes"] for row in model["candidates"]],
+            "learning_population_root": model["learning_audit"]["population_root"],
+            "rng_seed": model["rng_seed"],
         }, ensure_ascii=False))
         return 0
     except (HistoricalArchiveError, OSError, ValueError, TypeError, ArithmeticError) as exc:

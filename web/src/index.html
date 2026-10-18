@@ -285,6 +285,48 @@
           <tbody id="jobs-body"><tr><td colspan="2">No job projection loaded.</td></tr></tbody>
         </table>
       </div>
+      <section id="historical-operator" aria-labelledby="historical-operator-heading">
+        <h3 id="historical-operator-heading">Historical simulation operator</h3>
+        <p>
+          Private-local, ZERO/SIMULATION only. Every amount named here is
+          <strong>simulated USD, never real USD</strong>. This panel uses the authenticated
+          private-local historical Host contract and cannot reach any provider order route.
+        </p>
+        <dl aria-describedby="historical-operator-status">
+          <dt>Session status</dt><dd id="historical-session-status">Waiting for authenticated Host status.</dd>
+          <dt>Dataset and date range</dt><dd id="historical-dataset">Waiting for Host dataset identity.</dd>
+          <dt>Symbol</dt><dd id="historical-symbol">Waiting for Host symbol.</dd>
+          <dt>Strategy</dt><dd id="historical-strategy">Waiting for Host strategy.</dd>
+          <dt>Risk cap</dt><dd id="historical-risk-cap">Canonical historical risk gate.</dd>
+          <dt>Budget and currency</dt><dd id="historical-budget">1000 simulated USD; never real money.</dd>
+          <dt>Results</dt><dd id="historical-results">No completed campaign result loaded.</dd>
+        </dl>
+        <fieldset aria-describedby="historical-control-help historical-operator-status">
+          <legend>Historical session controls</legend>
+          <p id="historical-control-help">
+            Start, pause, stop, resume and export are OWNER-only. Pause and stop preserve the
+            durable ZERO workspace; resume uses the same journals and never sends a real order.
+          </p>
+          <button id="historical-start" type="button" disabled>Start historical session</button>
+          <button id="historical-pause" type="button" disabled>Pause historical session</button>
+          <button id="historical-stop" type="button" disabled>Stop historical session</button>
+          <button id="historical-resume" type="button" disabled>Resume historical session</button>
+          <button id="historical-export" type="button" disabled>Export historical results</button>
+        </fieldset>
+        <p id="historical-operator-status">
+          Pair the local owner session to load historical status and controls.
+        </p>
+        <div id="historical-trades-region" class="table-scroll" role="region"
+             aria-label="Historical simulation trade stream" tabindex="0">
+          <table>
+            <caption>Historical simulation trade stream — simulated values only</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col">Symbol</th><th scope="col">Side</th><th scope="col">Quantity</th><th scope="col">Simulated USD price</th><th scope="col">Status</th></tr></thead>
+            <tbody id="historical-trades-body">
+              <tr><td colspan="6">No historical simulated trades loaded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </section>
     <section id="learning" aria-labelledby="learning-heading"><h2 id="learning-heading" tabindex="-1">Learning and memory</h2><p>No canonical learning projection is exposed in the current UiSnapshot. No learning state is inferred by the browser.</p></section>
     <section id="models" aria-labelledby="models-heading"><h2 id="models-heading" tabindex="-1">Models and costs</h2><p>No canonical model-cost projection is exposed in the current UiSnapshot. No model availability or budget is inferred by the browser.</p></section>

@@ -1,9 +1,9 @@
 """Research-only historical candle adapter for the existing AutoTrade ZERO engine.
 
 No broker credentials, no network orders. This is an integration experiment.
-The optional next-open cut separates strategy observations from execution
-marks and applies a fixed adverse-cost scenario, not observed spread or
-publisher point-in-time availability proof.
+The optional next-bar cut separates strategy observations from execution and
+waits for the immediately following complete bar. Its adverse OHLCV scenario
+is not observed order-book liquidity or publisher point-in-time proof.
 It is NOT qualified historical profitability evidence.
 """
 from __future__ import annotations
@@ -261,6 +261,122 @@ def load_verified_months(
     return all_dates, all_prices, digest
 
 
+def _historical_execution_plan(
+    *,
+    dates,
+    candles,
+    interval_seconds: int,
+    target_quantity,
+    instrument,
+    dataset_sha256: str,
+    fee_rate,
+    maximum_participation,
+    slippage_bps,
+    half_spread_bps,
+):
+    """Project immutable bars; the canonical simulator remains fill authority."""
+
+    from mvp.autotrade_mvp.exact_decimal import exact_multiply
+    from mvp.autotrade_mvp.execution_realism import SimulatedOrder
+    from mvp.autotrade_mvp.persistence import payload_digest
+    from tools.historical_execution_scenarios import (
+        conservative_bar_model,
+        evaluate_completed_next_bar,
+    )
+
+    model = conservative_bar_model(
+        model_version="plan10-historical-adverse-v1",
+        calibration_sha256=dataset_sha256,
+        instrument=instrument,
+        fee_rate=fee_rate,
+        maximum_participation=maximum_participation,
+        slippage_bps=slippage_bps,
+        half_spread_bps=half_spread_bps,
+    )
+    plan = []
+    for index, (opened_at, candle) in enumerate(zip(dates[1:], candles[1:]), 1):
+        completed_at = opened_at + timedelta(seconds=interval_seconds)
+        decision_time = opened_at.isoformat().replace("+00:00", "Z")
+        completed_text = completed_at.isoformat().replace("+00:00", "Z")
+        open_price, high_price, low_price, close_price, volume = candle
+        results = {}
+        for side in ("BUY", "SELL"):
+            order = SimulatedOrder.create(
+                order_id=f"historical-plan-{index}-{side.lower()}",
+                instrument_version=(
+                    f"{instrument.instrument_id}@{instrument.version}"
+                ),
+                side=side,
+                order_type="MARKET",
+                quantity=target_quantity,
+                submitted_at=decision_time,
+                lot_size=instrument.quantity_step,
+            )
+            result = evaluate_completed_next_bar(
+                order,
+                model,
+                as_of=completed_text,
+                interval_start=decision_time,
+                interval_end=completed_text,
+                available_at=completed_text,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close_price,
+                base_volume=volume,
+            )
+            if result.status not in {"FILLED", "PARTIAL", "NO_FILL"}:
+                raise HistoricalArchiveError(
+                    "historical execution is ambiguous and cannot mutate financial state"
+                )
+            if result.fill_price is not None and result.fee != exact_multiply(
+                result.filled_quantity,
+                result.fill_price,
+                model.fee_rate,
+            ):
+                raise HistoricalArchiveError(
+                    "historical execution fee conflicts with the canonical provider rate"
+                )
+            results[side] = result
+        buy, sell = results["BUY"], results["SELL"]
+        expected_trade_time = (
+            None if buy.filled_quantity == 0 else completed_text
+        )
+        if (
+            buy.status != sell.status
+            or buy.filled_quantity != sell.filled_quantity
+            or buy.trade_time != expected_trade_time
+            or sell.trade_time != expected_trade_time
+            or buy.evidence_available_at != completed_text
+            or sell.evidence_available_at != completed_text
+            or buy.model_fingerprint != sell.model_fingerprint
+        ):
+            raise HistoricalArchiveError(
+                "historical buy/sell execution capacity or chronology conflicts"
+            )
+        bar = {
+            "interval_start": decision_time,
+            "interval_end": completed_text,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+        }
+        plan.append({
+            "decision_time": decision_time,
+            "completed_at": completed_text,
+            "available_at": completed_text,
+            "capacity_quantity": format(buy.filled_quantity, "f"),
+            "capacity_status": buy.status,
+            "buy_price": None if buy.fill_price is None else format(buy.fill_price, "f"),
+            "sell_price": None if sell.fill_price is None else format(sell.fill_price, "f"),
+            "model_fingerprint": buy.model_fingerprint,
+            "bar_sha256": payload_digest(bar),
+        })
+    return plan, model.fingerprint
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run a frozen, unqualified candle-close ZERO experiment")
     parser.add_argument("--data-root", default="historical-data")
@@ -282,11 +398,19 @@ def main(argv=None) -> int:
     parser.add_argument("--next-bar-open", action="store_true",
                         help="decision on a closed bar, simulated fill at following bar open with fixed adverse costs")
     parser.add_argument("--slippage-bps", default="10",
-                        help="next-open fixed adverse basis points (0..100); not measured spread/liquidity")
+                        help="next-bar adverse slippage basis points (0..100)")
+    parser.add_argument("--half-spread-bps", default="5",
+                        help="next-bar adverse half-spread basis points (0..100)")
+    parser.add_argument("--maximum-participation", default="0.25",
+                        help="maximum fraction of next-bar base volume (0..1)")
     parser.add_argument("--model-path", default=None,
                         help="verified trained model from an earlier, disjoint historical period; requires --next-bar-open")
     parser.add_argument("--validation-report-path", default=None,
                         help="verified disjoint validation evidence ending before this holdout; requires --model-path")
+    parser.add_argument("--candidate-fast", type=int, default=None,
+                        help="research-only registered MA candidate; requires --candidate-slow and --next-bar-open")
+    parser.add_argument("--candidate-slow", type=int, default=None,
+                        help="research-only registered MA candidate; requires --candidate-fast and --next-bar-open")
     args = parser.parse_args(argv)
     try:
         data_root = Path(args.data_root)
@@ -308,20 +432,59 @@ def main(argv=None) -> int:
             raise HistoricalArchiveError("next-bar simulation needs at least two complete candles")
         if args.next_bar_open:
             slippage = Decimal(args.slippage_bps)
-            if not slippage.is_finite() or not Decimal("0") <= slippage <= Decimal("100"):
-                raise HistoricalArchiveError("adverse slippage must be 0..100 exact basis points")
+            half_spread = Decimal(args.half_spread_bps)
+            participation = Decimal(args.maximum_participation)
+            if (
+                not slippage.is_finite()
+                or not Decimal("0") <= slippage <= Decimal("100")
+                or not half_spread.is_finite()
+                or not Decimal("0") <= half_spread <= Decimal("100")
+                or not participation.is_finite()
+                or not Decimal("0") <= participation <= Decimal("1")
+            ):
+                raise HistoricalArchiveError(
+                    "historical spread/slippage/participation configuration is invalid"
+                )
         elif args.slippage_bps != "10":
             raise HistoricalArchiveError("slippage configuration requires --next-bar-open")
+        elif args.half_spread_bps != "5" or args.maximum_participation != "0.25":
+            raise HistoricalArchiveError(
+                "spread/liquidity configuration requires --next-bar-open"
+            )
         if args.model_path is not None and not args.next_bar_open:
             raise HistoricalArchiveError("trained model requires --next-bar-open")
+        if (args.candidate_fast is None) != (args.candidate_slow is None):
+            raise HistoricalArchiveError("candidate fast/slow parameters must be provided together")
+        if args.candidate_fast is not None:
+            from mvp.autotrade_mvp.adaptive_ma import EXPERTS
+            if (
+                not args.next_bar_open
+                or args.model_path is not None
+                or (args.candidate_fast, args.candidate_slow) not in EXPERTS
+            ):
+                raise HistoricalArchiveError(
+                    "research candidate parameters require --next-bar-open, no model, and a registered pair"
+                )
         model_fast, model_slow, model_digest = 2, 3, None
+        model_schema = None
+        simulation_model_digest = None
         if args.model_path is not None:
             from tools.train_historical_agent import read_model
             from mvp.autotrade_mvp.adaptive_ma import verify_model
+            trained_model = read_model(Path(args.model_path))
             model_fast, model_slow, model_digest = verify_model(
-                read_model(Path(args.model_path)), symbol=args.symbol,
+                trained_model, symbol=args.symbol,
                 interval=args.interval, holdout_start_open=dates[0],
             )
+            model_schema = trained_model["schema"]
+            simulation_model_digest = model_digest
+        elif args.candidate_fast is not None:
+            model_fast, model_slow = args.candidate_fast, args.candidate_slow
+            simulation_model_digest = sha256(json.dumps({
+                "schema": "autotrade-research-dag-candidate-v1",
+                "fast": model_fast, "slow": model_slow,
+                "dataset_identity_sha256": digest,
+            }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         validation_digest = None
         if args.validation_report_path is not None:
             if model_digest is None:
@@ -348,9 +511,61 @@ def main(argv=None) -> int:
         )
         if research_target <= 0:
             raise HistoricalArchiveError("first closed price exceeds bounded fractional research quantity")
+        historical_execution_plan = None
+        execution_model_sha256 = None
+        if args.next_bar_open:
+            execution_dates, execution_candles = [], []
+            for month in _month_range(args.from_month, args.through_month):
+                month_dates, month_candles, _manifest = _checked_month(
+                    data_root,
+                    args.symbol,
+                    args.interval,
+                    month,
+                    artifact_store=ArtifactStore(artifact_root),
+                    include_ohlcv=True,
+                )
+                execution_dates.extend(month_dates)
+                execution_candles.extend(month_candles)
+            if execution_dates != dates:
+                raise HistoricalArchiveError(
+                    "historical execution bars differ from the causal feeder cut"
+                )
+            from mvp.autotrade_mvp.simulation_session import (
+                FEE_RATE,
+                autonomous_simulation_instrument,
+            )
+            canonical_instrument = autonomous_simulation_instrument(
+                dates[1],
+                "FRACTIONAL_SPOT_RESEARCH",
+            )
+            historical_execution_plan, execution_model_sha256 = _historical_execution_plan(
+                dates=execution_dates,
+                candles=execution_candles,
+                interval_seconds=INTERVAL_SECONDS[args.interval],
+                target_quantity=research_target,
+                instrument=canonical_instrument,
+                dataset_sha256=digest,
+                fee_rate=FEE_RATE,
+                maximum_participation=args.maximum_participation,
+                slippage_bps=args.slippage_bps,
+                half_spread_bps=args.half_spread_bps,
+            )
         state_dir = args.state_dir or (
             "historical-zero-state" if args.virtual_cash == "1000"
             else "historical-zero-state-200"
+        )
+        from tools.historical_risk_context import HistoricalRiskGate
+        historical_risk = HistoricalRiskGate(
+            state_dir=state_dir,
+            run_id=args.run_id + ("-nextopen-" if args.next_bar_open else "-") + digest[:16],
+            execution_prices=execution_prices,
+            signal_prices=signal_prices if signal_prices is not None else execution_prices,
+            execution_times=[
+                first_execution_time + timedelta(seconds=index * INTERVAL_SECONDS[args.interval])
+                for index in range(len(execution_prices))
+            ],
+            initial_cash=args.virtual_cash,
+            target_quantity=format(research_target, "f"),
         )
         result = run_autonomous_simulation(
             execution_prices, state_dir,
@@ -363,9 +578,12 @@ def main(argv=None) -> int:
             virtual_cash=args.virtual_cash,
             **({"signal_prices": signal_prices, "slippage_bps": args.slippage_bps}
                if args.next_bar_open else {}),
+            **({"historical_execution_plan": historical_execution_plan}
+               if historical_execution_plan is not None else {}),
             strategy_fast=model_fast, strategy_slow=model_slow,
-            model_sha256=model_digest,
+            model_sha256=simulation_model_digest,
             validation_sha256=validation_digest,
+            should_pause=historical_risk,
         )
         comparative = None
         if args.next_bar_open:
@@ -385,10 +603,19 @@ def main(argv=None) -> int:
             "historical_end_utc": dates[-1].isoformat().replace("+00:00", "Z"),
             "observation_count": len(prices),
             "execution_count": len(execution_prices),
-            "execution_timing": ("PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO" if args.next_bar_open
+            "execution_timing": ("PRIOR_CLOSED_BAR_TO_NEXT_COMPLETED_AVAILABLE_BAR" if args.next_bar_open
                                  else "SAME_OBSERVED_CLOSE_EXPERIMENT"),
             "adverse_slippage_bps": args.slippage_bps if args.next_bar_open else "0",
+            "adverse_half_spread_bps": args.half_spread_bps if args.next_bar_open else "0",
+            "maximum_bar_participation": (
+                args.maximum_participation if args.next_bar_open else "0"
+            ),
+            "execution_model_sha256": execution_model_sha256,
             "trained_model_sha256": model_digest,
+            "trained_model_schema": model_schema,
+            "research_candidate_config_sha256": (
+                simulation_model_digest if args.candidate_fast is not None else None
+            ),
             "validation_report_sha256": validation_digest,
             "trained_strategy_parameters": {"fast": model_fast, "slow": model_slow},
             "dataset_identity_sha256": digest,
@@ -400,12 +627,14 @@ def main(argv=None) -> int:
             ),
             "virtual_cash_usd": args.virtual_cash,
             "important_limitations": [
-                ("Selected moving-average parameters were trained on earlier closed-bar labels; this holdout run does not update them."
+                ("Selected moving-average parameters were updated only from earlier CLOSED reconciled simulation position cycles; this holdout run does not update them."
+                 if model_schema == "autotrade-closed-simulation-training-v2" else
+                 "Selected moving-average parameters use a legacy earlier closed-bar directional diagnostic; this holdout run does not update them."
                  if model_digest is not None else
                  "Existing agent is currently a frozen moving-average strategy; this run does not prove learning."),
                 ("This run evaluates parameters from a separate training cut; no holdout updates are permitted."
                  if model_digest is not None else "No trained model is selected for this run."),
-                ("Next-open mode adds fixed adverse basis points and fees, not measured spread or qualified execution liquidity."
+                ("Next-bar mode applies adverse high/low, spread, slippage, fees and bounded OHLCV participation; it is not measured order-book liquidity."
                  if args.next_bar_open else
                  "Existing engine executes at observed mark, not qualified next-bar open/spread/slippage."),
                 "Bar-close availability is a retrospective scenario, not proof that these archive bytes were published at that historical time.",
@@ -413,6 +642,7 @@ def main(argv=None) -> int:
                 f"Virtual {args.virtual_cash} USD, zero network orders. Do not infer profitability from these fills.",
             ],
             "simulation": result,
+            "historical_risk": historical_risk.report(),
             "comparative_report": comparative,
         }, indent=2))
         return 2 if result.get("status") == "UNKNOWN" else 0

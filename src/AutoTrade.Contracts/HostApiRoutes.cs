@@ -45,6 +45,46 @@ public static class HostApiRoutes
     public const string GetHealth = "api/v1/health";
 
     /// <summary>
+    /// Relative route for OpenAPI operation getHistoricalStatus.
+    /// </summary>
+    public const string GetHistoricalStatus = "api/v1/historical/status";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation getHistoricalResults.
+    /// </summary>
+    public const string GetHistoricalResults = "api/v1/historical/results";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation getHistoricalTrades.
+    /// </summary>
+    public const string GetHistoricalTrades = "api/v1/historical/trades";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation startHistorical.
+    /// </summary>
+    public const string StartHistorical = "api/v1/historical/start";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation pauseHistorical.
+    /// </summary>
+    public const string PauseHistorical = "api/v1/historical/pause";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation stopHistorical.
+    /// </summary>
+    public const string StopHistorical = "api/v1/historical/stop";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation resumeHistorical.
+    /// </summary>
+    public const string ResumeHistorical = "api/v1/historical/resume";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation exportHistorical.
+    /// </summary>
+    public const string ExportHistorical = "api/v1/historical/export";
+
+    /// <summary>
     /// Relative route for OpenAPI operation downloadLocalDiagnostics.
     /// </summary>
     public const string DownloadLocalDiagnostics = "api/v1/local-diagnostics";

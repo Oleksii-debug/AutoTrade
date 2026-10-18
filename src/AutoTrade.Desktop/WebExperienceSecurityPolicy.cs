@@ -15,6 +15,20 @@ public sealed class WebExperienceSecurityPolicy
     private static readonly string StatePath = "/" + HostApiRoutes.GetState;
     private static readonly string CommandPath = "/" + HostApiRoutes.SubmitCommand;
     private static readonly string EventPath = "/" + HostApiRoutes.StreamEvents;
+    private static readonly HashSet<string> HistoricalReadPaths = new(StringComparer.Ordinal)
+    {
+        "/" + HostApiRoutes.GetHistoricalStatus,
+        "/" + HostApiRoutes.GetHistoricalResults,
+        "/" + HostApiRoutes.GetHistoricalTrades,
+    };
+    private static readonly HashSet<string> HistoricalMutationPaths = new(StringComparer.Ordinal)
+    {
+        "/" + HostApiRoutes.StartHistorical,
+        "/" + HostApiRoutes.PauseHistorical,
+        "/" + HostApiRoutes.StopHistorical,
+        "/" + HostApiRoutes.ResumeHistorical,
+        "/" + HostApiRoutes.ExportHistorical,
+    };
     private static readonly HashSet<string> DiagnosticPaths = new(StringComparer.Ordinal)
     {
         "/" + HostApiRoutes.DownloadLocalDiagnostics,
@@ -26,6 +40,7 @@ public sealed class WebExperienceSecurityPolicy
         "autotrade-diagnostics.zip",
         "autotrade-technical-diagnostics.zip",
         "autotrade-agent-report.zip",
+        "autotrade-historical-zero.zip",
     };
 
     public WebExperienceSecurityPolicy(Uri hostOrigin)
@@ -83,6 +98,18 @@ public sealed class WebExperienceSecurityPolicy
         if (DiagnosticPaths.Contains(path))
         {
             return string.Equals(method, "GET", StringComparison.Ordinal)
+                && string.IsNullOrEmpty(target.Query);
+        }
+
+        if (HistoricalReadPaths.Contains(path))
+        {
+            return string.Equals(method, "GET", StringComparison.Ordinal)
+                && string.IsNullOrEmpty(target.Query);
+        }
+
+        if (HistoricalMutationPaths.Contains(path))
+        {
+            return string.Equals(method, "POST", StringComparison.Ordinal)
                 && string.IsNullOrEmpty(target.Query);
         }
 

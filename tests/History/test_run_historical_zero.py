@@ -19,7 +19,7 @@ from tools.historical_causal_replay import BAR_CLOSE_SCENARIO
 from tools.run_historical_zero import load_verified_months, main
 
 
-def full_month_fixture(month="2024-01", close_at=None):
+def full_month_fixture(month="2024-01", close_at=None, volume_at=None):
     origin = datetime.fromisoformat(month+"-01T00:00:00+00:00")
     limit = (datetime(origin.year+1,1,1,tzinfo=timezone.utc)
              if origin.month == 12 else datetime(origin.year,origin.month+1,1,tzinfo=timezone.utc))
@@ -31,7 +31,8 @@ def full_month_fixture(month="2024-01", close_at=None):
         open_millis = t*1000 if origin.year == 2024 else t*1_000_000
         unit = 1000 if origin.year == 2024 else 1_000_000
         closing = str(close_at(i)) if close_at is not None else "101"
-        writer.writerow([str(open_millis),"100","102","99",closing,"1",
+        volume = str(volume_at(i)) if volume_at is not None else "1"
+        writer.writerow([str(open_millis),"100","102","99",closing,volume,
                          str(open_millis+3600*unit-1),"101","5","1","101","0"])
         i += 1
     filename=f"BTCUSDT-1h-{month}.zip"
@@ -44,8 +45,11 @@ def full_month_fixture(month="2024-01", close_at=None):
 
 
 class HistoricalZeroTests(unittest.TestCase):
-    def _dataset(self,tmp, *, close_at=None):
-        archive, checksum, count=full_month_fixture(close_at=close_at)
+    def _dataset(self,tmp, *, close_at=None, volume_at=None):
+        archive, checksum, count=full_month_fixture(
+            close_at=close_at,
+            volume_at=volume_at,
+        )
         def no_network(url,limit):
             return checksum if url.endswith(".CHECKSUM") else archive
         manifest=collect_month(symbol="BTCUSDT",interval="1h",month="2024-01",
@@ -247,10 +251,15 @@ class HistoricalZeroTests(unittest.TestCase):
                                        result["simulation"]["run_id"])
             protocol = events[0]["payload"]["protocol"]
             self.assertEqual(protocol["execution_timing"],
-                             "PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO")
+                             "PRIOR_CLOSED_BAR_TO_NEXT_COMPLETED_AVAILABLE_BAR")
             self.assertEqual(protocol["signal_prices"][0], "101")
             self.assertEqual(protocol["prices"][0], "100")
             self.assertEqual(protocol["adverse_slippage_bps"], "10")
+            self.assertEqual(len(protocol["historical_execution_plan"]), 743)
+            self.assertEqual(
+                protocol["historical_execution_plan"][0]["completed_at"],
+                "2024-01-01T02:00:00Z",
+            )
             research = store.load_events("provider_free_research", protocol["run_id"])
             self.assertEqual(len(research), 3)
             for episode, event in enumerate(research, 1):
@@ -276,31 +285,85 @@ class HistoricalZeroTests(unittest.TestCase):
                     stop_after_episodes=3,
                 )
 
-    def test_next_open_buy_sell_adverse_fill_and_canonical_fee(self):
+    def test_next_completed_bar_applies_adverse_costs_and_partial_liquidity(self):
         with TemporaryDirectory() as tmp:
             self._dataset(tmp, close_at=lambda i: ("100", "100", "102", "102", "100")[i]
                           if i < 5 else "101")
+            args = ["--data-root", tmp, "--through-month", "2024-01",
+                    "--virtual-cash", "200", "--state-dir", str(Path(tmp) / "state"),
+                    "--run-id", "next-buy", "--next-bar-open",
+                    "--stop-after-episodes", "5"]
             output = StringIO()
             with redirect_stdout(output):
-                code = main(["--data-root", tmp, "--through-month", "2024-01",
-                             "--virtual-cash", "200", "--state-dir", str(Path(tmp) / "state"),
-                             "--run-id", "next-buy", "--next-bar-open",
-                             "--stop-after-episodes", "5"])
+                code = main(args)
             self.assertEqual(code, 0, output.getvalue())
             result = json.loads(output.getvalue())
             sim = result["simulation"]
             self.assertEqual(sim["decisions"][2]["decision"], "BUY")
-            self.assertEqual(sim["decisions"][2]["status"], "FILLED")
-            self.assertEqual(sim["decisions"][2]["cash"], "149.89995")
+            self.assertEqual(sim["decisions"][2]["status"], "PARTIAL")
+            self.assertEqual(sim["decisions"][2]["cash"], "174.43621175")
+            execution = sim["decisions"][2]["historical_execution"]
+            self.assertEqual(execution["status"], "PARTIAL")
+            self.assertEqual(execution["requested_quantity"], "0.5")
+            self.assertEqual(execution["executed_quantity"], "0.25")
+            self.assertEqual(execution["completed_at"], "2024-01-01T04:00:00Z")
+            self.assertEqual(execution["available_at"], "2024-01-01T04:00:00Z")
             self.assertEqual(sim["decisions"][4]["decision"], "REDUCE")
-            self.assertEqual(sim["decisions"][4]["status"], "FILLED")
-            self.assertEqual(sim["cash"], "199.8")
-            self.assertEqual(sim["position"], "0")
-            self.assertEqual(sim["new_outbound_requests"], 2)
+            self.assertEqual(sim["decisions"][4]["status"], "PARTIAL")
+            self.assertEqual(sim["cash"], "173.560585625")
+            self.assertEqual(sim["position"], "0.25")
+            self.assertEqual(sim["new_outbound_requests"], 3)
             comparison = result["comparative_report"]
-            self.assertEqual(comparison["agent_mark_pnl_usd"], "-0.2")
-            self.assertEqual(Decimal(comparison["agent_liquidation_scenario_equity_usd"]), Decimal("199.8"))
+            self.assertEqual(comparison["agent_mark_pnl_usd"], "-1.439414375")
+            self.assertEqual(
+                Decimal(comparison["agent_liquidation_scenario_equity_usd"]),
+                Decimal("198.510610625"),
+            )
             self.assertEqual(comparison["cash_baseline_equity_usd"], "200")
+
+            replay_output = StringIO()
+            with redirect_stdout(replay_output):
+                self.assertEqual(main(args), 0)
+            replay = json.loads(replay_output.getvalue())["simulation"]
+            self.assertTrue(replay["resumed"])
+            self.assertEqual(replay["new_outbound_requests"], 0)
+            self.assertEqual(replay["decisions"], sim["decisions"])
+
+    def test_insufficient_next_bar_liquidity_is_durable_no_fill_without_send(self):
+        with TemporaryDirectory() as tmp:
+            self._dataset(
+                tmp,
+                close_at=lambda i: ("100", "100", "102")[i] if i < 3 else "101",
+                volume_at=lambda _i: "0",
+            )
+            state = str(Path(tmp) / "no-fill")
+            args = [
+                "--data-root", tmp,
+                "--through-month", "2024-01",
+                "--virtual-cash", "200",
+                "--state-dir", state,
+                "--run-id", "no-fill",
+                "--next-bar-open",
+                "--stop-after-episodes", "3",
+            ]
+            first_output = StringIO()
+            with redirect_stdout(first_output):
+                self.assertEqual(main(args), 0)
+            first = json.loads(first_output.getvalue())["simulation"]
+            self.assertEqual(first["decisions"][2]["decision"], "BUY")
+            self.assertEqual(first["decisions"][2]["status"], "NO_FILL")
+            self.assertEqual(first["decisions"][2]["historical_execution"]["executed_quantity"], "0")
+            self.assertEqual(first["cash"], "200")
+            self.assertEqual(first["position"], "0")
+            self.assertEqual(first["new_outbound_requests"], 0)
+
+            replay_output = StringIO()
+            with redirect_stdout(replay_output):
+                self.assertEqual(main(args), 0)
+            replay = json.loads(replay_output.getvalue())["simulation"]
+            self.assertTrue(replay["resumed"])
+            self.assertEqual(replay["new_outbound_requests"], 0)
+            self.assertEqual(replay["decisions"], first["decisions"])
 
     def test_invalid_next_open_cost_cannot_start_financial_state(self):
         with TemporaryDirectory() as tmp:

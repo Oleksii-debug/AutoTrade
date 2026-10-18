@@ -1759,6 +1759,115 @@ def _loop_instrument(effective_from, instrument_profile="GENERIC"):
     return InstrumentRegistry(versions=(version,))
 
 
+def autonomous_simulation_instrument(effective_from, instrument_profile="GENERIC"):
+    """Return the canonical instrument used by the sole autonomous simulator.
+
+    Historical adapters may use this detached immutable contract to project
+    execution prices, but they never receive provider, OMS, risk or journal
+    mutation authority.
+    """
+
+    if type(effective_from) is not datetime:
+        raise TypeError("effective_from must be an exact datetime")
+    if effective_from.tzinfo is None or effective_from.utcoffset() is None:
+        raise ValueError("effective_from must be timezone-aware")
+    canonical = effective_from.astimezone(timezone.utc)
+    return _loop_instrument(canonical, instrument_profile).require_tradable(
+        INSTRUMENT_ID,
+        canonical,
+    )
+
+
+def _canonical_historical_execution_plan(
+    plan,
+    *,
+    instrument,
+    target,
+    started_at,
+    observation_interval_seconds,
+    observation_count,
+):
+    """Validate a data-only execution plan before any financial state exists."""
+
+    if type(plan) is not list or len(plan) != observation_count:
+        raise ValueError("historical execution plan must match the observation stream")
+    expected_keys = {
+        "decision_time",
+        "completed_at",
+        "available_at",
+        "capacity_quantity",
+        "capacity_status",
+        "buy_price",
+        "sell_price",
+        "model_fingerprint",
+        "bar_sha256",
+    }
+    canonical = []
+    for index, raw in enumerate(list.copy(plan)):
+        if type(raw) is not dict or set(raw) != expected_keys:
+            raise ValueError("historical execution plan entry is malformed")
+        entry = dict.copy(raw)
+        decision = _now(entry["decision_time"])
+        completed_at = _now(entry["completed_at"])
+        available_at = _now(entry["available_at"])
+        expected_decision = started_at + timedelta(
+            seconds=index * observation_interval_seconds
+        )
+        expected_completed = expected_decision + timedelta(
+            seconds=observation_interval_seconds
+        )
+        if decision != expected_decision.isoformat().replace("+00:00", "Z"):
+            raise ValueError("historical execution plan is not the immediate next bar")
+        expected_completed_text = expected_completed.isoformat().replace("+00:00", "Z")
+        if completed_at != expected_completed_text or available_at != expected_completed_text:
+            raise ValueError(
+                "historical execution plan is future, stale, or not newly available"
+            )
+        capacity = parse_bounded_exact_decimal(entry["capacity_quantity"])
+        if capacity < 0 or capacity > target:
+            raise ValueError("historical execution capacity is outside the frozen target")
+        if capacity > 0:
+            instrument.validate_quantity(capacity)
+        expected_status = (
+            "NO_FILL" if capacity == 0 else "FILLED" if capacity == target else "PARTIAL"
+        )
+        if entry["capacity_status"] != expected_status:
+            raise ValueError("historical execution status conflicts with capacity")
+        prices = []
+        for field in ("buy_price", "sell_price"):
+            value = entry[field]
+            if capacity == 0:
+                if value is not None:
+                    raise ValueError("NO_FILL historical execution cannot carry a price")
+                prices.append(None)
+            else:
+                parsed = parse_bounded_exact_decimal(value)
+                instrument.validate_price(parsed)
+                prices.append(canonical_decimal_text(parsed))
+        for digest_field, prefix in (("model_fingerprint", ""), ("bar_sha256", "sha256:")):
+            value = entry[digest_field]
+            expected_length = 64 + len(prefix)
+            if (
+                type(value) is not str
+                or len(value) != expected_length
+                or not value.startswith(prefix)
+                or any(character not in "0123456789abcdef" for character in value[len(prefix):])
+            ):
+                raise ValueError(f"historical execution {digest_field} is invalid")
+        canonical.append({
+            "decision_time": decision,
+            "completed_at": completed_at,
+            "available_at": available_at,
+            "capacity_quantity": canonical_decimal_text(capacity),
+            "capacity_status": expected_status,
+            "buy_price": prices[0],
+            "sell_price": prices[1],
+            "model_fingerprint": entry["model_fingerprint"],
+            "bar_sha256": entry["bar_sha256"],
+        })
+    return canonical
+
+
 def _simulation_settlement_scope() -> SettlementAccountScope:
     return SettlementAccountScope(
         provider_id=PROVIDER,
@@ -2025,6 +2134,7 @@ def run_autonomous_simulation(
     strategy_slow: int = 3,
     model_sha256: str | None = None,
     validation_sha256: str | None = None,
+    historical_execution_plan: list[dict[str, object]] | None = None,
     _lifecycle_action: str | None = None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
@@ -2101,6 +2211,20 @@ def run_autonomous_simulation(
         instrument.validate_price(price)
     for price in signals:
         instrument.validate_price(price)
+    if historical_execution_plan is not None and signal_prices is None:
+        raise ValueError("historical execution plan requires a separated causal signal stream")
+    canonical_execution_plan = (
+        None
+        if historical_execution_plan is None
+        else _canonical_historical_execution_plan(
+            historical_execution_plan,
+            instrument=instrument,
+            target=target,
+            started_at=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
+            observation_interval_seconds=observation_interval_seconds,
+            observation_count=len(values),
+        )
+    )
     for name, value in (("stop_after_episodes", stop_after_episodes),
                         ("fault_at_episode", fault_at_episode),
                         ("emergency_at_episode", emergency_at_episode)):
@@ -2141,6 +2265,11 @@ def run_autonomous_simulation(
         protocol["signal_prices"] = [canonical_decimal_text(v) for v in signals]
         protocol["execution_timing"] = "PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO"
         protocol["adverse_slippage_bps"] = canonical_decimal_text(adverse_bps)
+    if canonical_execution_plan is not None:
+        protocol["execution_timing"] = (
+            "PRIOR_CLOSED_BAR_TO_NEXT_COMPLETED_AVAILABLE_BAR"
+        )
+        protocol["historical_execution_plan"] = canonical_execution_plan
     if model_sha256 is not None:
         protocol["trained_model_sha256"] = model_sha256
     if validation_sha256 is not None:
@@ -3188,19 +3317,71 @@ def _run_autonomous_locked(
         quantity = exact_subtract(allocation.targets[0].quantity, position) if allocation.targets else Decimal("0")
         if allocation.status != "ALLOCATED" or quantity == 0:
             decision = "HOLD" if decision == "HOLD" else "NO_TRADE"
-        _loop_event(store, run_id, "AutonomousEpisodeStarted", str(episode), {
+        requested_quantity = exact_abs(quantity)
+        historical_execution = None
+        historical_execution_price = None
+        completion_timestamp = timestamp
+        if quantity != 0 and allocation.status == "ALLOCATED" and "historical_execution_plan" in protocol:
+            planned = protocol["historical_execution_plan"][index]
+            capacity = parse_bounded_exact_decimal(planned["capacity_quantity"])
+            executable = min(requested_quantity, capacity)
+            if executable > 0:
+                instrument.validate_quantity(executable)
+            scenario_status = (
+                "NO_FILL" if executable == 0
+                else "FILLED" if executable == requested_quantity
+                else "PARTIAL"
+            )
+            side = "BUY" if quantity > 0 else "SELL"
+            historical_execution_price = (
+                None
+                if executable == 0
+                else parse_bounded_exact_decimal(
+                    planned["buy_price"] if side == "BUY" else planned["sell_price"]
+                )
+            )
+            completion_timestamp = planned["completed_at"]
+            historical_execution = {
+                "status": scenario_status,
+                "requested_quantity": canonical_decimal_text(requested_quantity),
+                "executed_quantity": canonical_decimal_text(executable),
+                "completed_at": completion_timestamp,
+                "available_at": planned["available_at"],
+                "model_fingerprint": planned["model_fingerprint"],
+                "bar_sha256": planned["bar_sha256"],
+            }
+            quantity = executable if quantity > 0 else -executable
+        started_payload = {
             "episode": episode, "decision": decision, "financial_cut": store.current_journal_sequence(),
             "protocol_digest": protocol_digest, "allocation_status": allocation.status,
             "lifecycle_cost_digest": lifecycle_cost.lifecycle_cost_digest,
             "lifecycle_cost_requirements_ref": lifecycle_cost.requirements_ref,
-        }, timestamp)
-        status = decision
+        }
+        if historical_execution is not None:
+            started_payload["historical_execution"] = historical_execution
+        _loop_event(
+            store,
+            run_id,
+            "AutonomousEpisodeStarted",
+            str(episode),
+            started_payload,
+            timestamp,
+        )
+        status = (
+            historical_execution["status"]
+            if historical_execution is not None
+            else decision
+        )
         order_id = fill_id = None
         if quantity != 0 and allocation.status == "ALLOCATED":
             side = "BUY" if quantity > 0 else "SELL"
             instrument.validate_quantity(exact_abs(quantity))
-            execution_price = price
-            if "signal_prices" in protocol:
+            execution_price = (
+                price
+                if historical_execution_price is None
+                else historical_execution_price
+            )
+            if "signal_prices" in protocol and historical_execution is None:
                 adverse_bps = parse_bounded_exact_decimal(protocol["adverse_slippage_bps"])
                 # A fixed, explicitly hypothetical adverse spread/slippage
                 # scenario. The observed next open stays the valuation mark;
@@ -3307,7 +3488,7 @@ def _run_autonomous_locked(
                     expected_cut=JournalStore.whole_store_state_cut(store))
                 request = {"attempt_id": attempt_id, "instrument_version": INSTRUMENT, "side": side,
                     "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(execution_price), "now": timestamp}
-                if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS":
+                if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS" or historical_execution is not None:
                     request["fill_immediately"] = False
                 frozen_request = dict(request)
 
@@ -3339,6 +3520,17 @@ def _run_autonomous_locked(
                         provider.record_fill(client_order_id=order_id,
                             provider_execution_id=_uuid("loop-partial-execution", f"{key}:part:{part}"),
                             quantity=part_quantity, now=timestamp, price=execution_price)
+                elif historical_execution is not None:
+                    provider.record_fill(
+                        client_order_id=order_id,
+                        provider_execution_id=_uuid(
+                            "loop-historical-execution",
+                            key + ":" + historical_execution["bar_sha256"],
+                        ),
+                        quantity=exact_abs(quantity),
+                        now=completion_timestamp,
+                        price=execution_price,
+                    )
                 fresh_fills = [f for f in provider.activity_fills() if f["order_ref"] == dispatched.response["provider_order_id"]]
                 if len(fresh_fills) != (2 if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS" else 1):
                     raise ValueError("ACK is not fill evidence")
@@ -3355,21 +3547,34 @@ def _run_autonomous_locked(
                         "provider_state": provider.export_state(),
                         **({"fills": fresh_fills} if len(fresh_fills) == 2 else {"fill": fill}),
                     },
-                    timestamp,
+                    completion_timestamp,
                 )
                 _commit_autonomous_fill_batch(orders, economic, reservations, settlements, artifacts,
-                    tuple(fresh_fills), key, order_id, reservation_id, timestamp)
+                    tuple(fresh_fills), key, order_id, reservation_id, completion_timestamp)
                 if orders.order(order_id).state != "FILLED":
                     raise ValueError("canonical OMS has not confirmed complete fill")
-                status = "FILLED"
-        after_checkpoint, _ = reconciliation_at(timestamp, f"{key}:after")
+                status = (
+                    historical_execution["status"]
+                    if historical_execution is not None
+                    else "FILLED"
+                )
+        after_checkpoint, _ = reconciliation_at(completion_timestamp, f"{key}:after")
         equity = exact_add(economic.cash("USD"), exact_multiply(economic.position(INSTRUMENT), price))
         result = {"episode": episode, "status": status, "decision": decision,
             "cash": canonical_decimal_text(economic.cash("USD")), "position": canonical_decimal_text(economic.position(INSTRUMENT)),
             "equity": canonical_decimal_text(equity), "reconciled": True, "order_id": order_id, "fill_id": fill_id,
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
             "emergency": emergency}
-        _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
+        if historical_execution is not None:
+            result["historical_execution"] = historical_execution
+        _loop_event(
+            store,
+            run_id,
+            "AutonomousEpisodeCompleted",
+            str(episode),
+            result,
+            completion_timestamp,
+        )
         from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
         deliver_autonomous_owned_publications(store, run_id=run_id)
         completed.append(result)

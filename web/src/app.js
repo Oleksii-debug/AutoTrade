@@ -67,7 +67,9 @@
     announcementGeneration: 0,
     restoreFocusId: null,
     pendingCommand: null,
-    pendingCommandHostId: null
+    pendingCommandHostId: null,
+    historicalStatus: null,
+    historicalBusy: false
   };
 
   const byId = (id) => document.getElementById(id);
@@ -83,6 +85,12 @@
     "operations-copy",
     "risk-region",
     "jobs-region",
+    "historical-trades-region",
+    "historical-start",
+    "historical-pause",
+    "historical-stop",
+    "historical-resume",
+    "historical-export",
     "event-history-region",
     "strategy-filter",
     "strategy-copy",
@@ -1442,8 +1450,10 @@ function appendProjectionRow(body, label, value) {
     state.sessionIdentity = null;
     state.accountId = null;
     state.environment = null;
+    state.historicalStatus = null;
     renderWhitebitPublicStatus(null);
     setCommandAvailability(false);
+    syncHistoricalControls(null);
   }
 
   function isSnapshotBusy(error) {
@@ -1861,6 +1871,14 @@ function renderOperation(operation) {
       return false;
     }
     renderSnapshot(snapshot, options);
+    try {
+      await refreshHistoricalOperator();
+    } catch {
+      state.historicalStatus = null;
+      syncHistoricalControls(null);
+      text("historical-operator-status",
+        "Historical Host projection is unavailable. No command or real order was submitted.");
+    }
     return true;
   }
 
@@ -2513,6 +2531,139 @@ function renderOperation(operation) {
     }
   }
 
+  function syncHistoricalControls(status = state.historicalStatus) {
+    const owner = state.snapshotReady && state.sessionIdentity !== null &&
+      state.sessionIdentity.role === "OWNER";
+    const phase = status && typeof status.status === "string" ? status.status : null;
+    const enabled = owner && !state.historicalBusy;
+    byId("historical-start").disabled = !enabled || phase === "RUNNING";
+    byId("historical-pause").disabled = !enabled || phase !== "RUNNING";
+    byId("historical-stop").disabled = !enabled || !["RUNNING", "PAUSED"].includes(phase);
+    byId("historical-resume").disabled = !enabled || !["PAUSED", "STOPPED", "FAILED"].includes(phase);
+    byId("historical-export").disabled = !enabled;
+  }
+
+  function renderHistoricalTrades(payload) {
+    const body = byId("historical-trades-body");
+    const trades = payload && Array.isArray(payload.trades) ? payload.trades : [];
+    body.replaceChildren();
+    if (trades.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 6;
+      cell.textContent = "No completed historical simulated trades are available.";
+      row.appendChild(cell);
+      body.appendChild(row);
+      return;
+    }
+    for (const trade of trades) {
+      const row = document.createElement("tr");
+      const values = [trade.time || "Not recorded", trade.symbol, trade.side,
+        trade.quantity, trade.price_usd || "Unavailable", trade.status];
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value === null || value === undefined ? "Unavailable" : String(value);
+        row.appendChild(cell);
+      }
+      body.appendChild(row);
+    }
+  }
+
+  async function refreshHistoricalOperator() {
+    if (!state.snapshotReady || state.historicalBusy) return false;
+    const [status, results, trades] = await Promise.all([
+      jsonFetch(HOST_API.route("getHistoricalStatus")),
+      jsonFetch(HOST_API.route("getHistoricalResults")),
+      jsonFetch(HOST_API.route("getHistoricalTrades"))
+    ]);
+    const configuration = requiredObject(status.configuration, "historical configuration");
+    state.historicalStatus = status;
+    text("historical-session-status", requiredText(status.status, "historical status"));
+    text("historical-dataset",
+      configuration.training.join(" to ") + " training; " +
+      configuration.validation.join(" to ") + " validation; " +
+      configuration.holdout.join(" to ") + " holdout");
+    text("historical-symbol", configuration.symbol + " / " + configuration.interval);
+    text("historical-strategy", "Validated adaptive moving-average specialist DAG");
+    text("historical-risk-cap", "Canonical exact-Decimal historical risk gate and drawdown STOP");
+    text("historical-budget", configuration.virtual_cash_usd + " simulated USD; never real money");
+    text("historical-results", results.available
+      ? "Completed report SHA-256 " + results.sha256
+      : "No completed campaign result loaded.");
+    renderHistoricalTrades(trades);
+    text("historical-operator-status",
+      "Historical ZERO status refreshed. Real provider-order authority remains unavailable.");
+    syncHistoricalControls(status);
+    return true;
+  }
+
+  async function runHistoricalAction(action) {
+    if (!state.snapshotReady || state.sessionIdentity === null ||
+        state.sessionIdentity.role !== "OWNER" || state.historicalBusy) return;
+    state.historicalBusy = true;
+    syncHistoricalControls();
+    const button = byId("historical-" + action);
+    text("historical-operator-status", "Submitting OWNER historical " + action + " command.");
+    try {
+      const routeName = action === "start" ? "startHistorical" :
+        action === "pause" ? "pauseHistorical" :
+        action === "stop" ? "stopHistorical" : "resumeHistorical";
+      const status = await jsonFetch(HOST_API.route(routeName), {
+        method: "POST", body: JSON.stringify({})
+      });
+      state.historicalStatus = status;
+      text("historical-operator-status",
+        "Historical ZERO command completed. Current status: " + status.status + ".");
+      queuePoliteAnnouncement("Historical ZERO status is " + status.status + ".");
+      state.historicalBusy = false;
+      await refreshHistoricalOperator();
+    } catch {
+      text("historical-operator-status",
+        "Historical command failed closed. No real order route was available or changed.");
+      queuePoliteAnnouncement("Historical command failed closed.");
+    } finally {
+      state.historicalBusy = false;
+      syncHistoricalControls();
+      if (button) button.focus();
+    }
+  }
+
+  async function exportHistoricalResults() {
+    if (!state.snapshotReady || state.sessionIdentity === null ||
+        state.sessionIdentity.role !== "OWNER" || state.historicalBusy) return;
+    state.historicalBusy = true;
+    syncHistoricalControls();
+    const button = byId("historical-export");
+    try {
+      const response = await fetch(HOST_API.route("exportHistorical"), {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: {"Accept": "application/zip", "Content-Type": "application/json"},
+        body: JSON.stringify({})
+      });
+      if (!response.ok) throw new Error("historical export failed");
+      const url = URL.createObjectURL(await response.blob());
+      try {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "autotrade-historical-zero.zip";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+      text("historical-operator-status", "Historical ZERO export download requested.");
+      queuePoliteAnnouncement("Historical ZERO export download requested.");
+    } catch {
+      text("historical-operator-status", "Historical export failed closed.");
+      queuePoliteAnnouncement("Historical export failed closed.");
+    } finally {
+      state.historicalBusy = false;
+      syncHistoricalControls();
+      button.focus();
+    }
+  }
+
   function bindDiagnosticDownload({buttonId, statusId, route, filename, label}) {
     byId(buttonId).addEventListener("click", async () => {
       const button = byId(buttonId);
@@ -2570,6 +2721,10 @@ function renderOperation(operation) {
       label: "Agent report"
     });
     bindAuthorityPolicyReviewInvalidation();
+    for (const action of ["start", "pause", "stop", "resume"]) {
+      byId("historical-" + action).addEventListener("click", () => runHistoricalAction(action));
+    }
+    byId("historical-export").addEventListener("click", exportHistoricalResults);
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
       syncAuthorityPolicyFields(byId("host-action").value);

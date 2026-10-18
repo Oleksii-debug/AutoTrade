@@ -15,18 +15,24 @@ import shutil
 from threading import Event, Lock, Thread
 import time
 
+from mvp.autotrade_mvp.diagnostics import redact_diagnostic_value
+
 
 class HistoricalDiagnosticSampler:
     def __init__(self, root: Path, *, interval: float = 1.0,
                  max_segment_bytes: int = 16 * 1024 * 1024,
+                 max_segments: int = 8,
                  monotonic=time.monotonic, clock=lambda: datetime.now(timezone.utc)):
         if not isinstance(root, Path) or root.is_symlink():
             raise ValueError("diagnostic root must be an ordinary path")
         if not 0.1 <= interval <= 60 or max_segment_bytes < 1024:
             raise ValueError("invalid telemetry cadence or segment size")
+        if type(max_segments) is not int or not 2 <= max_segments <= 128:
+            raise ValueError("diagnostic segment count must be between 2 and 128")
         self.root = root
         self.interval = interval
         self.max_segment_bytes = max_segment_bytes
+        self.max_segments = max_segments
         self._monotonic = monotonic
         self._clock = clock
         self._stop = Event()
@@ -102,25 +108,36 @@ class HistoricalDiagnosticSampler:
         path = self.root / "runtime-diagnostics.jsonl"
         if path.is_symlink() or not path.parent.is_dir():
             raise ValueError("diagnostic journal path redirected")
-        if path.exists() and path.stat().st_size >= self.max_segment_bytes:
+        safe_record = redact_diagnostic_value(record)
+        body = (json.dumps(safe_record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(body) > self.max_segment_bytes:
+            raise ValueError("one diagnostic sample exceeds the segment bound")
+        if path.exists() and path.stat().st_size + len(body) > self.max_segment_bytes:
             target = self.root / ("runtime-diagnostics-" + self._clock().strftime("%Y%m%dT%H%M%S")
                                   + "-" + str(time.time_ns()) + ".jsonl")
             os.replace(path, target)
-        body = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        rotated = sorted(self.root.glob("runtime-diagnostics-*.jsonl"))
+        while len(rotated) > self.max_segments - 1:
+            oldest = rotated.pop(0)
+            if oldest.is_symlink() or not oldest.is_file():
+                raise ValueError("diagnostic segment redirected")
+            oldest.unlink()
         with path.open("ab") as stream:
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
-        self._sequence = record["sequence"]
+        self._sequence = safe_record["sequence"]
         self._previous_digest = sha256(body).hexdigest()
 
     def _recover_chain(self) -> None:
-        expected = 1
-        previous = "0" * 64
         segments = sorted(self.root.glob("runtime-diagnostics-*.jsonl"))
         active = self.root / "runtime-diagnostics.jsonl"
         if active.exists() or active.is_symlink():
             segments.append(active)
+        if len(segments) > self.max_segments:
+            raise ValueError("diagnostic segment count exceeds configured bound")
+        previous_sequence = None
+        previous_digest = None
         for path in segments:
             if path.is_symlink() or not path.is_file():
                 raise ValueError("diagnostic segment redirected")
@@ -129,13 +146,18 @@ class HistoricalDiagnosticSampler:
                     if not body.endswith(b"\n"):
                         raise ValueError("diagnostic segment has an incomplete tail")
                     row = json.loads(body)
-                    if (type(row) is not dict or row.get("sequence") != expected
-                            or row.get("previous_sha256") != previous):
+                    sequence = row.get("sequence") if type(row) is dict else None
+                    if type(sequence) is not int or sequence < 1:
                         raise ValueError("diagnostic sequence or hash chain broken")
-                    previous = sha256(body).hexdigest()
-                    expected += 1
-        self._sequence = expected - 1
-        self._previous_digest = previous
+                    if previous_sequence is not None and (
+                            sequence != previous_sequence + 1
+                            or row.get("previous_sha256") != previous_digest):
+                        raise ValueError("diagnostic sequence or hash chain broken")
+                    previous_sequence = sequence
+                    previous_digest = sha256(body).hexdigest()
+        if previous_sequence is not None:
+            self._sequence = previous_sequence
+            self._previous_digest = previous_digest
 
     def sample_once(self) -> None:
         """Take a sample; also usable by focused deterministic tests."""

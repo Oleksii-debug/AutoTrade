@@ -160,6 +160,112 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                         install_signals=False,
                     )
 
+    async def test_periodic_checkpoint_advances_while_stream_is_idle(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            stop = asyncio.Event()
+            task = asyncio.create_task(supervise(
+                market="BTC_USDT",
+                state_dir=root,
+                connector=Connector([FakeSocket([_subscription()])]),
+                stop=stop,
+                install_signals=False,
+                heartbeat_seconds=0.1,
+                checkpoint_seconds=0.1,
+            ))
+            deadline = time.monotonic() + 2
+            first = None
+            while time.monotonic() < deadline:
+                path = root / "supervisor-state.json"
+                if path.is_file():
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                    if first is None:
+                        first = current["checkpointed_at"]
+                    elif current["checkpointed_at"] != first:
+                        break
+                await asyncio.sleep(0.02)
+            else:
+                self.fail("periodic checkpoint did not advance")
+            stop.set()
+            outcome = await asyncio.wait_for(task, timeout=2)
+            self.assertEqual(outcome["observation_count"], 0)
+
+    async def test_restart_continues_count_and_retains_bounded_artifacts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+
+            async def run(messages, expected_count):
+                stop = asyncio.Event()
+                task = asyncio.create_task(supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([FakeSocket([_subscription(), *messages])]),
+                    stop=stop,
+                    install_signals=False,
+                    heartbeat_seconds=0.1,
+                    checkpoint_seconds=0.1,
+                    max_artifacts=2,
+                ))
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    path = root / "supervisor-state.json"
+                    if path.is_file():
+                        state = json.loads(path.read_text(encoding="utf-8"))
+                        if state["observation_count"] >= expected_count:
+                            stop.set()
+                            return await asyncio.wait_for(task, timeout=2)
+                    await asyncio.sleep(0.01)
+                self.fail("supervisor did not reach expected observation count")
+
+            first = await run([_ticker(1)], 1)
+            second = await run([_ticker(2), _ticker(3)], 3)
+
+            self.assertEqual(first["observation_count"], 1)
+            self.assertEqual(second["observation_count"], 3)
+            manifests = list((root / "artifacts" / "manifests").glob("*.json"))
+            objects = list((root / "artifacts" / "objects" / "sha256").glob("*/*"))
+            self.assertEqual(len(manifests), 2)
+            self.assertEqual(len(objects), 2)
+            latest = json.loads((root / "latest-market.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                (root / "artifacts" / "manifests" /
+                 (latest["raw_evidence_ref"]["artifact_id"] + ".json")).is_file()
+            )
+
+    async def test_restart_rejects_checkpoint_latest_mismatch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            stop = asyncio.Event()
+            task = asyncio.create_task(supervise(
+                market="BTC_USDT",
+                state_dir=root,
+                connector=Connector([FakeSocket([_subscription(), _ticker(7)])]),
+                stop=stop,
+                install_signals=False,
+            ))
+            deadline = time.monotonic() + 2
+            while not (root / "latest-market.json").is_file():
+                if time.monotonic() >= deadline:
+                    self.fail("initial supervisor did not publish")
+                await asyncio.sleep(0.01)
+            stop.set()
+            await asyncio.wait_for(task, timeout=2)
+
+            latest_path = root / "latest-market.json"
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            latest["raw_evidence_ref"]["artifact_id"] = (
+                "00000000-0000-0000-0000-000000000000"
+            )
+            latest_path.write_text(json.dumps(latest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "restart snapshot is not coherent"):
+                await supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([]),
+                    stop=asyncio.Event(),
+                    install_signals=False,
+                )
+
 
 class DiagnosticJournalTests(unittest.TestCase):
     def test_heartbeat_rotates_boundedly_and_recovers_sequence(self):

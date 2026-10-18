@@ -15,8 +15,10 @@ from mvp.autotrade_mvp.adaptive_ma import (
     train_closed_candles, verify_model, verify_validation_report,
 )
 from tools.historical_public_klines import collect_month
+from tools.historical_causal_replay import closed_candle_simulation_input
 from tools.run_historical_zero import main as run_holdout
 from tools.train_historical_agent import main as train, read_model, save_model
+from tests.History.test_historical_learning_adapter import candidates as closed_candidates
 from tools.validate_historical_agent import main as validate
 from tests.History.test_run_historical_zero import full_month_fixture
 
@@ -74,14 +76,42 @@ class CausalTrainingTests(unittest.TestCase):
                               fetch=lambda url, _, r=raw, c=checksum:
                               c if url.endswith(".CHECKSUM") else r)
             path = root / "models" / "trained-2024-01.json"
+            results_path = root / "models" / "closed-simulation-results.json"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            _dates, _opens, _closes, january_digest = closed_candle_simulation_input(
+                root, symbol="BTCUSDT", interval="1h",
+                from_month="2024-01", through_month="2024-01",
+                artifact_store=store,
+            )
+            candidate_results = closed_candidates()
+            for candidate in candidate_results:
+                candidate["dataset_identity_sha256"] = january_digest
+                simulation = candidate["simulation"]
+                while len(simulation["decisions"]) < len(_dates) - 1:
+                    episode = len(simulation["decisions"]) + 1
+                    simulation["decisions"].append({
+                        **simulation["decisions"][-1],
+                        "episode": episode,
+                        "status": "HOLD",
+                        "decision": "HOLD",
+                        "order_id": None,
+                        "fill_id": None,
+                        "reconciliation_event_id": f"reconcile-padding-{episode}",
+                    })
+                simulation["completed_episodes"] = len(simulation["decisions"])
+                candidate["execution_count"] = len(simulation["decisions"])
+            results_path.write_text(json.dumps({
+                "candidate_simulations": candidate_results,
+            }), encoding="utf-8")
             command = ["--data-root", tmp, "--through-month", "2024-01",
-                       "--model-out", str(path)]
+                       "--model-out", str(path),
+                       "--simulation-results", str(results_path)]
             with redirect_stdout(StringIO()):
                 self.assertEqual(train(command), 0)
                 self.assertEqual(train(command), 0)  # identical retry
             model = read_model(path)
             self.assertTrue(model["model_sha256"])
-            self.assertGreater(model["candidates"][0]["matured_labels"], 0)
+            self.assertGreater(model["candidates"][0]["closed_outcomes"], 0)
             holdout = ["--data-root", tmp, "--from-month", "2024-02",
                        "--through-month", "2024-02", "--next-bar-open",
                        "--model-path", str(path), "--virtual-cash", "200",

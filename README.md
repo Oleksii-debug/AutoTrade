@@ -4,6 +4,32 @@
 
 [Canonical Plan 10 in Google Drive](https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit): actual 2024+ lawful public BTCUSDT/ETHUSDT market history intake, no-lookahead causal replay, $1000 USD ZERO virtual account, separate data collector/simulated broker/trader/learner and independent walk-forward evaluation. Source-only engineering can start immediately with **no broker accounts or API keys**. Until next-bar execution, historical data, model training and independent evaluation are demonstrably integrated, the existing example commands below are **synthetic development simulations, not historical trading performance proofs**. Terminal Plans 1–8 remain DONE. Plan9 retains production signing/legal/NVDA gates and optional real provider/PAPER/LIVE tracks.
 
+### WhiteBIT production-public observations and read-only account bridge
+
+WhiteBIT is the active live market source. The public probe needs no key and never
+submits an order. It validates the spot instrument list and bounded order book,
+then reports bid, ask, spread, source time and the explicit `SIMULATION_ONLY`
+execution environment:
+
+```console
+PYTHONPATH=research:. python tools/probe_whitebit_public.py --market BTC_USDT --format text
+PYTHONPATH=research:. python -m unittest research.tests.test_whitebit_public research.tests.test_whitebit_market_feed
+```
+
+`WhiteBitMarketFeed` commits the exact public response to the canonical
+`ArtifactStore` before it emits the existing `RawMarketUpdate` contract. One
+collector can therefore serve the full agent team without giving any model a
+network credential or opening duplicate exchange connections.
+
+The optional private bridge is limited in code to the documented main-account
+and trading-account balance reads. Install its isolated development dependency
+with `python -m pip install -r research/optional-whitebit-read-requirements.txt`
+and run `PYTHONPATH=research:. python -m unittest
+research.tests.test_whitebit_private_readonly`. API key and secret values must
+come from the protected `whitebit-primary` record at runtime. They must never be
+placed in Git, command-line arguments, diagnostics, model prompts or the Web UI.
+The bridge contains no BUY, SELL, transfer or withdrawal route.
+
 
 ### Plan 10 Section 1: public archival ingestion (not a trading provider)
 

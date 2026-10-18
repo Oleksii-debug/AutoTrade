@@ -22,7 +22,6 @@ from tools.historical_public_klines import _reject_symlink_ancestors
 from tools.run_historical_campaign import campaign
 from tools.run_historical_walkforward import _month, _shift
 from tools.update_historical_data import update_history
-from tools.historical_diagnostic_sampler import HistoricalDiagnosticSampler
 
 SCHEMA = "autotrade-monthly-supervisor-v1"
 
@@ -142,13 +141,7 @@ def supervise(*, data_root: Path, workspace: Path, symbol: str,
     }, sort_keys=True).encode()).hexdigest()
     state_dir = workspace / "supervisor" / symbol
     _reject_symlink_ancestors(state_dir)
-    with _single_owner(state_dir / "owner.lock"), HistoricalDiagnosticSampler(
-            state_dir / "telemetry") as diagnostics:
-        def emit(update: dict) -> None:
-            diagnostics.update_phase(update["status"], update.get("next_holdout_month"))
-            if progress:
-                progress(update)
-
+    with _single_owner(state_dir / "owner.lock"):
         state_path = state_dir / "state.json"
         state = _read_state(state_path, identity, first_holdout)
         for row in state["completed"]:
@@ -184,7 +177,8 @@ def supervise(*, data_root: Path, workspace: Path, symbol: str,
         while max_cuts is None or completed_now < max_cuts:
             month = state["next_holdout_month"]
             if _month(month) > _month(_completed_month(clock())):
-                emit({"status": "WAITING_FOR_COMPLETED_UTC_MONTH", "next_holdout_month": month})
+                if progress:
+                    progress({"status": "WAITING_FOR_COMPLETED_UTC_MONTH", "next_holdout_month": month})
                 if max_cuts is not None:
                     break
                 sleep(poll_seconds)
@@ -199,9 +193,10 @@ def supervise(*, data_root: Path, workspace: Path, symbol: str,
                     unavailable = {entry["status"] for entry in update["entries"]
                                    if entry["status"] not in ("VERIFIED_SOURCE", "VERIFIED_CACHE")}
                     if unavailable <= {"TRANSIENT", "MISSING"}:
-                        emit({"status": "WAITING_FOR_VERIFIED_PUBLIC_ARCHIVE",
-                              "next_holdout_month": month,
-                              "source_statuses": sorted(unavailable)})
+                        if progress:
+                            progress({"status": "WAITING_FOR_VERIFIED_PUBLIC_ARCHIVE",
+                                      "next_holdout_month": month,
+                                      "source_statuses": sorted(unavailable)})
                         if max_cuts is not None:
                             break
                         sleep(poll_seconds)
@@ -226,9 +221,10 @@ def supervise(*, data_root: Path, workspace: Path, symbol: str,
             state["next_holdout_month"] = _shift(month, 1)
             _publish_state(state_path, state)
             completed_now += 1
-            emit({"status": "CUT_COMPLETED", **row,
-                  "next_holdout_month": state["next_holdout_month"],
-                  "accounts": result["accounts"]})
+            if progress:
+                progress({"status": "CUT_COMPLETED", **row,
+                          "next_holdout_month": state["next_holdout_month"],
+                          "accounts": result["accounts"]})
         return {"status": "PAUSED_AT_COMPLETED_CUT", "completed_this_run": completed_now,
                 "next_holdout_month": state["next_holdout_month"],
                 "total_completed": len(state["completed"])}

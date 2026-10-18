@@ -788,6 +788,7 @@
   }
 
   function captureTableSelection(body) {
+    if (typeof window.getSelection !== "function") return null;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);

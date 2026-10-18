@@ -24,6 +24,10 @@ on:
       - "research/tests/test_jobs.py"
       - ".github/workflows/plan2-section3-research-engine.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

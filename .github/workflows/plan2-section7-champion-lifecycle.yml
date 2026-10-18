@@ -18,6 +18,10 @@ on:
       - "research/tests/test_protocol_registry.py"
       - ".github/workflows/plan2-section7-champion-lifecycle.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

@@ -1249,8 +1249,7 @@ class DurableModelBudget:
         event_id = _event_id(budget_id, idempotency_key)
 
         journal = _require_model_budget_bound_journal(self)
-        existing = journal.get_event(event_id)
-        if existing is not None:
+        def replay_existing_event(existing: dict[str, Any]) -> bool:
             if (
                 existing["event_type"] != event_type
                 or existing["aggregate_type"] != _AGGREGATE_TYPE
@@ -1281,6 +1280,10 @@ class DurableModelBudget:
                     "model budget command result conflicts with durable event"
                 )
             return False
+
+        existing = journal.get_event(event_id)
+        if existing is not None:
+            return replay_existing_event(existing)
 
         frozen_events = self._events()
         ledger = self._replay_events(frozen_events)
@@ -1313,8 +1316,23 @@ class DurableModelBudget:
                 )
             return inserted
         except ValueError as error:
-            if "aggregate_version must be" not in str(error):
+            message = str(error)
+            if (
+                "aggregate_version must be" not in message
+                and "idempotency_key retry event batch differs" not in message
+            ):
                 raise
+            # A concurrent exact retry can win after the optimistic event read
+            # but before commit_command acquires the database write lock.  In
+            # that case the contender's provisional aggregate version is stale,
+            # so its event-batch bytes intentionally differ from the committed
+            # effect.  Re-resolve the immutable event by identity and reuse the
+            # same strict replay validation as a normal later retry.  Missing or
+            # conflicting durable evidence still fails closed below.
+            journal = _require_model_budget_bound_journal(self)
+            existing = journal.get_event(event_id)
+            if existing is not None:
+                return replay_existing_event(existing)
             frozen_events = self._events()
             ledger = self._replay_events(frozen_events)
             validate(ledger)

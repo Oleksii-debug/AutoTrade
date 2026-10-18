@@ -16,6 +16,10 @@ on:
       - "research/tests/test_ablation_exact_rational.py"
       - ".github/workflows/plan2-section4-ablation.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

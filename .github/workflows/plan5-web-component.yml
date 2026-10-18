@@ -11,6 +11,10 @@ on:
     branches:
       - 'plan5/**'
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   semantic-browser:
     runs-on: ubuntu-22.04

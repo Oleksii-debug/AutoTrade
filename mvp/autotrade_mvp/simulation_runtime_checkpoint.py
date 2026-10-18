@@ -489,6 +489,7 @@ def _runtime_scope_snapshot(
     *,
     run_id: str,
     completion_event_id: str | None = None,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[
     dict[str, object],
     list[dict[str, object]],
@@ -503,7 +504,8 @@ def _runtime_scope_snapshot(
     caller so a concurrent financial/runtime mutation still fails closed.
     """
 
-    journal_events = _journal_events_at_cut(store)
+    if journal_events is None:
+        journal_events = _journal_events_at_cut(store)
     loop_events = [
         _event_identity(event)
         for event in journal_events
@@ -631,10 +633,12 @@ def _autonomous_owned_publication_events(
     store: JournalStore,
     *,
     run_id: str,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Identify exact ZERO-owned events and canonical routes without bounded scans."""
 
-    journal_events = _journal_events_at_cut(store)
+    if journal_events is None:
+        journal_events = _journal_events_at_cut(store)
     events = [
         event for event in journal_events
         if event.get("aggregate_type") == "canonical_autonomous_simulation"
@@ -689,10 +693,15 @@ def _autonomous_owned_pending_publications(
     store: JournalStore,
     *,
     run_id: str,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
-    events = _autonomous_owned_publication_events(store, run_id=run_id)
+    events = _autonomous_owned_publication_events(
+        store,
+        run_id=run_id,
+        journal_events=journal_events,
+    )
     try:
         states = JournalStore.outbox_delivery_states(
             store,
@@ -754,10 +763,15 @@ def _require_checkpoint_outbox_state(
     *,
     run_id: str,
     completion_event_id: str | None,
+    journal_events: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
     """Require ZERO-owned publication completion; ignore foreign Host/UI backlog."""
 
-    pending = _autonomous_owned_pending_publications(store, run_id=run_id)
+    pending = _autonomous_owned_pending_publications(
+        store,
+        run_id=run_id,
+        journal_events=journal_events,
+    )
     if not pending:
         return
     if (
@@ -795,15 +809,18 @@ def _stable_runtime_components(
         )
     )
     store_identity = _journal_store_identity_document(identity)
+    captured_events = _journal_events_at_cut(store)
     _require_checkpoint_outbox_state(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=captured_events,
     )
     captured_cut, loop_events, authority_events = _runtime_scope_snapshot(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=captured_events,
     )
 
     completed_values: list[dict[str, object]] = []
@@ -955,15 +972,18 @@ def _stable_runtime_components(
         ),
     }
 
+    after_events = _journal_events_at_cut(store)
     after_cut, _after_loop, _after_authority = _runtime_scope_snapshot(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=after_events,
     )
     _require_checkpoint_outbox_state(
         store,
         run_id=run_id,
         completion_event_id=completion_preimage,
+        journal_events=after_events,
     )
     if after_cut != captured_cut:
         raise AutonomousRuntimeCheckpointError(

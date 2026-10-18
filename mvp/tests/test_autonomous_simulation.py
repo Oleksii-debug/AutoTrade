@@ -256,6 +256,26 @@ class AutonomousSimulationTests(unittest.TestCase):
             self.assertEqual(result["position"], "1")
             self.assertEqual(result["new_outbound_requests"], 1)
             self.assertGreater(sum(x["decision"] == "NO_TRADE" for x in result["decisions"]), 10)
+            loop_events = JournalStore(Path(d) / "journal.sqlite3").load_events(
+                "canonical_autonomous_simulation",
+                "acceptance",
+            )
+            completions = [
+                event for event in loop_events
+                if event["event_type"] == "AutonomousEpisodeCompleted"
+            ]
+            observed = [
+                event for event in loop_events
+                if event["event_type"] == "AutonomousEpisodeFillObserved"
+            ]
+            self.assertTrue(completions)
+            self.assertTrue(observed)
+            self.assertTrue(
+                all("provider_state" not in event["payload"] for event in completions)
+            )
+            self.assertTrue(
+                all(type(event["payload"].get("provider_state")) is dict for event in observed)
+            )
 
     def test_120_episode_unattended_scenario_and_resume_match_fresh_execution(self):
         prices = (["100", "101", "103", "102", "100", "98", "100", "103"] * 15)

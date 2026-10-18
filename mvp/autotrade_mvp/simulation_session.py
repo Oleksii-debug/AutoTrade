@@ -2521,8 +2521,6 @@ def _recover_autonomous_zero_wire_completion(
         "protocol_digest": protocol_digest,
         "emergency": emergency,
     }
-    if "signal_prices" not in protocol:
-        result["provider_state"] = provider.export_state()
     _loop_event(
         store,
         run_id,
@@ -2844,8 +2842,6 @@ def _recover_autonomous_observed_fill(
         "protocol_digest": protocol_digest,
         "emergency": False,
     }
-    if "signal_prices" not in protocol:
-        result["provider_state"] = provider.export_state()
     _loop_event(
         store,
         run_id,
@@ -3373,8 +3369,6 @@ def _run_autonomous_locked(
             "equity": canonical_decimal_text(equity), "reconciled": True, "order_id": order_id, "fill_id": fill_id,
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
             "emergency": emergency}
-        if "signal_prices" not in protocol:
-            result["provider_state"] = provider.export_state()
         _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
         from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
         deliver_autonomous_owned_publications(store, run_id=run_id)

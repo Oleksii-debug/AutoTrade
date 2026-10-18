@@ -349,7 +349,9 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
             delivered.append(update)
             stop.set()
 
-        await asyncio.wait_for(feed.run(consume, stop), timeout=1)
+        # Consumer completion controls shutdown. Real Windows artifact fsync
+        # has exceeded one second on CI; this is only a bounded deadlock guard.
+        await asyncio.wait_for(feed.run(consume, stop), timeout=15)
         self.assertEqual(len(delivered), 1)
         update = delivered[0]
         self.assertIs(type(update), RawMarketUpdate)
@@ -384,7 +386,9 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("durable sink unavailable")
 
         with self.assertRaisesRegex(RuntimeError, "durable sink unavailable"):
-            await asyncio.wait_for(feed.run(broken, asyncio.Event()), timeout=1)
+            # Include actual durable artifact publication before the callback;
+            # a one-second I/O deadline can mask the intended sink exception.
+            await asyncio.wait_for(feed.run(broken, asyncio.Event()), timeout=15)
         self.assertEqual(calls, 1)
 
     async def test_constructor_bounds_are_enforced(self):

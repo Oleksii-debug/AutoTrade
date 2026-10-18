@@ -10,6 +10,7 @@ class BybitAbsenceSemanticsAuthorityTests(unittest.TestCase):
         values = dict(
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",

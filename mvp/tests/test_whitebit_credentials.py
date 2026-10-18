@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from autotrade_mvp.whitebit_credentials import (
+from mvp.autotrade_mvp.whitebit_credentials import (
     WHITEBIT_PRIMARY_PROFILE,
     WhitebitReadCredentials,
     _target,

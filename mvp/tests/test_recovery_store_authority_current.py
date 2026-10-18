@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from autotrade_mvp.persistence import JournalStore
-from autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.recovery import RecoveryController
 
 
 class RecoveryStoreAuthorityTests(unittest.TestCase):

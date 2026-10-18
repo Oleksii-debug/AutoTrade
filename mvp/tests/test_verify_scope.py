@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -68,7 +69,11 @@ class VerifyScopeTests(unittest.TestCase):
     def test_recovery_qualification_has_dedicated_exact_head_workflow(self):
         workflow = verify.ROOT / ".github" / "workflows" / "recovery-qualification.yml"
         text = workflow.read_text(encoding="utf-8")
-        self.assertIn("os: [ubuntu-latest, windows-latest]", text)
+        matrix_rows = re.findall(r"(?m)^\s+os:\s*\[([^\]\n]+)\]\s*$", text)
+        self.assertEqual(len(matrix_rows), 1)
+        runners = tuple(item.strip() for item in matrix_rows[0].split(","))
+        self.assertEqual(runners, ("ubuntu-22.04", "windows-2025"))
+        self.assertIn("runs-on: ${{ matrix.os }}", text)
         self.assertIn(
             "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
             text,

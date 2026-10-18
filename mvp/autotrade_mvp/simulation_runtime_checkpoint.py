@@ -11,6 +11,7 @@ PAPER, LIVE, release, or economic-edge authority.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from hashlib import sha256
 import hmac
 import json
@@ -178,9 +179,24 @@ def _events(protocol: Mapping[str, object]) -> tuple[ReplayEvent, ...]:
         protocol.get("source_build_identity"),
         field="source_build_identity",
     )
+    # Validate every input before cache lookup, including callers mutating the
+    # protocol between checkpoints. Only immutable source events are reused;
+    # journal state, cursor, seals and financial projections are never cached.
+    validated_prices = tuple(
+        _text(raw_price, field=f"prices[{index}]")
+        for index, raw_price in enumerate(prices)
+    )
+    return _immutable_replay_events(start, source, validated_prices)
+
+
+@lru_cache(maxsize=1)
+def _immutable_replay_events(
+    start: datetime, source: str, prices: tuple[str, ...]
+) -> tuple[ReplayEvent, ...]:
+    # ReplayEvent freezes its payload recursively. A single population bounds
+    # retention while repeated checkpoints of one campaign avoid rebuilding it.
     values: list[ReplayEvent] = []
-    for index, raw_price in enumerate(prices):
-        price = _text(raw_price, field=f"prices[{index}]")
+    for index, price in enumerate(prices):
         values.append(
             ReplayEvent(
                 sequence=index,

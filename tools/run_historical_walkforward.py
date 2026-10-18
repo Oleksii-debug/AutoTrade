@@ -51,7 +51,7 @@ def walk_forward(*, data_root: Path, workspace: Path, symbol: str,
         cut = {"holdout_month": month, "training_through": training_end,
                      "model_sha256": result["model_sha256"],
                      "selected_strategy_parameters": result["selected_strategy_parameters"],
-                     "matured_training_labels": result["matured_training_labels"],
+                     "closed_training_outcomes": result["closed_training_outcomes"],
                      "validation_report_sha256": result["validation_report_sha256"],
                      "accounts": result["accounts"]}
         cuts.append(cut)
@@ -70,7 +70,7 @@ def _text_progress(cut: dict) -> None:
     print(f"Simulation month {cut['holdout_month']}; trained through "
           f"{cut['training_through']}; model {cut['model_sha256']}; "
           f"parameters {json.dumps(cut['selected_strategy_parameters'], sort_keys=True)}; "
-          f"matured labels {cut['matured_training_labels']}.", flush=True)
+          f"closed simulation outcomes {cut['closed_training_outcomes']}.", flush=True)
     for budget, account in sorted(cut["accounts"].items(), key=lambda item: int(item[0])):
         print(f"Virtual USD {budget}: {account['status']}; "
               f"episodes {account['completed_episodes']}; "

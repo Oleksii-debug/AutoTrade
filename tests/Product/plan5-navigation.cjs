@@ -72,8 +72,27 @@ async function main() {
     assert.equal(await page.locator("#submit-command").isDisabled(), true);
     assert.match(await page.locator("#provider-availability").innerText(), /UNAVAILABLE/);
     assert.match(await page.locator("#provider-availability").innerText(), /ZERO\/SIMULATION/);
+    assert.equal(await page.locator("#historical-operator").count(), 1,
+      "historical operator reuses the canonical research route");
+    assert.match(await page.locator("#historical-budget").innerText(), /1000 simulated USD/);
+    assert.match(await page.locator("#historical-operator").innerText(), /never real USD/);
+    assert.equal(await page.locator("#polite-status").getAttribute("role"), "status");
+    assert.equal(await page.locator("#polite-status").getAttribute("aria-live"), "polite");
+    assert.equal(await page.locator("#historical-trades-region").getAttribute("role"), "region");
+    assert.equal(await page.locator("#historical-trades-region").getAttribute("tabindex"), "0");
+    for (const action of ["start", "pause", "stop", "resume", "export"]) {
+      assert.equal(await page.locator("#historical-" + action).isDisabled(), true,
+        "unsupported historical " + action + " must fail closed");
+    }
+    await page.locator('nav a[href="#research"]').focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => location.hash === "#research" &&
+      document.activeElement?.id === "research-heading");
+    await page.locator("#historical-trades-region").focus();
+    assert.equal(await page.evaluate(() => document.activeElement.id), "historical-trades-region",
+      "keyboard focus reaches the read-only historical trade stream");
     assert.deepEqual(pageErrors, [], "no runtime JavaScript exceptions during browser navigation");
-    console.log("PLAN5 SECTION1 PASS: 10 semantic routes, keyboard/heading focus, browser history, deep link, unknown route, unavailable host");
+    console.log("PLAN5 SECTION1 PASS: 10 semantic routes, keyboard/heading focus, browser history, deep link, unknown route, unavailable host, fail-closed historical operator");
   } finally {
     if (browser) await browser.close();
     await new Promise(resolve => server.close(resolve));

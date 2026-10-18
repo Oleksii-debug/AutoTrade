@@ -21,15 +21,20 @@ from threading import Event, Lock, Thread
 import time
 from typing import Any, Callable
 
-from research.autotrade_research.artifacts.durable_publish import atomic_write_json
+from research.autotrade_research.artifacts.durable_publish import (
+    atomic_write_json,
+    sync_parent_directory,
+)
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.integrations.whitebit_public import _symbol
+from research.autotrade_research.integrations.whitebit_websocket import SOURCE_URI
 from research.autotrade_research.integrations.whitebit_websocket import (
     WhiteBitPublicWebSocketTransport,
     WhiteBitWebSocketDiagnostic,
     WhiteBitWebSocketMarketFeed,
 )
+from research.autotrade_research.io.strict_json import strict_json_loads
 
 
 SCHEMA = "autotrade-whitebit-public-supervisor-v1"
@@ -38,6 +43,19 @@ _ROTATED_PREFIX = "whitebit-public-diagnostics-"
 _ROTATED_SUFFIX = ".jsonl"
 _ZERO_DIGEST = "0" * 64
 _SAFE_PHASES = frozenset({"STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"})
+_STATE_FIELDS = frozenset({
+    "schema",
+    "market",
+    "phase",
+    "checkpointed_at",
+    "observation_count",
+    "latest_evidence_ref",
+    "public_data_only",
+    "trading_authority",
+})
+_EVIDENCE_FIELDS = frozenset({
+    "artifact_id", "sha256", "source_uri", "observed_at", "rights_id",
+})
 
 
 def _utc(clock: Callable[[], datetime]) -> datetime:
@@ -139,6 +157,7 @@ class WhiteBitPublicDiagnosticJournal:
             raise ValueError("diagnostic segment count exceeds configured bound")
         prior_sequence: int | None = None
         prior_digest: str | None = None
+        latest_row: dict[str, Any] | None = None
         for path in paths:
             self._ordinary_file(path)
             with path.open("rb") as stream:
@@ -149,6 +168,21 @@ class WhiteBitPublicDiagnosticJournal:
                     sequence = row.get("sequence") if type(row) is dict else None
                     if type(sequence) is not int or sequence < 1:
                         raise ValueError("diagnostic sequence is invalid")
+                    if (
+                        row.get("schema") != SCHEMA
+                        or row.get("market") != self.market
+                        or row.get("public_data_only") is not True
+                        or row.get("trading_authority") is not False
+                        or type(row.get("observation_count")) is not int
+                        or row["observation_count"] < 0
+                        or type(row.get("generation")) is not int
+                        or row["generation"] < 0
+                        or (
+                            row.get("last_observed_at") is not None
+                            and type(row["last_observed_at"]) is not str
+                        )
+                    ):
+                        raise ValueError("diagnostic restart state is invalid")
                     if prior_sequence is not None and (
                         sequence != prior_sequence + 1
                         or row.get("previous_sha256") != prior_digest
@@ -156,9 +190,13 @@ class WhiteBitPublicDiagnosticJournal:
                         raise ValueError("diagnostic sequence or hash chain is broken")
                     prior_sequence = sequence
                     prior_digest = sha256(body).hexdigest()
+                    latest_row = row
         if prior_sequence is not None:
             self._sequence = prior_sequence
             self._previous_digest = str(prior_digest)
+            self._observation_count = latest_row["observation_count"]
+            self._last_observed_at = latest_row["last_observed_at"]
+            self._generation = latest_row["generation"]
 
     def _rotate(self, body_size: int) -> None:
         active = self.active_path
@@ -324,7 +362,7 @@ def _checkpoint(
     latest: dict[str, Any] | None,
     clock: Callable[[], datetime],
 ) -> None:
-    atomic_write_json(
+    _atomic_write_json_with_reader_retry(
         path,
         {
             "schema": SCHEMA,
@@ -339,6 +377,201 @@ def _checkpoint(
     )
 
 
+def _atomic_write_json_with_reader_retry(path: Path, value: Any) -> None:
+    """Publish through brief Windows read leases without losing the feed.
+
+    The status and learning readers intentionally consume immutable cuts without
+    taking the writer lock. A Windows CRT reader can temporarily deny the
+    atomic replace even though it only holds the file for a few milliseconds.
+    Retry only that narrow OS condition; every other publication failure still
+    fails closed.
+    """
+
+    for attempt in range(64):
+        try:
+            atomic_write_json(path, value)
+            return
+        except PermissionError:
+            if attempt == 63:
+                raise
+            time.sleep(min(0.005 * (2 ** attempt), 0.1))
+
+
+def _read_restart_state(
+    state_dir: Path,
+    *,
+    market: str,
+    artifacts: ArtifactStore,
+) -> tuple[int, dict[str, Any] | None]:
+    """Recover only an authenticated, internally coherent supervisor cut."""
+
+    state_path = state_dir / "supervisor-state.json"
+    if not state_path.exists() and not state_path.is_symlink():
+        return 0, None
+    if state_path.is_symlink() or not state_path.is_file():
+        raise ValueError("supervisor checkpoint must be an ordinary file")
+    state = strict_json_loads(state_path.read_text(encoding="utf-8"))
+    if (
+        type(state) is not dict
+        or frozenset(state) != _STATE_FIELDS
+        or state.get("schema") != SCHEMA
+        or state.get("market") != market
+        or state.get("phase") not in _SAFE_PHASES
+        or type(state.get("observation_count")) is not int
+        or state["observation_count"] < 0
+        or state.get("public_data_only") is not True
+        or state.get("trading_authority") is not False
+    ):
+        raise ValueError("supervisor checkpoint is not canonical")
+    checkpointed_at = datetime.fromisoformat(state["checkpointed_at"])
+    if checkpointed_at.tzinfo is None:
+        raise ValueError("supervisor checkpoint timestamp must be timezone-aware")
+
+    evidence = state["latest_evidence_ref"]
+    if state["observation_count"] == 0:
+        if evidence is not None:
+            raise ValueError("empty supervisor checkpoint references evidence")
+        return 0, None
+    if type(evidence) is not dict or frozenset(evidence) != _EVIDENCE_FIELDS:
+        raise ValueError("supervisor checkpoint evidence is not canonical")
+    latest_path = state_dir / "latest-market.json"
+    if latest_path.is_symlink() or not latest_path.is_file():
+        raise ValueError("supervisor latest snapshot is unavailable")
+    latest = strict_json_loads(latest_path.read_text(encoding="utf-8"))
+    if (
+        type(latest) is not dict
+        or latest.get("schema") != SCHEMA
+        or latest.get("market") != market
+        or latest.get("raw_evidence_ref") != evidence
+        or latest.get("public_data_only") is not True
+        or latest.get("trading_authority") is not False
+    ):
+        raise ValueError("supervisor restart snapshot is not coherent")
+    manifest, _raw = artifacts.read_authenticated_snapshot(evidence["artifact_id"])
+    if manifest.get("sha256") != evidence["sha256"]:
+        raise ValueError("supervisor restart evidence digest changed")
+    return state["observation_count"], latest
+
+
+def _ordinary_owned_file(path: Path, *, parent: Path) -> None:
+    if parent.is_symlink() or not parent.is_dir():
+        raise ValueError("artifact quota directory must be ordinary")
+    if path.parent.resolve(strict=True) != parent.resolve(strict=True):
+        raise ValueError("artifact quota path escapes its owned directory")
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("artifact quota entry must be an ordinary unaliased file")
+
+
+def _unlink_owned_file(path: Path, *, parent: Path) -> None:
+    """Remove one owned artifact despite a short Windows reader lease.
+
+    Authenticated readers open manifests and objects without taking the writer
+    quota lock.  Windows can therefore reject an otherwise valid unlink for a
+    few milliseconds while a reader verifies the file.  Revalidate ownership
+    before every bounded retry so the recovery does not weaken namespace or
+    alias protections.
+    """
+
+    for attempt in range(8):
+        _ordinary_owned_file(path, parent=parent)
+        try:
+            path.unlink()
+            sync_parent_directory(path)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(min(0.01 * (2 ** attempt), 0.1))
+
+
+class WhiteBitArtifactQuota:
+    """Bounded raw-frame retention with one full scan only at restart."""
+
+    def __init__(self, artifacts: ArtifactStore, *, market: str, maximum: int):
+        if type(artifacts) is not ArtifactStore:
+            raise TypeError("artifact quota requires the canonical ArtifactStore")
+        if type(maximum) is not int or not 1 <= maximum <= 1_000_000:
+            raise ValueError("artifact quota must be between 1 and 1000000")
+        self.artifacts = artifacts
+        self.market = market
+        self.maximum = maximum
+        self._entries: list[tuple[str, str, str]] = []
+
+    def _entry(self, artifact_id: str) -> tuple[str, str, str]:
+        manifest, _raw = self.artifacts.read_authenticated_snapshot(artifact_id)
+        metadata = manifest.get("metadata")
+        if (
+            manifest.get("media_type") != "application/json"
+            or manifest.get("source_refs") != [SOURCE_URI]
+            or type(metadata) is not dict
+            or metadata.get("provider") != "WHITEBIT"
+            or metadata.get("market") != self.market
+        ):
+            raise ValueError("artifact quota encountered foreign evidence")
+        return manifest["created_at"], artifact_id, manifest["sha256"]
+
+    def _remove_manifest(self, entry: tuple[str, str, str]) -> None:
+        _created_at, artifact_id, _digest = entry
+        path = self.artifacts.manifests / (artifact_id + ".json")
+        _unlink_owned_file(path, parent=self.artifacts.manifests)
+
+    def _remove_object_if_unreferenced(self, digest_value: str) -> None:
+        if any(item[2] == digest_value for item in self._entries):
+            return
+        digest = digest_value.removeprefix("sha256:")
+        path = self.artifacts._object_path(digest)
+        if not path.exists() and not path.is_symlink():
+            return
+        _unlink_owned_file(path, parent=path.parent)
+
+    def recover(self, *, protected_artifact_id: str | None) -> None:
+        """Validate the retained set, repair crash orphans, and apply the cap."""
+
+        with ResourceLock(self.artifacts.lock_path):
+            entries: list[tuple[str, str, str]] = []
+            for path in sorted(self.artifacts.manifests.glob("*.json")):
+                _ordinary_owned_file(path, parent=self.artifacts.manifests)
+                entries.append(self._entry(path.stem))
+            by_newest = sorted(entries, reverse=True)
+            retained: set[str] = set()
+            if protected_artifact_id is not None:
+                if protected_artifact_id not in {item[1] for item in entries}:
+                    raise ValueError("checkpoint evidence is absent from artifact store")
+                retained.add(protected_artifact_id)
+            for _created_at, artifact_id, _digest in by_newest:
+                if len(retained) >= self.maximum:
+                    break
+                retained.add(artifact_id)
+            for entry in entries:
+                if entry[1] not in retained:
+                    self._remove_manifest(entry)
+            self._entries = sorted(
+                (entry for entry in entries if entry[1] in retained)
+            )
+            referenced = {entry[2].removeprefix("sha256:") for entry in self._entries}
+            for path in sorted(self.artifacts.objects.glob("*/*")):
+                if path.name in referenced:
+                    continue
+                expected = self.artifacts._object_path(path.name)
+                if path != expected:
+                    raise ValueError("artifact quota encountered a non-canonical object")
+                _unlink_owned_file(path, parent=path.parent)
+
+    def admit(self, artifact_id: str) -> None:
+        """Admit one just-published frame and evict at most one old frame."""
+
+        with ResourceLock(self.artifacts.lock_path):
+            if artifact_id in {item[1] for item in self._entries}:
+                raise ValueError("artifact quota received a duplicate identity")
+            self._entries.append(self._entry(artifact_id))
+            if len(self._entries) <= self.maximum:
+                return
+            removed = self._entries.pop(0)
+            self._remove_manifest(removed)
+            self._remove_object_if_unreferenced(removed[2])
+
+
 async def supervise(
     *,
     market: str,
@@ -349,6 +582,8 @@ async def supervise(
     heartbeat_seconds: float = 1.0,
     max_segment_bytes: int = 512 * 1024,
     max_segments: int = 8,
+    checkpoint_seconds: float = 30.0,
+    max_artifacts: int = 4096,
     clock=lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
     """Collect until stopped and leave a durable terminal checkpoint."""
@@ -364,6 +599,14 @@ async def supervise(
     stop_event = stop or asyncio.Event()
     if type(stop_event) is not asyncio.Event:
         raise TypeError("stop must be an exact asyncio.Event")
+    if (
+        isinstance(checkpoint_seconds, bool)
+        or not isinstance(checkpoint_seconds, (int, float))
+        or not 0.1 <= float(checkpoint_seconds) <= 3600.0
+    ):
+        raise ValueError("checkpoint interval must be between 0.1 and 3600 seconds")
+    if type(max_artifacts) is not int or not 1 <= max_artifacts <= 1_000_000:
+        raise ValueError("artifact quota must be between 1 and 1000000")
 
     loop = asyncio.get_running_loop()
     previous_handlers: dict[signal.Signals, Any] = {}
@@ -372,8 +615,14 @@ async def supervise(
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, lambda _number, _frame, event=stop_event: loop.call_soon_threadsafe(event.set))
 
-    latest: dict[str, Any] | None = None
+    artifacts = ArtifactStore(state_dir / "artifacts")
+    artifact_quota = WhiteBitArtifactQuota(
+        artifacts,
+        market=canonical_market,
+        maximum=max_artifacts,
+    )
     observations = 0
+    latest: dict[str, Any] | None = None
     phase = "FAILED"
     journal = WhiteBitPublicDiagnosticJournal(
         state_dir / "diagnostics",
@@ -385,13 +634,25 @@ async def supervise(
     )
     try:
         with ResourceLock(state_dir / "whitebit-public-supervisor.lock"):
+            observations, latest = _read_restart_state(
+                state_dir,
+                market=canonical_market,
+                artifacts=artifacts,
+            )
+            artifact_quota.recover(
+                protected_artifact_id=(
+                    None
+                    if latest is None
+                    else latest["raw_evidence_ref"]["artifact_id"]
+                ),
+            )
             journal.start()
             _checkpoint(
                 state_dir / "supervisor-state.json",
                 market=canonical_market,
                 phase="STARTING",
-                observation_count=0,
-                latest=None,
+                observation_count=observations,
+                latest=latest,
                 clock=clock,
             )
             transport = WhiteBitPublicWebSocketTransport(
@@ -401,17 +662,54 @@ async def supervise(
             )
             feed = WhiteBitWebSocketMarketFeed(
                 transport=transport,
-                artifacts=ArtifactStore(state_dir / "artifacts"),
+                artifacts=artifacts,
             )
 
             def publish(update: Any) -> None:
                 nonlocal latest, observations
-                latest = _snapshot(update)
-                atomic_write_json(state_dir / "latest-market.json", latest)
+                candidate = _snapshot(update)
+                _atomic_write_json_with_reader_retry(
+                    state_dir / "latest-market.json", candidate
+                )
+                latest = candidate
                 observations += 1
                 journal.observation(latest["available_at"], latest["stream_generation"])
+                _checkpoint(
+                    state_dir / "supervisor-state.json",
+                    market=canonical_market,
+                    phase="RUNNING",
+                    observation_count=observations,
+                    latest=latest,
+                    clock=clock,
+                )
+                artifact_quota.admit(latest["raw_evidence_ref"]["artifact_id"])
 
-            await feed.run(publish, stop_event)
+            async def periodic_checkpoint() -> None:
+                while not stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(), timeout=float(checkpoint_seconds)
+                        )
+                    except TimeoutError:
+                        _checkpoint(
+                            state_dir / "supervisor-state.json",
+                            market=canonical_market,
+                            phase="RUNNING" if latest is not None else "STARTING",
+                            observation_count=observations,
+                            latest=latest,
+                            clock=clock,
+                        )
+
+            async def collect_sequentially() -> None:
+                async for observation in transport.observations(stop_event):
+                    publish(feed._commit(observation))
+
+            checkpoint_task = asyncio.create_task(periodic_checkpoint())
+            try:
+                await collect_sequentially()
+            finally:
+                checkpoint_task.cancel()
+                await asyncio.gather(checkpoint_task, return_exceptions=True)
             phase = "STOPPED"
             journal.checkpoint("STOPPING")
             _checkpoint(
@@ -454,10 +752,17 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--market", required=True, help="WhiteBIT public market, for example BTC_USDT")
     parser.add_argument("--state-dir", required=True, help="Persistent local collector state directory")
+    parser.add_argument("--checkpoint-seconds", type=float, default=30.0)
+    parser.add_argument("--max-artifacts", type=int, default=4096)
     args = parser.parse_args(argv)
     try:
         outcome = asyncio.run(
-            supervise(market=args.market, state_dir=Path(args.state_dir))
+            supervise(
+                market=args.market,
+                state_dir=Path(args.state_dir),
+                checkpoint_seconds=args.checkpoint_seconds,
+                max_artifacts=args.max_artifacts,
+            )
         )
         print(json.dumps(outcome, sort_keys=True), flush=True)
         return 0

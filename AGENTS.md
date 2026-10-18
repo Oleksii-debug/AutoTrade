@@ -30,7 +30,12 @@ The former 48-Section monolithic plan and `SEQUENTIAL_CLOSURE_STATE.md` are audi
 
 ## Provider-input independence
 
-The owner has explicitly stated that real provider/account/credential input is not available in the coming days and must not block development.
+The owner confirmed that a WhiteBIT private API key was created on 2026-10-17
+for the logical secure record `whitebit-primary`. This is an external setup fact,
+not evidence that the record is present or resolvable on this host, available to
+the runtime, authenticated successfully, or authorized for any account capability.
+Those binding and qualification states remain unverified and must not block
+offline development.
 Plan 6 is therefore ACTIONABLE for offline/source engineering using existing code, public specifications, frozen/recorded/synthetic fixtures, mocks and non-secret test vectors.
 Workers MUST NOT ask the owner for provider credentials/accounts to close Plan-6 engineering Sections.
 Real authenticated account binding, PAPER/LIVE and bounded-real qualification remain the optional external track in Plan 9.

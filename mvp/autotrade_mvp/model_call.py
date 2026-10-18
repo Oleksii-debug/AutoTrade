@@ -1898,6 +1898,12 @@ class DurableModelCallOrchestrator:
             raise ModelCallError(
                 "fallback request cannot widen remote privacy permission"
             )
+        if parent_policy.get("mode") == "COST_AWARE":
+            parent_agent = parent_request.get("agent_id")
+            if type(parent_agent) is not str or request.agent_id != parent_agent:
+                raise ModelCallError(
+                    "fallback request cannot change cost-aware agent identity"
+                )
         try:
             parent_budget_cap = _exact_decimal(
                 parent_request.get("budget_cap"),

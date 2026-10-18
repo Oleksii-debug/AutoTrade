@@ -18,12 +18,17 @@ from .exact_decimal import (
 )
 
 
+_MAX_RATE_COUNTER = 1_000_000
+_MAX_PROVIDER_LIMITS = 256
+
+
 class RoutingMode(StrEnum):
     ZERO = "ZERO"
     LOCAL_ONLY = "LOCAL_ONLY"
     FIXED = "FIXED"
     ALLOWLIST = "ALLOWLIST"
     DYNAMIC = "DYNAMIC"
+    COST_AWARE = "COST_AWARE"
 
 
 class RouteStatus(StrEnum):
@@ -90,6 +95,63 @@ class ModelDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderRateLimit:
+    """One authority-supplied provider-capacity observation for routing only."""
+
+    provider_id: str
+    remaining_requests: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider_id",
+            _identifier(self.provider_id, "provider_id"),
+        )
+        if (
+            type(self.remaining_requests) is not int
+            or not 0 <= self.remaining_requests <= _MAX_RATE_COUNTER
+        ):
+            raise ValueError("remaining provider requests are outside the allowed range")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRateLimitSnapshot:
+    """Agent-scoped capacity supplied by a separate rate-limit authority.
+
+    The pure router never decrements counters or retries a call.  A caller must
+    obtain a fresh snapshot before every dispatch and consume capacity at its
+    own authoritative boundary.
+    """
+
+    agent_id: str
+    remaining_agent_requests: int
+    provider_limits: tuple[ProviderRateLimit, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "agent_id", _identifier(self.agent_id, "agent_id"))
+        if (
+            type(self.remaining_agent_requests) is not int
+            or not 0 <= self.remaining_agent_requests <= _MAX_RATE_COUNTER
+        ):
+            raise ValueError("remaining agent requests are outside the allowed range")
+        if type(self.provider_limits) is not tuple:
+            raise TypeError("provider_limits must be a tuple")
+        if len(self.provider_limits) > _MAX_PROVIDER_LIMITS:
+            raise ValueError("provider limit inventory exceeds the allowed range")
+        canonical: list[ProviderRateLimit] = []
+        seen: set[str] = set()
+        for item in self.provider_limits:
+            if type(item) is not ProviderRateLimit:
+                raise TypeError("provider limit must be exact ProviderRateLimit")
+            limit = ProviderRateLimit(item.provider_id, item.remaining_requests)
+            if limit.provider_id in seen:
+                raise ValueError("provider limits must not contain duplicates")
+            seen.add(limit.provider_id)
+            canonical.append(limit)
+        object.__setattr__(self, "provider_limits", tuple(canonical))
+
+
+@dataclass(frozen=True, slots=True)
 class RoutingPolicy:
     mode: RoutingMode
     allowed_model_ids: tuple[str, ...] = ()
@@ -138,6 +200,8 @@ class ModelRequest:
     budget_remaining: Decimal
     deadline_utc: datetime
     cancelled: bool = False
+    agent_id: str = "default-agent"
+    rate_limit_snapshot: ModelRateLimitSnapshot | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", _identifier(self.request_id, "request_id"))
@@ -150,6 +214,20 @@ class ModelRequest:
             raise TypeError("privacy_remote_allowed must be boolean")
         if type(self.cancelled) is not bool:
             raise TypeError("cancelled must be boolean")
+        object.__setattr__(self, "agent_id", _identifier(self.agent_id, "agent_id"))
+        if self.rate_limit_snapshot is not None:
+            if type(self.rate_limit_snapshot) is not ModelRateLimitSnapshot:
+                raise TypeError("rate_limit_snapshot must be exact ModelRateLimitSnapshot")
+            snapshot = self.rate_limit_snapshot
+            object.__setattr__(
+                self,
+                "rate_limit_snapshot",
+                ModelRateLimitSnapshot(
+                    agent_id=snapshot.agent_id,
+                    remaining_agent_requests=snapshot.remaining_agent_requests,
+                    provider_limits=snapshot.provider_limits,
+                ),
+            )
         if type(self.deadline_utc) is not datetime or type(self.deadline_utc.tzinfo) not in (timezone, ZoneInfo):
             raise ValueError("deadline must be timezone-aware")
         object.__setattr__(
@@ -233,6 +311,8 @@ def route_model(
         budget_remaining=request.budget_remaining,
         deadline_utc=request.deadline_utc,
         cancelled=request.cancelled,
+        agent_id=request.agent_id,
+        rate_limit_snapshot=request.rate_limit_snapshot,
     )
     now = _route_now(now_utc)
     if request.cancelled:
@@ -242,13 +322,44 @@ def route_model(
     if policy.mode is RoutingMode.ZERO:
         return RouteDecision(RouteStatus.NO_MODEL, None, None, None, Decimal("0"), "zero_model_policy")
 
+    provider_capacity: dict[str, int] = {}
+    if policy.mode is RoutingMode.COST_AWARE:
+        snapshot = request.rate_limit_snapshot
+        if snapshot is None or snapshot.agent_id != request.agent_id:
+            return RouteDecision(
+                RouteStatus.REJECTED,
+                None,
+                None,
+                None,
+                Decimal("0"),
+                "rate_limit_unavailable",
+            )
+        if snapshot.remaining_agent_requests == 0:
+            return RouteDecision(
+                RouteStatus.NO_MODEL,
+                None,
+                None,
+                None,
+                Decimal("0"),
+                "agent_rate_limit_exhausted",
+            )
+        provider_capacity = {
+            item.provider_id: item.remaining_requests
+            for item in snapshot.provider_limits
+        }
+
     by_id = _dedupe_descriptors(descriptors)
     request_allowed = set(request.allowed_model_ids)
     policy_allowed = set(policy.allowed_model_ids)
 
     if policy.mode is RoutingMode.FIXED:
         candidate_ids = [policy.fixed_model_id] if policy.fixed_model_id else []
-    elif policy.mode in (RoutingMode.ALLOWLIST, RoutingMode.DYNAMIC, RoutingMode.LOCAL_ONLY):
+    elif policy.mode in (
+        RoutingMode.ALLOWLIST,
+        RoutingMode.DYNAMIC,
+        RoutingMode.LOCAL_ONLY,
+        RoutingMode.COST_AWARE,
+    ):
         candidate_ids = sorted(policy_allowed)
     else:
         candidate_ids = []
@@ -267,6 +378,11 @@ def route_model(
                 continue
             if not policy.allow_remote or not request.privacy_remote_allowed:
                 continue
+            if (
+                policy.mode is RoutingMode.COST_AWARE
+                and provider_capacity.get(descriptor.provider_id, 0) == 0
+            ):
+                continue
         if policy.maximum_latency_ms is not None and descriptor.latency_ms > policy.maximum_latency_ms:
             continue
         hard_budget = min(policy.maximum_cost, request.budget_remaining)
@@ -279,6 +395,20 @@ def route_model(
 
     if policy.mode in (RoutingMode.FIXED, RoutingMode.ALLOWLIST, RoutingMode.LOCAL_ONLY):
         chosen = candidates[0]
+    elif policy.mode is RoutingMode.COST_AWARE:
+        # Prefer local compute, then explicitly free remote capacity, then paid
+        # remote capacity.  Every tier remains bounded by the same policy cost,
+        # request budget, latency, privacy and allowlist checks above.
+        chosen = sorted(
+            candidates,
+            key=lambda item: (
+                0 if not item.remote else 1 if item.estimated_cost == 0 else 2,
+                item.estimated_cost,
+                item.latency_ms,
+                exact_subtract(Decimal("0"), item.quality_score),
+                item.model_id,
+            ),
+        )[0]
     else:
         # Higher measured quality first, then lower end-to-end estimated cost,
         # lower latency, and finally stable model identity for deterministic ties.

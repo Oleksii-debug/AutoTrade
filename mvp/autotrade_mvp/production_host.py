@@ -31,6 +31,7 @@ from .host_network import (
     SnapshotProvider,
     TransportResponse,
 )
+from .historical_host import HistoricalHostController
 from .persistence import (
     JournalStore,
     journal_store_authority_scope,
@@ -1048,6 +1049,12 @@ def build_production_host(
             principal_resolver=principal_resolver,
             snapshot_provider=snapshot_provider,
             now=now,
+        )
+        application.attach_historical_operator(
+            HistoricalHostController(
+                data_root=config.journal_path.parent / "historical-data",
+                workspace=config.journal_path.parent / "historical-workspace",
+            )
         )
         if application_factory is not None:
             from .host_network import AuthenticatedHostApplication as HostApplicationBase

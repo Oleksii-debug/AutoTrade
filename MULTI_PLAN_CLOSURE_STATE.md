@@ -14,7 +14,7 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 - Within an assigned independent plan, skip terminal DONE and take the first ACTIONABLE unfinished Section.
 - Real provider/account credentials are not required for Plan-6 component engineering. Plan 6 is ACTIONABLE_OFFLINE; workers use public specs, existing code and fixtures and must not request credentials from the owner.
 - Plan 8 waits for terminal M1-required outputs from Plans 1,2,3,4,5,7; Plan 6 is not required.
-- Plan 9 uses named per-Section dependency gates. Sections 2–6 are optional provider/PAPER/LIVE activation and do not block provider-free signed/NVDA/M2-PF release. Skip WAITING/PARKED Sections to the first ACTIONABLE Section.
+- Plan 9 uses named per-Section dependency gates. Sections 2–6 are optional provider/PAPER/LIVE activation and do not block the private-local ZERO/M2-PF program. Skip inactive optional Sections to the first ACTIONABLE Section.
 - DONE is terminal under Simplified Section Closure Protocol v3; reopen only for demonstrated regression, invalid evidence, changed acceptance contract or breaking integration.
 - The former SEQUENTIAL_CLOSURE_STATE.md is legacy audit evidence and does not choose work.
 
@@ -127,38 +127,62 @@ This file is the live GitHub coordination authority for the new multi-plan archi
 | 5 | DONE — COMPOSED SOURCE/INTEGRATION UNDER AGENTS v3 UNAVAILABLE-RUNNER EXCEPTION | **2026-10-09 terminal Plan-8 S5 repository-controllable Web/Desktop/accessibility/update/load integration only, not executed same-SHA composed product PASS.** Reused Plan-5 canonical semantic ten-route Web UI, thin Windows WPF/WebView2 + independent native Host emergency, Plan-5 source/accessibility/packaging/update/rollback/install fixture suites, Plan-7 predeclared performance/load/target-host harness, Plan-8 S4 real Host crash/restore test, and existing provider-free browser/installed Windows CI without duplicating Host/UI/journal/sender/risk/load/trust authorities. Scoped [PR #2357](https://github.com/Oleksii-debug/AutoTrade/pull/2357) exact source candidate `6d884542f470452e3199ccd6ec4aec24982a5e03` accepted in [main merge `201160ac0e5e001f13ddef003afa998a5b77b408`](https://github.com/Oleksii-debug/AutoTrade/commit/201160ac0e5e001f13ddef003afa998a5b77b408); exactly two files (ahead 2/behind 0). **POSTMERGE READBACK:** new canonical Host HTTP/Web composition test `mvp/tests/test_plan8_m1_s5_composed_surface.py=c94656fb0c2b8abd94282d9b51aaf322c83bbdf6` asserts same-origin exact Web bytes, CSP, ZERO/UNAVAILABLE real order, actual START_SIMULATION, failed static POST and forbidden query leave durable financial events and orders/fills unchanged; extended existing `.github/workflows/provider-free-product.yml=9e91d006154f2baf0cbc6f8997c1cc091c6fc8cf` adds real Plan-5 keyboard browser navigation and one Ubuntu source/accessibility/update/rollback/installed fixture/load negative job plus final same-run dependency gate on browser, Windows installed candidate, S4 recovery and S5 test suites. Pass-only evidence is written only after successful commands. Historical standalone Plan5 Web [#37733745346](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37733745346) and Desktop [#37792624515](https://github.com/Oleksii-debug/AutoTrade/actions/runs/37792624515) succeeded on earlier sources, **not exact S5 head**. **Current exact-head:** provider-free #37875864815, baseline #37875864863, Verify #37875864905, Plan6 #37875864875 QUEUED, no actual PASS; local GitHub DNS unavailable. AGENTS v3 unavailable-runner exception closes ONLY integrated repository-controlled S5 source/test qualification wiring; a later actual failing check triggers documented scoped REOPEN. This is NOT executed full package/keyboard/load PASS, measured target-host performance, physical NVDA, signed delivery, terminal M1, real provider, PAPER/LIVE, profit or release authorization. Section 6 now ACTIONABLE for actual M1 terminal freeze if named gates can be satisfied. |
 | 6 | DONE — EXACT-SHA PROVIDER-FREE M1 ENGINEERING (NON-RELEASE) | **TERMINAL PLAN-8 SECTION-6 PROVIDER-FREE ENGINEERING CLOSURE — 2026-10-10.** Reused the ONE canonical [PR #2386](https://github.com/Oleksii-debug/AutoTrade/pull/2386), exact frozen source SHA `9ecc9e6a347ccfaf160f5d3c7f169d9aef6b09c3`, canonical source tree `3f3de67e4cd9352bccaca635413220df0b33e90f`. Actual SAME-RUN [GitHub Actions #38022187626](https://github.com/Oleksii-debug/AutoTrade/actions/runs/38022187626), attempt 1: ALL SIX M1 jobs COMPLETED SUCCESS: Windows installed candidate `114125363729`, real browser `114125363912`, S4 recovery/negative `114125363913`, S5 Web/accessibility/update/load `114125363871`, S5 composed `114135083308`, and S6 terminal freeze `114135127101`. Frozen NON-RELEASE evidence artifact [#11659903809](https://github.com/Oleksii-debug/AutoTrade/actions/runs/38022187626/artifacts/11659903809), uploaded ZIP digest `sha256:9c441f3318e1ec100b0117be35d11bdf2a62e9da70299a76fead3efc3e59b53d`; JSON attests exact source SHA, tree SHA, package `sha256:c593e3dc610beb9ceedbbd6b28ecdd638fbb0d3fb410f900b501e858247332cc`, five upstream evidence digests, `EXACT_SOURCE_PROVIDER_FREE_CI`, no trading authority/release. Windows UNQUALIFIED package artifact [#11657969437](https://github.com/Oleksii-debug/AutoTrade/actions/runs/38022187626/artifacts/11657969437), archive SHA256 `82b92b0b7f3f094c4e6cea18d5c7e25b91ed142929e30b4a598f50102fd51de5`; this archive digest is distinct from the package content SHA256 recorded in freeze JSON. Exact-source candidate merged accepted [main `5323be2a11b26ad0768587793d3e93b749bfae57`](https://github.com/Oleksii-debug/AutoTrade/commit/5323be2a11b26ad0768587793d3e93b749bfae57); live main-vs-frozen comparison AHEAD 2/BEHIND 0 and only registry metadata changed, no production/source/test/CI paths differ. PR #2387 duplicate closed unmerged. **S1–S5 stay DONE; only 6 Sections exist; no second unfinished Section.** Important limits: same-SHA separate Verify `#38022187671` and lifecycle-cost `#38022187682` FAILED their own cross-plan release/trust prerequisites; NOT waived, NOT represented as PASS or finished final-release. No provider/account/PAPER/LIVE, signed release, physical NVDA, real-world performance/profit or financial authority implied. |
 
-### Plan 9 — Release / NVDA / optional external-provider activation / M2
+### Plan 9 — Provider-free release / standard accessible UI / optional external-provider activation / M2
 | Section | State |
 | ---: | --- |
-| 1 | WAITING_EXTERNAL_RELEASE_EVIDENCE |
-| 2 | PARKED_OPTIONAL_PROVIDER_TRACK |
-| 3 | PARKED_OPTIONAL_PROVIDER_TRACK |
-| 4 | PARKED_OPTIONAL_PROVIDER_TRACK |
-| 5 | PARKED_OPTIONAL_PROVIDER_TRACK |
-| 6 | PARKED_OPTIONAL_PROVIDER_TRACK |
-| 7 | WAITING_PLAN4_PLAN5_PLAN8_AND_RELEASE_EVIDENCE |
-| 8 | WAITING_SECTION7 |
-| 9 | WAITING_CLAIMED_SCOPE; provider rows may be NOT_ACTIVATED/NOT_CLAIMED |
-| 10 | WAITING_SECTION9; provider-free M2-PF does not wait for Sections 2–6 |
+| 1 | **DONE: 3/3** — private-local technical provenance retained |
+| 2 | **TERMINALLY NOT_CLAIMED/NOT_ACTIVATED: 3/3 resolved** |
+| 3 | **TERMINALLY NOT_CLAIMED + simulation contract DONE: 3/3 resolved** |
+| 4 | **ZERO campaign DONE / provider PAPER NOT_CLAIMED: 3/3 resolved** |
+| 5 | **Causal simulation scope DONE / real forward PAPER NOT_CLAIMED: 3/3 resolved** |
+| 6 | **LIVE NOT_ACTIVATED; caps and simulation STOP verified: 3/3 resolved** |
+| 7 | **DONE: 3/3** — private-local package integrity/install/update/recovery qualified |
+| 8 | **DONE: 3/3** — exact packaged keyboard/accessibility acceptance; manual NVDA-version pass optional, not blocking |
+| 9 | **DONE: 3/3** — exact claimed-scope evidence matrix with explicit NOT_CLAIMED rows |
+| 10 | **DONE: 3/3** — exact-head INTERNAL/ZERO reproducibility and limitations |
+
+**2026-10-18 official Plan9 checkpoint:** **30/30 atomic sections are DONE or
+terminally resolved for the current private WhiteBIT-public/ZERO scope.** PR #2394
+merged exact tested candidate `40d58d4725b655633231e20c613d9496ca9d7722`
+into `main` as `ddf0dd899e3e36d80d1e7f2c5b5671ea018cd9e5`; provider-free
+product and exact packaged Windows jobs PASS. Standard semantic/keyboard/focus/
+live-region accessibility is the functional criterion. A manual run with a specific
+NVDA version is optional compatibility QA. AutoTrade is private local software.
 
 ### Plan 10 — independent provider-free historical simulation (2024+), owner 2026-10-10
 
 | Section | State | Work / gate |
 | ---: | --- | --- |
-| 1 | **ACTIONABLE_OFFLINE / NOT DONE** | Ingest lawful 2024+ BTCUSDT/ETHUSDT spot history (initially 1h), source rights, authenticated publisher checksums, UTC/coverage manifest, negatives. No broker account or trading API needed. |
-| 2 | WAITING_SECTION1 / NOT DONE | Existing causal replay feeder, strict as-of observations and immutable snapshots; no lookahead. |
-| 3 | WAITING_SECTION2 / NOT DONE | Reuse canonical SimulatedProvider/OMS/risk/ledger with next-available-bar execution, slippage, spread and fees. |
-| 4 | WAITING_SECTION3 / NOT DONE | Bounded autonomous strategy BUY/SELL/HOLD with $1000 virtual capital, realistic risk and no actual orders. |
-| 5 | WAITING_SECTION4 / NOT DONE | Actual train/validation/holdout separated learning and causal memory, not an unchanged moving average. |
-| 6 | WAITING_SECTION5 / NOT DONE | Independent cost-adjusted P&L/drawdown, benchmark, leak-proof walk-forward qualification. |
-| 7 | WAITING_SECTION3 / NOT DONE | Canonical semantic Web/Windows/NVDA historical-run operator UI and accessible results. |
-| 8 | WAITING_SECTIONS3_7 / NOT DONE | INTERNAL UNSIGNED SIMULATION-ONLY executable package, exact source and acceptance; no public release claim. |
-| 9 | WAITING_SECTION1 / NOT DONE | Bounded incremental historical public-data refresh and restart/coverage proof. |
-| 10 | WAITING_SECTIONS1_9 / NOT DONE | Whole-system exact-SHA E2E acceptance, real historical campaign, negative/restart/CI evidence. |
+| 1 | **DONE: 4/4** | Bounded archive intake, UTC/Decimal/manifests and negative suite integrated; complete approved 2024 BTC+ETH 1h baseline is locally verified, future data appends incrementally. |
+| 2 | **DONE: 2/2** | Existing causal replay feeder, strict as-of observations, immutable snapshots/restart; no lookahead. |
+| 3 | **DONE: 3/3** | Credential-free exact accounting plus protocol-bound next-completed-bar execution now reuse canonical SimulatedProvider/risk/OMS/journal; adverse costs, PARTIAL/NO_FILL and future/stale/tamper/restart rejection are integrated. |
+| 4 | **DONE: 2/2** | Agent/strategy ZERO path plus causal exact-Decimal daily-risk/drawdown/STOP context integrated. |
+| 5 | **DONE: 2/2** | CLOSED reconciled ZERO outcomes drive existing ExperienceMemory/specialist DAG; frozen seed/version/embargo, no-change replay and leakage/outcome-reuse rejection integrated. |
+| 6 | **DONE: 2/2** | Independent cash/buy-hold walk-forward plus causal regime/missed-fill/Wilson/bootstrap uncertainty integrated; insufficient evidence stays INCONCLUSIVE. |
+| 7 | **DONE: 2/2** | Canonical semantic Web/Windows surface now uses authenticated historical status/results/trades plus OWNER-only start/pause/stop/resume/export Host contracts, with one ZERO lifecycle authority and no provider-order route. |
+| 8 | **1/2 DONE; 1 PARTIAL** | Exact PRIVATE/ZERO Windows candidate PASS; next candidate will rebuild after Plan10 integration. |
+| 9 | **DONE: 2/2** | Bounded incremental historical public-data refresh, inventory, gap/retry/restart proof integrated. |
+| 10 | **1/2 DONE; 1 WAITING** | 10A real-data bounded whole-system E2E, restart and dual-diagnostic qualification passed at source `65553fde420bd50d5a7fa2a49da51af90bb95411`; 10B awaits exact-head hosted CI and Windows package evidence. |
 
-**2026-10-13 atomic checkpoint:** The 23 independent status rows in `ATOMIC_OPEN_SECTIONS_2026-10-13.md` are authoritative for the split Plan10 scope; **0/23 DONE**. Existing #2389 source `2219a3628813fc106a3a303904fda91be92c1b8a` adds a canonical causal archive adapter, daily continuity, immutable restart and explicit archive-publication limitations. Hosted Linux `38381115287` has 39 History tests and all 4 real-source tests PASS, but overall Verify FAILS the known protected sentinel regression. Local canonical feeder 25 PASS; current finite updater/negative suite 46 History tests PASS. 1А–1Г are QUALIFYING, 2А/2Б and 9А/9Б are PARTIAL preparation pending Section1 integration. No aggregate Section is DONE; no production authority or lower-class substitution. Existing #2388 remains the CI/trust dependency; preserve its independent exact-head approval gate.
+**2026-10-18 atomic checkpoint:** The 23 independent status rows in
+`ATOMIC_OPEN_SECTIONS_2026-10-13.md` are authoritative: **21/23 DONE, 1
+PARTIAL, 1 WAITING exact hosted Windows convergence.** The former protected-workflow
+blocker is removed; #2394 is merged and exact packaged Windows qualification
+passed. BTCUSDT and ETHUSDT Q1 2024 train/validation/holdout campaigns are
+running as durable local processes. A persisted real BTCUSDT bounded E2E now
+passes all nine exact identity, learning, campaign, separation, runtime, journal,
+restart, diagnostics and secret-leakage checks. Current next integration adds
+bounded diagnostic retention, durable WhiteBIT supervisor checkpoints, canonical causal
+execution, closed-outcome learning and conservative holdout uncertainty. No PAPER/LIVE, economic edge or
+external product claim is inferred or required.
 
-**Owner-authorized Plan10 independent work:** first actionable unfinished Section is **10.1**, which may begin immediately without ANY broker/provider credentials, Plan9 rights/production signing, physical NVDA or optional provider/PAPER/LIVE gates. Owner explicitly deferred provider onboarding and requested research historical simulation. Plans1–8 terminal DONE remain untouched. Plan9 external signed release status remains WAITING/PARKED, NOT DONE; Plan10 internal experiments must not be represented as signed commercial releases, true-paper fills, real adaptive learning or demonstrated profitability until actually verified. Existing unfinished [PR #2389](https://github.com/Oleksii-debug/AutoTrade/pull/2389) is reusable engineering work, NOT evidence of terminal DONE and must not be blindly reimplemented. Existing [PR #2388](https://github.com/Oleksii-debug/AutoTrade/pull/2388) is separate protected-workflow CI repair and must be integrated only through its current trust rules. Canonical plan: https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
+**Owner-authorized Plan10 independent work:** continue unfinished functional
+sections without broker credentials or manual NVDA-version testing
+or optional provider/PAPER/LIVE gates. UI polish is lower priority than completing
+the data → decision → simulation → accounting → memory → learning → independent
+evaluation loop. Private experiments must not be represented as true-paper fills
+or demonstrated profitability until verified. Canonical
+plan: https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
 
 Migration note: old parked/partial PRs may have stale bases after the control-plane switch. Their existence is preserved as work/evidence, not as a requirement to merge stale topology. When a Section becomes actionable, refresh head/base/current-main, preserve unique changes, and converge once under the new owner plan.
 

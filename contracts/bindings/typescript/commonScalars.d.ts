@@ -1,6 +1,6 @@
 // AUTO-GENERATED from contracts/jsonschema/common.schema.json. DO NOT EDIT.
 // Run python tools/generate_common_scalar_bindings.py to regenerate.
-export declare const CONTRACT_VERSION: "6.1.0";
+export declare const CONTRACT_VERSION: "6.2.0";
 
 export type CommonScalarKind =
     "Decimal"

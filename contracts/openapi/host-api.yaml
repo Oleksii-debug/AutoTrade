@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AutoTrade Host API
-  version: 6.1.0
+  version: 6.2.0
   description: Canonical UI/host boundary. Accepted commands are not financial-completion claims.
 servers:
   - url: https://localhost
@@ -85,6 +85,64 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/provider.schema.json#/$defs/HealthResult
+  /api/v1/historical/status:
+    get:
+      operationId: getHistoricalStatus
+      responses:
+        "200":
+          description: Authenticated private-local ZERO campaign lifecycle status
+  /api/v1/historical/results:
+    get:
+      operationId: getHistoricalResults
+      responses:
+        "200":
+          description: Authenticated immutable historical campaign result projection
+  /api/v1/historical/trades:
+    get:
+      operationId: getHistoricalTrades
+      responses:
+        "200":
+          description: Authenticated bounded trade projection from the canonical ZERO OMS journal
+  /api/v1/historical/start:
+    post:
+      operationId: startHistorical
+      description: OWNER-only start of the fixed private-local ZERO campaign
+      responses:
+        "200":
+          description: Current durable lifecycle status
+  /api/v1/historical/pause:
+    post:
+      operationId: pauseHistorical
+      description: OWNER-only process pause with durable workspace preserved
+      responses:
+        "200":
+          description: Current durable lifecycle status
+  /api/v1/historical/stop:
+    post:
+      operationId: stopHistorical
+      description: OWNER-only stop with durable workspace preserved
+      responses:
+        "200":
+          description: Current durable lifecycle status
+  /api/v1/historical/resume:
+    post:
+      operationId: resumeHistorical
+      description: OWNER-only restart of the same recoverable ZERO workspace
+      responses:
+        "200":
+          description: Current durable lifecycle status
+  /api/v1/historical/export:
+    post:
+      operationId: exportHistorical
+      description: OWNER-only export of status, results and canonical simulated trades
+      responses:
+        "200":
+          description: Historical ZERO evidence ZIP
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
   /api/v1/local-diagnostics:
     get:
       operationId: downloadLocalDiagnostics

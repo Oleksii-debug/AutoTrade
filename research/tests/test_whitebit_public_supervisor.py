@@ -8,11 +8,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
+from uuid import uuid4
 
+from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from tools.run_whitebit_public_supervisor import (
     SCHEMA,
+    SOURCE_URI,
+    WhiteBitArtifactQuota,
     WhiteBitPublicDiagnosticJournal,
+    _atomic_write_json_with_reader_retry,
     supervise,
 )
 
@@ -89,6 +95,96 @@ class Connector:
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_atomic_publication_retries_transient_windows_reader_lease(self):
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "latest-market.json"
+            attempts = []
+
+            def transient_reader_lease(path, value):
+                attempts.append((path, value))
+                if len(attempts) < 3:
+                    raise PermissionError("simulated Windows reader lease")
+
+            with patch(
+                "tools.run_whitebit_public_supervisor.atomic_write_json",
+                side_effect=transient_reader_lease,
+            ):
+                _atomic_write_json_with_reader_retry(destination, {"ready": True})
+
+            self.assertEqual(len(attempts), 3)
+            self.assertTrue(all(item[0] == destination for item in attempts))
+
+    async def test_failed_latest_publication_does_not_checkpoint_unpublished_cut(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            connector = Connector([FakeSocket([_subscription(), _ticker(42)])])
+            real_publish = __import__(
+                "tools.run_whitebit_public_supervisor", fromlist=["atomic_write_json"]
+            ).atomic_write_json
+
+            def fail_latest(path, value):
+                if path.name == "latest-market.json":
+                    raise PermissionError("persistent simulated reader lease")
+                return real_publish(path, value)
+
+            with patch(
+                "tools.run_whitebit_public_supervisor._atomic_write_json_with_reader_retry",
+                side_effect=fail_latest,
+            ):
+                with self.assertRaises(PermissionError):
+                    await supervise(
+                        market="BTC_USDT",
+                        state_dir=root,
+                        connector=connector,
+                        install_signals=False,
+                    )
+
+            state = json.loads((root / "supervisor-state.json").read_text("utf-8"))
+            self.assertEqual(state["phase"], "FAILED")
+            self.assertEqual(state["observation_count"], 0)
+            self.assertIsNone(state["latest_evidence_ref"])
+            self.assertFalse((root / "latest-market.json").exists())
+
+    async def test_artifact_eviction_retries_transient_windows_reader_lease(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ArtifactStore(root / "artifacts")
+
+            def publish(update_id: int) -> dict:
+                artifact_id = str(uuid4())
+                return store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=_ticker(update_id),
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[SOURCE_URI],
+                    metadata={"provider": "WHITEBIT", "market": "BTC_USDT"},
+                )
+
+            first = publish(1)
+            quota = WhiteBitArtifactQuota(store, market="BTC_USDT", maximum=1)
+            quota.recover(protected_artifact_id=first["artifact_id"])
+            second = publish(2)
+            first_path = store.manifests / (first["artifact_id"] + ".json")
+            real_unlink = Path.unlink
+            rejected = []
+
+            def transient_reader_lease(path, *args, **kwargs):
+                if path == first_path and not rejected:
+                    rejected.append(True)
+                    raise PermissionError("simulated Windows reader lease")
+                return real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", autospec=True,
+                              side_effect=transient_reader_lease):
+                quota.admit(second["artifact_id"])
+
+            self.assertEqual(rejected, [True])
+            self.assertFalse(first_path.exists())
+            self.assertTrue(
+                (store.manifests / (second["artifact_id"] + ".json")).is_file()
+            )
+
     async def test_reconnect_snapshot_and_clean_checkpoint_are_durable(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "state"
@@ -159,6 +255,112 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                         stop=asyncio.Event(),
                         install_signals=False,
                     )
+
+    async def test_periodic_checkpoint_advances_while_stream_is_idle(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            stop = asyncio.Event()
+            task = asyncio.create_task(supervise(
+                market="BTC_USDT",
+                state_dir=root,
+                connector=Connector([FakeSocket([_subscription()])]),
+                stop=stop,
+                install_signals=False,
+                heartbeat_seconds=0.1,
+                checkpoint_seconds=0.1,
+            ))
+            deadline = time.monotonic() + 2
+            first = None
+            while time.monotonic() < deadline:
+                path = root / "supervisor-state.json"
+                if path.is_file():
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                    if first is None:
+                        first = current["checkpointed_at"]
+                    elif current["checkpointed_at"] != first:
+                        break
+                await asyncio.sleep(0.02)
+            else:
+                self.fail("periodic checkpoint did not advance")
+            stop.set()
+            outcome = await asyncio.wait_for(task, timeout=2)
+            self.assertEqual(outcome["observation_count"], 0)
+
+    async def test_restart_continues_count_and_retains_bounded_artifacts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+
+            async def run(messages, expected_count):
+                stop = asyncio.Event()
+                task = asyncio.create_task(supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([FakeSocket([_subscription(), *messages])]),
+                    stop=stop,
+                    install_signals=False,
+                    heartbeat_seconds=0.1,
+                    checkpoint_seconds=0.1,
+                    max_artifacts=2,
+                ))
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    path = root / "supervisor-state.json"
+                    if path.is_file():
+                        state = json.loads(path.read_text(encoding="utf-8"))
+                        if state["observation_count"] >= expected_count:
+                            stop.set()
+                            return await asyncio.wait_for(task, timeout=2)
+                    await asyncio.sleep(0.01)
+                self.fail("supervisor did not reach expected observation count")
+
+            first = await run([_ticker(1)], 1)
+            second = await run([_ticker(2), _ticker(3)], 3)
+
+            self.assertEqual(first["observation_count"], 1)
+            self.assertEqual(second["observation_count"], 3)
+            manifests = list((root / "artifacts" / "manifests").glob("*.json"))
+            objects = list((root / "artifacts" / "objects" / "sha256").glob("*/*"))
+            self.assertEqual(len(manifests), 2)
+            self.assertEqual(len(objects), 2)
+            latest = json.loads((root / "latest-market.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                (root / "artifacts" / "manifests" /
+                 (latest["raw_evidence_ref"]["artifact_id"] + ".json")).is_file()
+            )
+
+    async def test_restart_rejects_checkpoint_latest_mismatch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            stop = asyncio.Event()
+            task = asyncio.create_task(supervise(
+                market="BTC_USDT",
+                state_dir=root,
+                connector=Connector([FakeSocket([_subscription(), _ticker(7)])]),
+                stop=stop,
+                install_signals=False,
+            ))
+            deadline = time.monotonic() + 2
+            while not (root / "latest-market.json").is_file():
+                if time.monotonic() >= deadline:
+                    self.fail("initial supervisor did not publish")
+                await asyncio.sleep(0.01)
+            stop.set()
+            await asyncio.wait_for(task, timeout=2)
+
+            latest_path = root / "latest-market.json"
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            latest["raw_evidence_ref"]["artifact_id"] = (
+                "00000000-0000-0000-0000-000000000000"
+            )
+            latest_path.write_text(json.dumps(latest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "restart snapshot is not coherent"):
+                await supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([]),
+                    stop=asyncio.Event(),
+                    install_signals=False,
+                )
 
 
 class DiagnosticJournalTests(unittest.TestCase):

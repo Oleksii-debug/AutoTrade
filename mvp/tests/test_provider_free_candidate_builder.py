@@ -118,23 +118,58 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('--first-holdout', result.stdout)
+            for module, marker in (
+                ('tools.run_historical_zero', '--next-bar-open'),
+                ('tools.train_historical_agent', '--simulation-results'),
+            ):
+                result = subprocess.run(
+                    [sys.executable, '-m', module, '--help'],
+                    cwd=root / 'product', env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(marker, result.stdout)
             result = subprocess.run(
                 [sys.executable, '-m', 'tools.export_historical_diagnostics', '--help'],
                 cwd=root / 'product', env=env, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('--output', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.qualify_historical_e2e', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--workspace', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.run_historical_e2e_qualification', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--episode-limit', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.run_whitebit_live_zero_learning', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--supervisor-state-dir', result.stdout)
+            self.assertIn('--state-dir', result.stdout)
 
     def test_canonical_runtime_source_selector_only_adds_python_modules(self):
         self.assertTrue(candidate._source_path_selected('autotrade_runtime/artifacts/store.py'))
         self.assertTrue(candidate._source_path_selected('autotrade_runtime/resource_lock.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_historical_walkforward.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_historical_supervisor.py'))
+        self.assertTrue(candidate._source_path_selected('tools/historical_risk_context.py'))
+        self.assertTrue(candidate._source_path_selected('tools/historical_execution_scenarios.py'))
+        self.assertTrue(candidate._source_path_selected('tools/historical_learning_adapter.py'))
         self.assertTrue(candidate._source_path_selected('tools/historical_diagnostic_sampler.py'))
         self.assertTrue(candidate._source_path_selected('tools/export_historical_diagnostics.py'))
+        self.assertTrue(candidate._source_path_selected('tools/qualify_historical_e2e.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_historical_e2e_qualification.py'))
         self.assertTrue(candidate._source_path_selected('tools/probe_whitebit_public.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_whitebit_public_supervisor.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_whitebit_alpha_research.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_whitebit_live_zero_learning.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_mistral.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_model_provider.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_whitebit.py'))

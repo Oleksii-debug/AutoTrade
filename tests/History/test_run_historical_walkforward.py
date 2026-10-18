@@ -41,7 +41,7 @@ class WalkForwardTests(unittest.TestCase):
             self.assertEqual((march["training_through"], april["training_through"]),
                              ("2024-01", "2024-02"))
             self.assertNotEqual(march["model_sha256"], april["model_sha256"])
-            self.assertTrue(april["matured_training_labels"])
+            self.assertTrue(april["closed_training_outcomes"])
             self.assertEqual(set(april["accounts"]), {"200", "1000"})
             self.assertEqual({row["completed_episodes"] for row in april["accounts"].values()}, {2})
             self.assertTrue((root / "state" / "models" / "BTCUSDT-2024-01-2024-02.json").is_file())

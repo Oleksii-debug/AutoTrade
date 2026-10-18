@@ -27,6 +27,7 @@ from contracts.bindings.python.common_scalars import is_valid_common_scalar
 from .durable_host_api import JournalBackedHostCommandStore
 from .host_actions import SUPPORTED_HOST_ACTIONS
 from .host_api import EventGap, command_result_payload, operation_result_payload
+from .historical_host import HistoricalHostController
 from .persistence import JournalStore
 from .security import SecurityBoundary, _authenticated_origin
 
@@ -327,6 +328,7 @@ class AuthenticatedHostApplication:
         self._snapshot_provider = snapshot_provider
         self._now = now
         self._authority_operation_lock = Lock()
+        self._historical_operator: HistoricalHostController | None = None
         self.store = JournalBackedHostCommandStore(
             journal,
             account_id=account_id,
@@ -336,6 +338,15 @@ class AuthenticatedHostApplication:
             max_events=max_events,
             now=now,
         )
+
+    def attach_historical_operator(self, controller: HistoricalHostController) -> None:
+        """Attach the sole private-local historical lifecycle adapter."""
+
+        if type(controller) is not HistoricalHostController:
+            raise TypeError("controller must be exact HistoricalHostController")
+        if self._historical_operator is not None:
+            raise RuntimeError("historical operator is already attached")
+        self._historical_operator = controller
 
     def resume_authority_operations(self) -> tuple[str, ...]:
         """Resume all nonterminal durable authority commands in acceptance order.
@@ -651,6 +662,48 @@ class AuthenticatedHostApplication:
                 )
 
             principal, authenticated_role = self._principal(normalized_headers)
+
+            historical_reads = {
+                "/api/v1/historical/status": "status",
+                "/api/v1/historical/results": "results",
+                "/api/v1/historical/trades": "trades",
+            }
+            if method == "GET" and path in historical_reads:
+                if self._historical_operator is None:
+                    return _error(503, "HISTORICAL_OPERATOR_UNAVAILABLE")
+                value = getattr(self._historical_operator, historical_reads[path])()
+                return _json_response(200, value, headers=(("Cache-Control", "no-store"),))
+
+            historical_mutations = {
+                "/api/v1/historical/start": "start",
+                "/api/v1/historical/pause": "pause",
+                "/api/v1/historical/stop": "stop",
+                "/api/v1/historical/resume": "resume",
+            }
+            if method == "POST" and path in {*historical_mutations, "/api/v1/historical/export"}:
+                if authenticated_role != "OWNER":
+                    raise PermissionError("Historical operator mutation requires OWNER")
+                if self._historical_operator is None:
+                    return _error(503, "HISTORICAL_OPERATOR_UNAVAILABLE")
+                command = self._parse_body(body, normalized_headers)
+                if command:
+                    return _error(400, "HISTORICAL_COMMAND_BODY_MUST_BE_EMPTY")
+                if path == "/api/v1/historical/export":
+                    payload = self._historical_operator.export_zip()
+                    return TransportResponse(
+                        status=200,
+                        content_type="application/zip",
+                        body=payload,
+                        headers=(("Cache-Control", "no-store"),
+                                 ("Content-Disposition", 'attachment; filename="autotrade-historical-zero.zip"')),
+                    )
+                try:
+                    value = getattr(self._historical_operator, historical_mutations[path])()
+                except RuntimeError:
+                    return _error(409, "HISTORICAL_STATE_CONFLICT")
+                except OSError:
+                    return _error(503, "HISTORICAL_PROCESS_UNAVAILABLE")
+                return _json_response(200, value, headers=(("Cache-Control", "no-store"),))
 
             if method == "GET" and path == "/api/v1/state":
                 return _json_response(

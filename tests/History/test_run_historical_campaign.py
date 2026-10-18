@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 from tools.historical_public_klines import collect_month
-from tools.run_historical_campaign import campaign, main
+from tools.run_historical_campaign import (
+    MAX_SIMULATION_BUNDLE_BYTES,
+    _has_closed_position_cycle,
+    _read_simulation_bundle,
+    campaign,
+    main,
+)
 from tests.History.test_run_historical_zero import full_month_fixture
 
 
@@ -67,7 +73,7 @@ class HistoricalCampaignTests(unittest.TestCase):
             def interrupted(args):
                 nonlocal calls
                 calls += 1
-                if calls == 2:
+                if calls == 5:  # three training candidates, then two holdout accounts
                     return 2
                 return original(args)
 
@@ -85,6 +91,35 @@ class HistoricalCampaignTests(unittest.TestCase):
                     "--validate-from", "2024-02", "--validate-through", "2024-02",
                     "--holdout-from", "2024-03", "--holdout-through", "2024-03"]), 2)
             self.assertFalse((root / "bad").exists())
+
+    def test_frozen_simulation_bundle_has_its_own_bounded_reader(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "candidate-simulations.json"
+            payload = {
+                "candidate_simulations": [{"receipt": "x" * 25000}],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertGreater(path.stat().st_size, 20000)
+            self.assertEqual(_read_simulation_bundle(path), payload)
+            with path.open("ab") as stream:
+                stream.truncate(MAX_SIMULATION_BUNDLE_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "unbounded"):
+                _read_simulation_bundle(path)
+
+    def test_closed_cycle_requires_position_to_return_flat(self):
+        self.assertFalse(_has_closed_position_cycle({
+            "decisions": [{"position": "0"}, {"position": "0.25"}],
+        }))
+        self.assertTrue(_has_closed_position_cycle({
+            "decisions": [
+                {"position": "0"},
+                {"position": "0.25"},
+                {"position": "0.10"},
+                {"position": "0"},
+            ],
+        }))
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            _has_closed_position_cycle({"decisions": [{"position": 0.0}]})
 
 
 if __name__ == "__main__":

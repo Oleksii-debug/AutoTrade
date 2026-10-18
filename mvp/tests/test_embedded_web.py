@@ -122,6 +122,7 @@ class EmbeddedWebTests(unittest.TestCase):
             "portfolio": {},
             "risk": {},
             "strategy": {},
+            "whitebit_learning": {"status": "MISSING"},
             "jobs": [],
             "reason_codes": [],
         }

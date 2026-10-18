@@ -74,7 +74,8 @@ class HistoricalHostContractTests(unittest.TestCase):
                 "account_id": durable["account_id"], "environment": durable["environment"],
                 "permission_summary": {"actor": principal.actor, "session": principal.session, "role": principal.role},
                 "connection_freshness": {"host": "CURRENT"}, "portfolio": {}, "risk": {},
-                "strategy": {}, "jobs": [], "reason_codes": [],
+                "strategy": {}, "whitebit_learning": {"status": "MISSING"},
+                "jobs": [], "reason_codes": [],
             },
         )
         self.controller = HistoricalHostController(

@@ -57,6 +57,7 @@ _SNAPSHOT_FIELDS = {
     "portfolio",
     "risk",
     "strategy",
+    "whitebit_learning",
     "jobs",
     "reason_codes",
 }
@@ -513,6 +514,7 @@ class AuthenticatedHostApplication:
             "portfolio",
             "risk",
             "strategy",
+            "whitebit_learning",
         ):
             if not isinstance(payload[field], Mapping):
                 raise ValueError(f"UiSnapshot {field} must be an object")

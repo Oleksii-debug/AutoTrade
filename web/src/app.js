@@ -85,6 +85,8 @@
     "operations-copy",
     "risk-region",
     "jobs-region",
+    "learning-region",
+    "models-region",
     "historical-trades-region",
     "historical-start",
     "historical-pause",
@@ -479,7 +481,7 @@
     const allowed = new Set([
       "state_version", "event_cursor", "server_time", "host_id", "account_id",
       "environment", "permission_summary", "connection_freshness", "portfolio",
-      "risk", "strategy", "jobs", "reason_codes"
+      "risk", "strategy", "whitebit_learning", "jobs", "reason_codes"
     ]);
     for (const key of Object.keys(snapshot)) {
       if (!allowed.has(key)) throw new Error("UiSnapshot contains non-canonical field " + key);
@@ -512,6 +514,8 @@
       portfolio: requiredObject(snapshot.portfolio, "portfolio"),
       risk: requiredObject(snapshot.risk, "risk"),
       strategy: requiredObject(snapshot.strategy, "strategy"),
+      whitebitLearning: requiredObject(
+        snapshot.whitebit_learning, "whitebit_learning"),
       jobs: snapshot.jobs,
       reasonCodes: requiredStringArray(snapshot.reason_codes, "reason_codes"),
       sessionIdentity: readSessionIdentity(permissionSummary)
@@ -1144,6 +1148,26 @@ function appendProjectionRow(body, label, value) {
       }
       reapplyTableFilter("jobs-body");
     });
+  }
+
+  function renderWhitebitLearning(learning, {preserveSelection = true} = {}) {
+    const overview = {};
+    const modelsAndEvidence = {};
+    const modelKeys = new Set([
+      "model_version_count", "incumbent_model", "candidate_model",
+      "analysis", "evaluation"
+    ]);
+    for (const [key, value] of Object.entries(learning)) {
+      (modelKeys.has(key) ? modelsAndEvidence : overview)[key] = value;
+    }
+    renderProjection(
+      "learning-body", overview,
+      "WhiteBIT ZERO learning status is unavailable.",
+      {preserveSelection});
+    renderProjection(
+      "models-body", modelsAndEvidence,
+      "WhiteBIT ZERO model and evaluation evidence is unavailable.",
+      {preserveSelection});
   }
   function normalizedTableQuery(value) {
     return String(value ?? "").trim().toLowerCase();
@@ -1823,6 +1847,9 @@ function renderOperation(operation) {
       "strategy-body",
       parsed.strategy,
       "No strategy or decision projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
+    renderWhitebitLearning(
+      parsed.whitebitLearning,
       {preserveSelection: !displayContextChanged});
     renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged});
     state.renderedHostId = parsed.hostId;

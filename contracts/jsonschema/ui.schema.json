@@ -18,6 +18,7 @@
         "portfolio",
         "risk",
         "strategy",
+        "whitebit_learning",
         "jobs",
         "reason_codes"
       ],
@@ -55,6 +56,9 @@
           "type": "object"
         },
         "strategy": {
+          "type": "object"
+        },
+        "whitebit_learning": {
           "type": "object"
         },
         "jobs": {

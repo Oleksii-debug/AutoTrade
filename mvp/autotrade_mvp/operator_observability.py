@@ -142,7 +142,10 @@ def build_operator_observability(
     snapshot = _plain_map(ui_snapshot, name="UiSnapshot")
     if frozenset(snapshot) != _SNAPSHOT_FIELDS:
         raise ValueError("UiSnapshot fields do not match canonical Host contract")
-    for name in ("portfolio", "risk", "strategy", "connection_freshness"):
+    for name in (
+        "portfolio", "risk", "strategy", "connection_freshness",
+        "whitebit_learning",
+    ):
         snapshot[name] = _plain_map(snapshot[name], name=name)
     if type(snapshot["jobs"]) is not list or len(snapshot["jobs"]) > _MAX_ITEMS:
         raise ValueError("Host jobs must be a bounded exact array")

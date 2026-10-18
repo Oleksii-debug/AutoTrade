@@ -106,7 +106,10 @@ def evaluate_campaign(*, campaign: object, campaign_sha256: str,
         raise ValueError("organism manifest digest or canonical content differs")
     if type(observed_at) is not datetime or observed_at.tzinfo is None:
         raise TypeError("observed_at must be timezone-aware")
-    complete_horizon = "qualification_cut" not in campaign
+    complete_horizon = "qualification_cut" not in campaign and all(
+        type(account) is dict and account.get("status") == "COMPLETED"
+        for account in campaign["accounts"].values()
+    )
     campaign_window_seconds = _campaign_window_seconds(campaign) if complete_horizon else None
     accounts = {}
     for account_id, account in sorted(campaign["accounts"].items()):

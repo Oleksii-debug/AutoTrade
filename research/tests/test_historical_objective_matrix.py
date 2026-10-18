@@ -18,6 +18,7 @@ def report(*, bounded: bool = True, drawdown: str = "0.02") -> dict:
         "periods": {"holdout": ["2024-03", "2024-03"]},
         "accounts": {
             "1000": {
+                "status": "COMPLETED",
                 "cash_baseline_equity_usd": "1000",
                 "agent_mark_pnl_usd": "249",
                 "agent_max_mark_drawdown_fraction": drawdown,
@@ -96,6 +97,17 @@ class HistoricalObjectiveMatrixTests(unittest.TestCase):
                     if receipt["target_return_fraction"] is not None:
                         self.assertEqual(receipt["status"], "INCONCLUSIVE")
                         self.assertFalse(receipt["horizon_complete"])
+
+    def test_paused_account_without_qualification_marker_is_not_complete(self):
+        campaign = report(bounded=False)
+        campaign["accounts"]["1000"]["status"] = "PAUSED"
+        matrix = evaluate_campaign(
+            campaign=campaign, campaign_sha256="sha256:" + "6" * 64,
+            manifest=self.manifest(), observed_at=NOW,
+        )
+        self.assertFalse(matrix["horizon_complete"])
+        self.assertEqual(matrix["accounts"]["1000"]["objective_receipts"][0]["status"],
+                         "INCONCLUSIVE")
 
     def test_risk_breach_dominates_target_and_manifest_tamper_fails(self):
         manifest = self.manifest()

@@ -109,7 +109,22 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         )
         self.assertIn("core.FrameNavigationStarting += (_, e) => e.Cancel = true;", code)
         self.assertIn("core.NewWindowRequested += (_, e) => e.Handled = true;", code)
-        self.assertIn("core.DownloadStarting += (_, e) => e.Cancel = true;", code)
+        download = code.split("core.DownloadStarting += (_, e) =>", 1)[1].split(
+            "core.PermissionRequested +=", 1
+        )[0]
+        self.assertIn("e.Cancel = true;", download)
+        self.assertIn("e.Handled = true;", download)
+        self.assertIn("policy.AllowsDiagnosticDownload(", download)
+        self.assertIn("SaveFileDialog", download)
+        self.assertIn("e.Cancel = false;", download)
+        self.assertLess(
+            download.index("e.Cancel = true;"),
+            download.index("policy.AllowsDiagnosticDownload("),
+        )
+        self.assertLess(
+            download.index("policy.AllowsDiagnosticDownload("),
+            download.index("e.Cancel = false;"),
+        )
         self.assertIn("CoreWebView2PermissionState.Deny", code)
         self.assertIn("CoreWebView2ServerCertificateErrorAction.Cancel", code)
         self.assertIn("policy.AllowsTopLevelNavigation(target)", code)

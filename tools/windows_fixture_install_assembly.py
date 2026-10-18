@@ -273,7 +273,9 @@ def fixture_install_bundle(
     versions = root / "versions"
     with durable_path_lock(root / "fixture-install-operation"):
         if _path_is_reparse(versions):
-            raise FixtureAssemblyError("version directory cannot be a reparse point")
+            raise FixtureAssemblyError(
+                "version directory cannot be a symlink or reparse point"
+            )
         versions.mkdir(parents=True, exist_ok=True)
         _assert_no_reparse_path(versions, label="version directory")
         old = _selection(root)

@@ -255,6 +255,15 @@ class ContractVersionGuardTests(unittest.TestCase):
             write_semantic_validator(Path(right), expected="invalid")
             self.assertEqual(evaluate(Path(left), Path(right)), [])
 
+    def test_semantic_validator_version_binding_allows_minor_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            write_tree(Path(left), version="6.0.0")
+            write_semantic_validator(Path(left), expected="valid")
+            write_tree(Path(right), version="6.1.0")
+            write_semantic_validator(Path(right), expected="valid")
+
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
+
     def test_adding_semantic_validator_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:
             write_tree(Path(left), version="6.0.0")

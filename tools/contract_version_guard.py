@@ -597,7 +597,15 @@ def semantic_validator_surface(root: Path, manifest: dict) -> dict[str, object]:
 
         result[validator_id] = {
             "declaration": entry,
-            "corpus": corpus_payload,
+            # The corpus version is an identity binding to the containing
+            # contract release, not a change to validator semantics.  Keeping
+            # it in the comparison would make every legitimate minor/patch
+            # version bump look breaking even when the cases are unchanged.
+            "corpus": {
+                key: value
+                for key, value in corpus_payload.items()
+                if key != "contract_version"
+            },
         }
     return result
 

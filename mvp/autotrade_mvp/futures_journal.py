@@ -43,7 +43,7 @@ from .futures import (
     inverse_settlement_convention,
     settlement_identity_digest,
 )
-from .instruments import _detached_instrument_version
+from .instruments import InstrumentVersion, _detached_instrument_version
 from .persistence import JournalStore, canonical_json, payload_digest
 
 
@@ -413,10 +413,40 @@ def _detached_durable_contract(contract: FuturesContract) -> FuturesContract:
 
     if type(contract) is not FuturesContract:
         raise FuturesError("durable settlement requires exact FuturesContract")
+    for field_name in (
+        "instrument",
+        "payoff",
+        "quote_currency",
+        "settlement_currency",
+        "settlement_method",
+    ):
+        try:
+            value = object.__getattribute__(contract, field_name)
+        except AttributeError as error:
+            raise FuturesError(
+                "durable settlement contract conflicts with canonical InstrumentVersion"
+            ) from error
+        if type(value) is not str:
+            raise FuturesError(
+                "durable settlement contract conflicts with canonical InstrumentVersion"
+            )
     if type(contract.multiplier) is not Decimal:
         raise FuturesError("durable futures multiplier must be exact Decimal")
-    version = contract.canonical_instrument
-    if version is None:
+    if (
+        contract.price_base_currency is not None
+        and type(contract.price_base_currency) is not str
+    ):
+        raise FuturesError(
+            "durable settlement contract conflicts with canonical InstrumentVersion"
+        )
+    for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
+        value = object.__getattribute__(contract, field_name)
+        if type(value) is not datetime or value.tzinfo is not timezone.utc:
+            raise FuturesError(
+                "durable settlement contract conflicts with canonical InstrumentVersion"
+            )
+    version = object.__getattribute__(contract, "canonical_instrument")
+    if type(version) is not InstrumentVersion:
         raise FuturesError("durable settlement requires canonical InstrumentVersion")
     if contract.payoff == "INVERSE":
         inverse_settlement_convention(contract)

@@ -18,6 +18,8 @@ import httpx
 from .vendor.whitebit_hmac_transport import HmacTransport
 
 MAIN_BALANCE_PATH = "/api/v4/main-account/balance"
+TRADING_BALANCE_PATH = "/api/v4/trade-account/balance"
+READ_BALANCE_PATHS = frozenset({MAIN_BALANCE_PATH, TRADING_BALANCE_PATH})
 MAX_RESPONSE_BYTES = 1024 * 1024
 
 
@@ -26,7 +28,7 @@ class PrivateReadError(RuntimeError):
 
 
 class ReadOnlyGate(httpx.BaseTransport):
-    """Reject all but the one source-verified read route, before signing and I/O."""
+    """Admit only the two documented balance reads, before signing and I/O."""
 
     def __init__(self, inner: httpx.BaseTransport):
         self._inner = inner
@@ -36,7 +38,7 @@ class ReadOnlyGate(httpx.BaseTransport):
         if (request.method != "POST" or u.scheme != "https" or
                 u.host != "whitebit.com" or u.port not in (None, 443) or
                 u.username or u.password or u.query or u.fragment or
-                u.raw_path != MAIN_BALANCE_PATH.encode("ascii")):
+                u.raw_path not in {p.encode("ascii") for p in READ_BALANCE_PATHS}):
             raise PrivateReadError("WHITEBIT_READ_ROUTE_DENIED")
         raw = request.read()
         if len(raw) > 1024:
@@ -46,7 +48,7 @@ class ReadOnlyGate(httpx.BaseTransport):
         except (ValueError, UnicodeDecodeError):
             raise PrivateReadError("WHITEBIT_READ_REQUEST_INVALID") from None
         if (type(body) is not dict or set(body) != {"request", "nonce", "nonceWindow"} or
-                body["request"] != MAIN_BALANCE_PATH or type(body["nonce"]) is not int or
+                body["request"] != u.path or type(body["nonce"]) is not int or
                 not 0 < body["nonce"] < 2**63 or body["nonceWindow"] is not True):
             raise PrivateReadError("WHITEBIT_READ_REQUEST_INVALID")
         return self._inner.handle_request(request)
@@ -94,13 +96,23 @@ class WhitebitPrivateReader:
         )
 
     def main_balance(self) -> PrivateReadObservation:
+        """Read the wallet/main account; this is not the spot trading balance."""
+        return self._read_balance(MAIN_BALANCE_PATH)
+
+    def trading_balance(self) -> PrivateReadObservation:
+        """Read spot funds available and frozen in open orders, without trading."""
+        return self._read_balance(TRADING_BALANCE_PATH)
+
+    def _read_balance(self, path: str) -> PrivateReadObservation:
+        if path not in READ_BALANCE_PATHS:
+            raise PrivateReadError("WHITEBIT_READ_ROUTE_DENIED")
         with self._lock:
             if self._closed:
                 raise PrivateReadError("WHITEBIT_READER_CLOSED")
             self._nonce = max(self._nonce + 1, time.time_ns() // 1_000_000)
-            payload = {"request": MAIN_BALANCE_PATH, "nonce": self._nonce, "nonceWindow": True}
+            payload = {"request": path, "nonce": self._nonce, "nonceWindow": True}
             try:
-                with self._client.stream("POST", "https://whitebit.com" + MAIN_BALANCE_PATH,
+                with self._client.stream("POST", "https://whitebit.com" + path,
                                          json=payload) as response:
                     if response.status_code != 200:
                         raise PrivateReadError(f"WHITEBIT_READ_HTTP_{response.status_code}")
@@ -117,7 +129,7 @@ class WhitebitPrivateReader:
             if not raw:
                 raise PrivateReadError("WHITEBIT_READ_EMPTY_RESPONSE")
             body = bytes(raw)
-            return PrivateReadObservation(datetime.now(timezone.utc), sha256(body).hexdigest(), body)
+            return PrivateReadObservation(datetime.now(timezone.utc), sha256(body).hexdigest(), body, path=path)
 
     def close(self):
         with self._lock:

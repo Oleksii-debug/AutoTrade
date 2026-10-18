@@ -12,7 +12,7 @@ except ImportError:
     raise unittest.SkipTest("optional WhiteBIT httpx dependency is not installed")
 
 from autotrade_research.integrations.whitebit_private_readonly import (
-    MAIN_BALANCE_PATH, MAX_RESPONSE_BYTES, PrivateReadError,
+    MAIN_BALANCE_PATH, TRADING_BALANCE_PATH, MAX_RESPONSE_BYTES, PrivateReadError,
     ReadOnlyGate, WhitebitPrivateReader,
 )
 
@@ -49,6 +49,22 @@ class WhitebitSdkReadTests(unittest.TestCase):
             with WhitebitPrivateReader('fixture-key-only', 'fixture-signing-only', transport=httpx.MockTransport(handle)) as reader:
                 reader.main_balance(); reader.main_balance()
         self.assertEqual(seen, [1000000000, 1000000001])
+
+    def test_trading_balance_uses_distinct_exact_read_route_and_shared_nonce(self):
+        seen = []
+        def handle(r):
+            payload = json.loads(r.content)
+            seen.append((r.url.path, payload['request'], payload['nonce']))
+            return httpx.Response(200, json={"USDT": {"available": "0", "freeze": "0"}})
+        with WhitebitPrivateReader('fixture-key-only', 'fixture-signing-only', transport=httpx.MockTransport(handle)) as reader:
+            wallet = reader.main_balance()
+            spot = reader.trading_balance()
+        self.assertEqual(wallet.path, MAIN_BALANCE_PATH)
+        self.assertEqual(spot.path, TRADING_BALANCE_PATH)
+        self.assertEqual([x[:2] for x in seen], [(MAIN_BALANCE_PATH, MAIN_BALANCE_PATH), (TRADING_BALANCE_PATH, TRADING_BALANCE_PATH)])
+        self.assertLess(seen[0][2], seen[1][2])
+        self.assertFalse(spot.verified_account_binding)
+        self.assertEqual(spot.trading_authority, 'NONE')
 
     def test_live_order_withdrawal_and_other_hosts_never_reach_inner(self):
         calls = []
@@ -115,6 +131,17 @@ class WhitebitSdkReadTests(unittest.TestCase):
         for method,body in [('GET',{}),('POST',[]),('POST',{'request':MAIN_BALANCE_PATH,'nonce':True,'nonceWindow':True}),('POST',{'request':MAIN_BALANCE_PATH,'nonce':1,'nonceWindow':True,'ticker':'X'})]:
             with self.subTest(method=method,body=body),self.assertRaises(PrivateReadError):
                 gate.handle_request(httpx.Request(method,'https://whitebit.com'+MAIN_BALANCE_PATH,json=body))
+
+    def test_read_routes_cannot_be_cross_signed_or_extended(self):
+        gate = ReadOnlyGate(httpx.MockTransport(lambda r: self.fail('I/O reached')))
+        for path, body in [
+            (TRADING_BALANCE_PATH, {'request': MAIN_BALANCE_PATH, 'nonce': 1, 'nonceWindow': True}),
+            (MAIN_BALANCE_PATH, {'request': TRADING_BALANCE_PATH, 'nonce': 1, 'nonceWindow': True}),
+            (TRADING_BALANCE_PATH, {'request': TRADING_BALANCE_PATH, 'nonce': 1, 'nonceWindow': True, 'ticker': 'BTC'}),
+            ('/api/v4/trade-account/balance/extra', {'request': TRADING_BALANCE_PATH, 'nonce': 1, 'nonceWindow': True}),
+        ]:
+            with self.subTest(path=path, body=body), self.assertRaises(PrivateReadError):
+                gate.handle_request(httpx.Request('POST', 'https://whitebit.com'+path, json=body))
 
 
 if __name__ == '__main__': unittest.main()

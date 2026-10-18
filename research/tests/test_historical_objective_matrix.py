@@ -15,6 +15,7 @@ def report(*, bounded: bool = True, drawdown: str = "0.02") -> dict:
         "status": "INTERNAL_TWO_ACCOUNT_HISTORICAL_CUT_NOT_PRODUCT_QUALIFICATION",
         "symbol": "BTCUSDT",
         "interval": "1h",
+        "periods": {"holdout": ["2024-03", "2024-03"]},
         "accounts": {
             "1000": {
                 "cash_baseline_equity_usd": "1000",
@@ -72,11 +73,29 @@ class HistoricalObjectiveMatrixTests(unittest.TestCase):
             for item in matrix["accounts"]["1000"]["objective_receipts"]
         }
         self.assertEqual(receipts["BASELINE"]["status"], "MEASURED_NO_TARGET")
-        self.assertEqual(receipts["TARGET_25"]["status"], "TARGET_MISSED")
+        self.assertEqual(receipts["TARGET_25"]["status"], "INCONCLUSIVE")
+        self.assertFalse(receipts["TARGET_25"]["horizon_matches_target"])
+        self.assertEqual(matrix["campaign_window_seconds"], 31 * 86400)
         self.assertEqual(
             receipts["TARGET_25"]["net_return_after_costs_fraction"], "0.249"
         )
-        self.assertEqual(receipts["TARGET_100"]["status"], "TARGET_MISSED")
+        self.assertEqual(receipts["TARGET_100"]["status"], "INCONCLUSIVE")
+
+    def test_monthly_gain_cannot_satisfy_daily_target_even_above_threshold(self):
+        campaign = report(bounded=False)
+        campaign["accounts"]["1000"]["agent_mark_pnl_usd"] = "1000"
+        for periods in ({"holdout": ["2024-02", "2024-02"]}, None,
+                        {"holdout": ["2024-03", "2024-01"]}):
+            with self.subTest(periods=periods):
+                campaign["periods"] = periods
+                matrix = evaluate_campaign(
+                    campaign=campaign, campaign_sha256="sha256:" + "5" * 64,
+                    manifest=self.manifest(), observed_at=NOW,
+                )
+                for receipt in matrix["accounts"]["1000"]["objective_receipts"]:
+                    if receipt["target_return_fraction"] is not None:
+                        self.assertEqual(receipt["status"], "INCONCLUSIVE")
+                        self.assertFalse(receipt["horizon_complete"])
 
     def test_risk_breach_dominates_target_and_manifest_tamper_fails(self):
         manifest = self.manifest()

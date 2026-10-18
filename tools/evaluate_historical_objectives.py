@@ -27,6 +27,23 @@ from research.autotrade_research.io.strict_json import strict_json_loads
 MATRIX_SCHEMA = "autotrade-historical-objective-matrix-v1"
 
 
+def _campaign_window_seconds(campaign: dict) -> int | None:
+    """Canonical campaign aggregates cover inclusive calendar months, not days."""
+    periods = campaign.get("periods")
+    holdout = periods.get("holdout") if type(periods) is dict else None
+    if type(holdout) is not list or len(holdout) != 2:
+        return None
+    try:
+        start, last = [datetime.strptime(value, "%Y-%m").replace(tzinfo=timezone.utc)
+                       for value in holdout]
+        if any(value != date.strftime("%Y-%m") for value, date in zip(holdout, (start, last))):
+            return None
+        end = last.replace(year=last.year + 1, month=1) if last.month == 12 else last.replace(month=last.month + 1)
+    except (TypeError, ValueError):
+        return None
+    return int((end - start).total_seconds()) if last >= start else None
+
+
 def _canonical(value: object) -> bytes:
     return (json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
@@ -90,6 +107,7 @@ def evaluate_campaign(*, campaign: object, campaign_sha256: str,
     if type(observed_at) is not datetime or observed_at.tzinfo is None:
         raise TypeError("observed_at must be timezone-aware")
     complete_horizon = "qualification_cut" not in campaign
+    campaign_window_seconds = _campaign_window_seconds(campaign) if complete_horizon else None
     accounts = {}
     for account_id, account in sorted(campaign["accounts"].items()):
         if type(account_id) is not str or type(account) is not dict:
@@ -111,10 +129,20 @@ def evaluate_campaign(*, campaign: object, campaign_sha256: str,
                 initial_equity=initial,
                 final_equity_after_costs=initial + pnl,
                 max_drawdown_fraction=drawdown,
-                horizon_complete=complete_horizon,
+                horizon_complete=(complete_horizon and (
+                    spec.profile.target_horizon_seconds is None
+                    or campaign_window_seconds == spec.profile.target_horizon_seconds
+                )),
             )
             for spec in specs
         ]
+        for spec, receipt in zip(specs, receipts):
+            receipt["target_horizon_seconds"] = spec.profile.target_horizon_seconds
+            receipt["measured_window_seconds"] = campaign_window_seconds
+            receipt["horizon_matches_target"] = (
+                spec.profile.target_horizon_seconds is None
+                or campaign_window_seconds == spec.profile.target_horizon_seconds
+            )
         accounts[account_id] = {
             "initial_equity_usd": format(initial, "f"),
             "final_equity_after_costs_usd": format(initial + pnl, "f"),
@@ -132,6 +160,7 @@ def evaluate_campaign(*, campaign: object, campaign_sha256: str,
         "symbol": campaign["symbol"],
         "interval": campaign["interval"],
         "horizon_complete": complete_horizon,
+        "campaign_window_seconds": campaign_window_seconds,
         "accounts": accounts,
         "automatic_champion_promotion": False,
         "network_orders": False,

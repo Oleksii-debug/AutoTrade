@@ -53,7 +53,10 @@ injected staging disk-full failure. No secret or financial data is requested.
 The suite exercises clean install, side-by-side update, explicit rollback,
 uninstall/reinstall preserving state, disk full, changed payload, corrupt
 bundle, missing version, malicious selection, symlinks/hardlinks, concurrent
-installation and untracked installed files. CI runs it without user/provider
+installation, Windows junction/reparse traversal and untracked installed files.
+Every existing path component and installed-tree entry is rejected when Windows
+marks it as a reparse point, so extraction and uninstall cannot redirect into a
+different directory through a junction. CI runs it without user/provider
 credentials on Ubuntu and Windows-2025 against the **same exact Git SHA**.
 Static code alone cannot be counted as successful CI execution.
 

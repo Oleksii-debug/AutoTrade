@@ -30,6 +30,26 @@ _PATH_TYPE = type(Path("."))
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
                    'autotrade_numeric/', 'autotrade_foundation/',
                    'autotrade_runtime/')
+HISTORICAL_SOURCE = frozenset({
+    'tools/historical_public_klines.py',
+    'tools/historical_causal_replay.py',
+    'tools/historical_holdout_report.py',
+    'tools/update_historical_data.py',
+    'tools/run_historical_zero.py',
+    'tools/train_historical_agent.py',
+    'tools/validate_historical_agent.py',
+    'tools/run_historical_campaign.py',
+    'tools/run_historical_walkforward.py',
+    'tools/run_historical_supervisor.py',
+    'tools/historical_diagnostic_sampler.py',
+    'tools/export_historical_diagnostics.py',
+    'tools/probe_whitebit_public.py',
+    'tools/run_whitebit_public_supervisor.py',
+    'tools/run_whitebit_alpha_research.py',
+    'tools/configure_mistral.py',
+    'tools/configure_model_provider.py',
+    'tools/configure_whitebit.py',
+})
 REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',
@@ -47,6 +67,7 @@ def _source_path_selected(path):
         raise TypeError('source path selector requires exact non-empty str')
     return (
         (path.startswith(SOURCE_PREFIXES) and path.endswith('.py'))
+        or path in HISTORICAL_SOURCE
         or (
             path.startswith('contracts/jsonschema/')
             and path.endswith('.json')
@@ -271,6 +292,8 @@ def stage_source(source_root, source_sha, destination, composition_path):
     selected = sorted(p for p in paths if _source_path_selected(p))
     if not set(STATIC).issubset(selected) or 'mvp/autotrade_mvp/product_runtime.py' not in selected:
         raise ValueError('committed product composition is incomplete')
+    if HISTORICAL_SOURCE.intersection(selected) and not HISTORICAL_SOURCE.issubset(selected):
+        raise ValueError('historical simulation source composition is incomplete')
     destination.mkdir(parents=True, exist_ok=False)
     atomic_write_json(composition_path, {'source_sha': source_sha, 'components': []})
     descriptors = tuple(_SourceControlledComponent('zero-' + sha256(p.encode()).hexdigest()[:32], 'runtime-source', p) for p in selected)

@@ -54,6 +54,24 @@ class HostApiRouteCodegenTests(unittest.TestCase):
                     "getHealth",
                     (),
                 ),
+                Operation(
+                    "get",
+                    "/api/v1/local-diagnostics",
+                    "downloadLocalDiagnostics",
+                    (),
+                ),
+                Operation(
+                    "get",
+                    "/api/v1/technical-diagnostics",
+                    "downloadTechnicalDiagnostics",
+                    (),
+                ),
+                Operation(
+                    "get",
+                    "/api/v1/agent-report",
+                    "downloadAgentReport",
+                    (),
+                ),
             ),
         )
 
@@ -90,6 +108,8 @@ class HostApiRouteCodegenTests(unittest.TestCase):
             "submitCommand",
             "getOperation",
             "streamEvents",
+            "downloadTechnicalDiagnostics",
+            "downloadAgentReport",
         ):
             self.assertIn(
                 f'HOST_API.route("{operation_id}"',

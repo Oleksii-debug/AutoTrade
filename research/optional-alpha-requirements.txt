@@ -1,0 +1,11 @@
+# Optional isolated CPU research only; does not alter canonical release lock.
+# These are tested environment versions, not a complete security-audited lockfile.
+numpy==2.3.5
+scipy==1.17.0
+scikit-learn==1.8.0
+threadpoolctl==3.6.0
+torch==2.10.0
+xgboost==3.1.3
+catboost==1.2.8
+statsmodels==0.14.6
+shap==0.50.0

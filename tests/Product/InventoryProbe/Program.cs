@@ -1,4 +1,5 @@
 using AutoTrade.Desktop;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -17,6 +18,33 @@ try
     bool exercised = args.Length == 2;
     if (exercised)
     {
+        // The historical research entry point must import from the actual
+        // extracted isolated Python, not merely from the source checkout.
+        string python = Path.Combine(payload, "runtime", "python", "python.exe");
+        string product = Path.Combine(payload, "product");
+        ProcessStartInfo history = new(python)
+        {
+            WorkingDirectory = product,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string argument in new[] {"-B", "-m", "tools.run_historical_walkforward", "--help"})
+            history.ArgumentList.Add(argument);
+        using Process historyProcess = Process.Start(history)
+            ?? throw new InvalidOperationException("Installed historical runner did not start.");
+        if (!historyProcess.WaitForExit(30_000))
+        {
+            historyProcess.Kill(entireProcessTree: true);
+            throw new InvalidOperationException("Installed historical runner import timed out.");
+        }
+        string help = historyProcess.StandardOutput.ReadToEnd();
+        string error = historyProcess.StandardError.ReadToEnd();
+        if (historyProcess.ExitCode != 0 ||
+            !help.Contains("--first-holdout", StringComparison.Ordinal))
+            throw new InvalidOperationException("Installed historical runner import failed: " + error);
+
         string asset = Path.Combine(payload, "product", "web", "src", "app.js");
         string retained = Path.Combine(Path.GetDirectoryName(payload)!, "inventory-probe-retained.js");
         string extra = Path.Combine(payload, "inventory-probe-undeclared.txt");

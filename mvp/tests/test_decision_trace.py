@@ -182,8 +182,8 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertIn("password=[REDACTED]", attrs["dsn"])
             self.assertEqual(attrs["key_material"], "[REDACTED]")
             self.assertEqual(attrs["encrypted_key_material"], "[REDACTED]")
-            self.assertIn("token=[REDACTED]", attrs["token_text"])
-            self.assertIn("session:[REDACTED]", attrs["session_text"])
+            self.assertEqual(attrs["token_text"], "[REDACTED]")
+            self.assertEqual(attrs["session_text"], "[REDACTED]")
             self.assertNotIn("json-auth-secret", attrs["json_message"])
             self.assertNotIn("json-key-secret", attrs["json_message"])
             self.assertGreaterEqual(attrs["json_message"].count("[REDACTED]"), 2)
@@ -362,9 +362,12 @@ class DecisionTraceStoreTests(unittest.TestCase):
 
     def test_exact_reconstruction_rejects_polymorphic_digest_keys_before_hash(self):
         touched = []
+        armed = False
 
         class HostileKey(str):
             def __hash__(self):
+                if not armed:
+                    return str.__hash__(self)
                 touched.append("hash")
                 raise AssertionError("hostile digest-key hash executed")
 
@@ -377,8 +380,9 @@ class DecisionTraceStoreTests(unittest.TestCase):
             store.append(exact_trace("trace-hostile-digest"))
             hostile = HostileKey("evidence-1")
             available = {hostile: "a" * 64}
+            armed = True
             touched.clear()
-            with self.assertRaisesRegex(ValueError, "keys must be exact strings"):
+            with self.assertRaisesRegex(ValueError, "must be exact strings"):
                 store.reconstruct_exact(
                     "trace-hostile-digest",
                     expected_source_sha="1" * 40,

@@ -39,6 +39,10 @@ on:
       - "tests/Science/test_strategy_economics*.py"
   # No real provider credentials, PAPER/LIVE, or order transmission.
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

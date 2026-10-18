@@ -26,6 +26,9 @@ from research.autotrade_research.artifacts.durable_publish import (
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(
+    stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+)
 _WINDOWS_RESERVED_BASENAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),
@@ -35,6 +38,20 @@ _WINDOWS_RESERVED_BASENAMES = {
 
 class InstallerManifestError(ValueError):
     pass
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    """Return true for Windows reparse points, including directory junctions.
+
+    ``stat.S_ISLNK`` alone is insufficient on Windows: mount points and
+    junctions can redirect an installer outside its admitted root without
+    being reported as symbolic links by ``Path.is_symlink``.
+    """
+
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 def _text(value: object, *, name: str) -> str:
@@ -291,6 +308,8 @@ def _assert_open_file_identity(
         raise InstallerManifestError(
             f"{name} identity cannot be verified"
         ) from error
+    if _is_reparse(opened) or _is_reparse(current):
+        raise InstallerManifestError(f"{name} must not be a reparse point")
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
         raise InstallerManifestError(f"{name} must be a regular non-symlink file")
     if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):

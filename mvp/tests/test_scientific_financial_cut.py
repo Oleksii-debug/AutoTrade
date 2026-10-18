@@ -211,7 +211,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 result=_reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             exact = _capture(
                 store,
@@ -261,7 +261,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                     result=_reconciliation(),
                     observed_at="2026-09-24T19:00:00Z",
                     host_id="test-host",
-                    owner_epoch="epoch-1",
+                    owner_epoch="1",
                 )
                 mutation_happened = True
                 return None
@@ -289,7 +289,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 result=_reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             payload = {"fact": "later non-reconciliation financial journal fact"}
             store.append_event(
@@ -327,7 +327,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 result=_reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             original = cut_module.require_current_reconciliation_checkpoint
 
@@ -359,7 +359,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 result=_reconciliation(),
                 observed_at="2026-09-24T19:00:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             first = _capture(
                 store,
@@ -400,7 +400,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                 result=_reconciliation(provider_cash="901"),
                 observed_at="2026-09-24T19:01:00Z",
                 host_id="test-host",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
 
             with self.assertRaisesRegex(FinancialCutConflict, "not authoritative"):
@@ -455,7 +455,7 @@ class ScientificFinancialCutTests(unittest.TestCase):
                     result=_reconciliation(),
                     observed_at="2026-09-24T19:00:00Z",
                     host_id="test-host",
-                    owner_epoch="epoch-1",
+                    owner_epoch="1",
                 )
                 raise ValueError("corrupt reconciliation chronology")
 

@@ -18,6 +18,10 @@ on:
       - "mvp/autotrade_mvp/science_qualification.py"
       - ".github/workflows/plan7-ablation-component.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

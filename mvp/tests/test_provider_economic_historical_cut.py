@@ -310,17 +310,16 @@ class ProviderEconomicHistoricalCutTests(unittest.TestCase):
     def test_bybit_paper_cut_fails_closed_until_exact_provider_domain_is_bound(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            owner = DurableProviderEconomicBook(
-                store,
-                provider_id="BYBIT",
-                account_id="cut-account",
-                environment="PAPER",
-            )
             with self.assertRaisesRegex(
                 AccountingConflict,
-                "requires exact provider_environment",
+                "requires explicit provider_environment",
             ):
-                owner.resolve_historical_cut(1)
+                DurableProviderEconomicBook(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="cut-account",
+                    environment="PAPER",
+                )
 
     def test_issued_cut_rejects_post_issuance_field_rewrite(self):
         with TemporaryDirectory() as directory:
@@ -358,6 +357,7 @@ class ProviderEconomicHistoricalCutTests(unittest.TestCase):
                 "provider_id",
                 "account_id",
                 "environment",
+                "provider_environment",
                 "book_id",
                 "aggregate_version",
                 "journal_sequence",
@@ -394,6 +394,7 @@ class ProviderEconomicHistoricalCutTests(unittest.TestCase):
                 "provider_id",
                 "account_id",
                 "environment",
+                "provider_environment",
                 "book_id",
                 "aggregate_version",
                 "journal_sequence",
@@ -491,6 +492,7 @@ class ProviderEconomicHistoricalCutTests(unittest.TestCase):
                     provider_id=cut.provider_id,
                     account_id=cut.account_id,
                     environment=cut.environment,
+                    provider_environment=cut.provider_environment,
                     book_id=cut.book_id,
                     aggregate_version=cut.aggregate_version,
                     journal_sequence=cut.journal_sequence,

@@ -36,6 +36,10 @@ on:
       - "research/tests/test_ablation*.py"
       - ".github/workflows/plan7-whole-engineering.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

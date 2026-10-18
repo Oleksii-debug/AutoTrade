@@ -1,0 +1,4 @@
+# Opt-in collector tests/runtime only; NOT the canonical release dependency lock.
+# Tested locally with this httpx version and exact vendored upstream signer.
+# Resolve and hash-lock transitive packages before production activation.
+httpx==0.28.1

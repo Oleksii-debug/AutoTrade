@@ -1740,13 +1740,20 @@ def _loop_event(
 
 
 
-def _loop_instrument(effective_from):
+def _loop_instrument(effective_from, instrument_profile="GENERIC"):
     from .instruments import InstrumentRegistry, InstrumentVersion
+    # Fractional spot is a research-only numeric instrument adapter to the
+    # existing canonical simulator, NOT an actual exchange qualification.
+    if instrument_profile not in {"GENERIC", "FRACTIONAL_SPOT_RESEARCH"}:
+        raise ValueError("unsupported simulation instrument profile")
+    fractional = instrument_profile == "FRACTIONAL_SPOT_RESEARCH"
+    step = Decimal("0.00000001") if fractional else Decimal("1")
+    tick = Decimal("0.00000001") if fractional else Decimal("0.01")
     version = InstrumentVersion(instrument_id=INSTRUMENT_ID, version=1, provider_id=PROVIDER,
         venue_id="internal-simulation", provider_symbol="CANONICAL-SIM", asset_class="CASH_EQUITY",
         base_currency="CANONICAL-SIM", quote_currency="USD", settlement_currency="USD", quantity_unit="SHARE",
-        contract_multiplier=Decimal("1"), price_tick=Decimal("0.01"), quantity_step=Decimal("1"),
-        minimum_quantity=Decimal("1"),
+        contract_multiplier=Decimal("1"), price_tick=tick, quantity_step=step,
+        minimum_quantity=step,
         maximum_quantity=Decimal("10"), calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC", effective_from=effective_from)
     return InstrumentRegistry(versions=(version,))
@@ -2008,7 +2015,17 @@ def run_autonomous_simulation(
     fault_at_episode: int | None = None, emergency_at_episode: int | None = None,
     execution_profile: str = "IMMEDIATE",
     target_quantity: str = "1",
+    virtual_cash: str | None = None,
     should_pause=None,
+    observation_interval_seconds: int = 1,
+    instrument_profile: str = "GENERIC",
+    signal_prices: list[str] | None = None,
+    slippage_bps: str = "0",
+    strategy_fast: int = 2,
+    strategy_slow: int = 3,
+    model_sha256: str | None = None,
+    validation_sha256: str | None = None,
+    _lifecycle_action: str | None = None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -2029,12 +2046,50 @@ def run_autonomous_simulation(
     if type(prices) is not list or not 1 <= len(prices) <= 10000:
         raise ValueError("price stream must contain 1 to 10000 observations")
     values = _prices(prices)
+    if signal_prices is not None:
+        if type(signal_prices) is not list or len(signal_prices) != len(values):
+            raise ValueError("next-open signal stream must match execution stream length")
+        signals = _prices(signal_prices)
+    else:
+        signals = values
+    if type(slippage_bps) is not str:
+        raise TypeError("slippage basis points must be exact decimal text")
+    adverse_bps = parse_bounded_exact_decimal(slippage_bps)
+    if adverse_bps < 0 or adverse_bps > 100 or (signal_prices is None and adverse_bps != 0):
+        raise ValueError("bounded adverse slippage applies only to next-open simulation")
+    if (type(strategy_fast) is not int or type(strategy_slow) is not int or
+        not 1 <= strategy_fast < strategy_slow <= 64):
+        raise ValueError("strategy window must be bounded and ordered")
+    if (strategy_fast, strategy_slow) != (2, 3) and model_sha256 is None:
+        raise ValueError("changed strategy parameters require a verified model")
+    if model_sha256 is not None and (
+        signal_prices is None or type(model_sha256) is not str or len(model_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in model_sha256)
+    ):
+        raise ValueError("trained model requires an exact next-open identity")
+    if validation_sha256 is not None and (
+        model_sha256 is None or type(validation_sha256) is not str
+        or len(validation_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in validation_sha256)
+    ):
+        raise ValueError("validation evidence requires an exact trained model identity")
     timestamp = _now(now)
+    if virtual_cash is not None and (type(virtual_cash) is not str or virtual_cash not in {"200", "1000"}):
+        raise ValueError("virtual_cash must be exactly 200 or 1000 USD")
+    initial_cash = INITIAL_CASH if virtual_cash is None else parse_bounded_exact_decimal(virtual_cash)
+    if type(observation_interval_seconds) is not int or not 1 <= observation_interval_seconds <= 86400:
+        raise ValueError("observation_interval_seconds must be a positive bounded exact int")
+    if type(instrument_profile) is not str or instrument_profile not in {"GENERIC", "FRACTIONAL_SPOT_RESEARCH"}:
+        raise ValueError("unsupported simulation instrument profile")
     if should_pause is not None and not callable(should_pause):
         raise TypeError("should_pause must be callable or None")
+    if _lifecycle_action is not None and type(_lifecycle_action) is not str:
+        raise TypeError("lifecycle action must be exact canonical text")
+    if _lifecycle_action not in {None, "START_SIMULATION", "RECOVER_SIMULATION"}:
+        raise ValueError("lifecycle action must be a canonical worker action")
     if type(execution_profile) is not str or execution_profile not in {"IMMEDIATE", "TWO_EQUAL_PARTIALS"}:
         raise ValueError("unsupported frozen simulation execution profile")
-    instrument_registry = _loop_instrument(datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
+    instrument_registry = _loop_instrument(datetime.fromisoformat(timestamp.replace("Z", "+00:00")), instrument_profile)
     instrument = instrument_registry.require_tradable(INSTRUMENT_ID, datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
     if type(target_quantity) is not str:
         raise TypeError("frozen target quantity must be exact decimal text")
@@ -2043,6 +2098,8 @@ def run_autonomous_simulation(
     if execution_profile == "TWO_EQUAL_PARTIALS":
         instrument.validate_quantity(exact_multiply(target, Decimal("0.5")))
     for price in values:
+        instrument.validate_price(price)
+    for price in signals:
         instrument.validate_price(price)
     for name, value in (("stop_after_episodes", stop_after_episodes),
                         ("fault_at_episode", fault_at_episode),
@@ -2060,12 +2117,15 @@ def run_autonomous_simulation(
         "source_build_identity": _simulation_build_identity(),
         "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
         "financial_scope": _simulation_protocol_document(fault_after_send=False)["financial_scope"],
-        "strategy_parameters": {"fast": 2, "slow": 3},
+        "strategy_parameters": {"fast": strategy_fast, "slow": strategy_slow},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
+        "observation_interval_seconds": observation_interval_seconds,
+        "instrument_profile": instrument_profile,
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
-        "strategy": "moving-average-2-3-long-only-target-" + canonical_decimal_text(target),
-        "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(INITIAL_CASH),
+        "strategy": (f"moving-average-{strategy_fast}-{strategy_slow}-long-only-target-"
+                     + canonical_decimal_text(target)),
+        "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(initial_cash),
         "settlement_policy": {
             "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
             "rule_version": _SIMULATION_SETTLEMENT_RULE_VERSION,
@@ -2075,11 +2135,33 @@ def run_autonomous_simulation(
         "fault_at_episode": fault_at_episode, "emergency_at_episode": emergency_at_episode,
         "instrument": instrument.to_contract_dict(),
     }
+    if signal_prices is not None:
+        # Retain both immutable cuts in the restart identity; the specialist
+        # receives only completed signal closes, never the execution open.
+        protocol["signal_prices"] = [canonical_decimal_text(v) for v in signals]
+        protocol["execution_timing"] = "PRIOR_CLOSED_BAR_TO_NEXT_BAR_OPEN_SCENARIO"
+        protocol["adverse_slippage_bps"] = canonical_decimal_text(adverse_bps)
+    if model_sha256 is not None:
+        protocol["trained_model_sha256"] = model_sha256
+    if validation_sha256 is not None:
+        protocol["validation_report_sha256"] = validation_sha256
     root = Path(state_dir)
     if any((root / name).exists() for name in ("checkpoint.json", "learning-evidence.jsonl")):
         raise ValueError("legacy state requires a separate autonomous simulation directory")
     root.mkdir(parents=True, exist_ok=True)
-    with deny_python_network(), ResourceLock(root / ".canonical-simulation.lock"):
+    with deny_python_network(), ResourceLock(
+        root / ".canonical-simulation.lock",
+        blocking=_lifecycle_action is not None,
+    ):
+        if _lifecycle_action is not None:
+            from .simulation_commands import (
+                _require_explicit_recovery_for_unknown_start,
+            )
+            _require_explicit_recovery_for_unknown_start(
+                JournalStore(root / "journal.sqlite3"),
+                _lifecycle_action,
+                _lock_already_held=True,
+            )
         return _run_autonomous_locked(
             root, values, protocol, stop_after_episodes, selected_policy, should_pause
         )
@@ -2268,7 +2350,7 @@ def _recover_autonomous_zero_wire_completion(
     key = f"{run_id}:{episode}"
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1, microseconds=1)
+        + timedelta(seconds=(episode - 1) * protocol["observation_interval_seconds"], microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     # The started ZERO-wire decision uses the same frozen lifecycle-cost proof
     # as a financial episode. Verify it before replaying any reconciliation:
@@ -2437,9 +2519,10 @@ def _recover_autonomous_zero_wire_completion(
         "fill_id": None,
         "reconciliation_event_id": checkpoint["event_id"],
         "protocol_digest": protocol_digest,
-        "provider_state": provider.export_state(),
         "emergency": emergency,
     }
+    if "signal_prices" not in protocol:
+        result["provider_state"] = provider.export_state()
     _loop_event(
         store,
         run_id,
@@ -2501,7 +2584,7 @@ def _recover_autonomous_observed_fill(
     price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1, microseconds=1)
+        + timedelta(seconds=(episode - 1) * protocol["observation_interval_seconds"], microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     intent_id = _uuid("loop-intent", key)
     attempt_id = _uuid("loop-attempt", key)
@@ -2759,9 +2842,10 @@ def _recover_autonomous_observed_fill(
         "fill_id": fill_id,
         "reconciliation_event_id": checkpoint["event_id"],
         "protocol_digest": protocol_digest,
-        "provider_state": provider.export_state(),
         "emergency": False,
     }
+    if "signal_prices" not in protocol:
+        result["provider_state"] = provider.export_state()
     _loop_event(
         store,
         run_id,
@@ -2809,13 +2893,13 @@ def _run_autonomous_locked(
         protocol["runtime_authority_key_sha256"] = key_identity
     protocol_digest = autonomous_protocol_digest(protocol)
     started_at = datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-    instruments = _loop_instrument(started_at)
+    instruments = _loop_instrument(started_at, protocol["instrument_profile"])
     if instruments.require_tradable(INSTRUMENT_ID, started_at).to_contract_dict() != protocol["instrument"]:
         raise ValueError("frozen instrument identity differs")
     if not events:
         if store.current_journal_sequence() != 0:
             raise ValueError("autonomous simulation requires an empty or matching owned journal")
-        provider = SimulatedProvider(account_id=ACCOUNT, initial_cash=str(INITIAL_CASH), fee_rate=str(FEE_RATE))
+        provider = SimulatedProvider(account_id=ACCOUNT, initial_cash=protocol["initial_cash"], fee_rate=str(FEE_RATE))
         _loop_event(store, run_id, "AutonomousSimulationStarted", "start", {
             "protocol_digest": protocol_digest, "protocol": protocol,
             "provider_state": provider.export_state(),
@@ -2830,6 +2914,8 @@ def _run_autonomous_locked(
     completed = []
     active = None
     observed = None
+    provider_state = events[0]["payload"]["provider_state"]
+    active_prior_state = None
     for event in events[1:]:
         payload = event["payload"]
         if event["event_type"] == "AutonomousEpisodeStarted":
@@ -2837,6 +2923,7 @@ def _run_autonomous_locked(
                 raise ValueError("autonomous episode chronology conflicts")
             active = payload
             observed = None
+            active_prior_state = provider_state
         elif event["event_type"] == "AutonomousEpisodeFillObserved":
             if (
                 active is None
@@ -2847,21 +2934,28 @@ def _run_autonomous_locked(
                     "autonomous fill observation chronology conflicts"
                 )
             observed = payload
+            provider_state = payload["provider_state"]
         elif event["event_type"] == "AutonomousEpisodeCompleted":
             if active is None or payload["episode"] != active["episode"]:
                 raise ValueError("autonomous completion lacks matching start")
             completed.append({k: v for k, v in payload.items()
                               if k != "runtime_checkpoint_completion_receipt"})
+            # Read legacy journals that repeated a complete restart image in
+            # every completion.  New journals retain it only on the start and
+            # fill-observed transitions, the only events that change provider
+            # state.  HOLD completions therefore stay compact without losing
+            # a recoverable provider cut.
+            if "provider_state" in payload:
+                provider_state = payload["provider_state"]
             active = None
             observed = None
+            active_prior_state = None
         else:
             raise ValueError("unsupported autonomous simulation event")
     if active is not None:
-        prior_state = (
-            completed[-1]["provider_state"]
-            if completed
-            else events[0]["payload"]["provider_state"]
-        )
+        prior_state = active_prior_state
+        if type(prior_state) is not dict:
+            raise ValueError("autonomous episode lacks a prior provider restart cut")
         if observed is not None:
             _recover_autonomous_observed_fill(
                 store,
@@ -2931,8 +3025,7 @@ def _run_autonomous_locked(
             authority_key_identity=key_identity,
             completed_episodes=len(completed),
         )
-    state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
-    provider = SimulatedProvider.from_state(state)
+    provider = SimulatedProvider.from_state(provider_state)
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
     economic.append(book_external_cash_flow(
         transaction_id=_uuid("loop-seed-transaction", run_id), cause_event_id=_uuid("loop-seed-cause", run_id),
@@ -3004,7 +3097,7 @@ def _run_autonomous_locked(
             break
         episode = index + 1
         key = f"{run_id}:{episode}"
-        point = started_at + timedelta(seconds=index)
+        point = started_at + timedelta(seconds=index * protocol["observation_interval_seconds"])
         instrument = instruments.require_tradable(INSTRUMENT_ID, point)
         instrument.validate_price(values[index])
         timestamp = (point + timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")
@@ -3041,18 +3134,33 @@ def _run_autonomous_locked(
         available_cash = settlements.project(economic).available_to_spend("USD")
         price = mark.mark
         equity = exact_add(cash, exact_multiply(position, price))
-        peak = max([INITIAL_CASH, equity, *previous_equities])
+        initial_cash = parse_bounded_exact_decimal(protocol["initial_cash"])
+        peak = max([initial_cash, equity, *previous_equities])
         drawdown = round_fraction_to_quantum(as_fraction(exact_subtract(peak, equity)) / as_fraction(peak),
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
-        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
+        signal_cut = protocol.get("signal_prices", protocol["prices"])
+        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(
+            [parse_bounded_exact_decimal(v) for v in signal_cut[:episode]], frozen_target
+        )
         # The specialist is durable diagnostics only.  It must agree with the
         # frozen strategy, but it never selects allocation, risk, reservation,
         # or dispatch authority.
         from .product_agent import decide as decide_zero_agent
+        agent_protocol = protocol
+        if "signal_prices" in protocol:
+            # Cross the specialist boundary with a genuinely bounded snapshot.
+            # Neither the next execution open nor later closed bars are present
+            # in the object the agent or its research diagnostic receives.
+            agent_protocol = {
+                k: v for k, v in protocol.items()
+                if k not in {"prices", "signal_prices"}
+            }
+            agent_protocol["source_protocol_digest"] = protocol_digest
+            agent_protocol["signal_prices"] = protocol["signal_prices"][:episode]
         agent_side = decide_zero_agent(
             store,
-            protocol,
+            agent_protocol,
             episode=episode,
             strategy_side=proposal.side,
             position=position,
@@ -3095,7 +3203,23 @@ def _run_autonomous_locked(
         if quantity != 0 and allocation.status == "ALLOCATED":
             side = "BUY" if quantity > 0 else "SELL"
             instrument.validate_quantity(exact_abs(quantity))
-            amount = exact_multiply(exact_abs(quantity), price)
+            execution_price = price
+            if "signal_prices" in protocol:
+                adverse_bps = parse_bounded_exact_decimal(protocol["adverse_slippage_bps"])
+                # A fixed, explicitly hypothetical adverse spread/slippage
+                # scenario. The observed next open stays the valuation mark;
+                # only the canonical simulated order/fill uses this rounded
+                # worse price. No order-book liquidity is inferred.
+                adjusted = as_fraction(price) * (
+                    1 + as_fraction(adverse_bps) / 10000
+                    if side == "BUY" else 1 - as_fraction(adverse_bps) / 10000
+                )
+                execution_price = round_fraction_to_quantum(
+                    adjusted, instrument.price_tick,
+                    mode="CEILING" if side == "BUY" else "FLOOR",
+                )
+                instrument.validate_price(execution_price)
+            amount = exact_multiply(exact_abs(quantity), execution_price)
             required = exact_add(amount, exact_multiply(amount, FEE_RATE)) if side == "BUY" else exact_multiply(amount, FEE_RATE)
             # REDUCE never spends unfilled sale proceeds. Canonical hard risk
             # verifies owned inventory; the sequential OMS fence holds every
@@ -3103,7 +3227,7 @@ def _run_autonomous_locked(
             resource = "CASH:USD"
             context = RiskContext.create(state_version=episode, equity=equity,
                 positions={INSTRUMENT: position}, marks={INSTRUMENT: price}, reserved_position_delta={},
-                daily_pnl=exact_subtract(equity, INITIAL_CASH), drawdown_fraction=drawdown,
+                daily_pnl=exact_subtract(equity, initial_cash), drawdown_fraction=drawdown,
                 market_data_age_seconds="0", fx_age_seconds={"USD": "0"}, margin_headroom="1",
                 capability_allowed=True, borrow_available=True, stress_scenarios=({INSTRUMENT: "-0.25"},),
                 instrument_types={INSTRUMENT: "EQUITY"})
@@ -3155,7 +3279,7 @@ def _run_autonomous_locked(
                 simulation_time=timestamp)
             intent_id = _uuid("loop-intent", key)
             intent_hash = payload_digest({"protocol_digest": protocol_digest, "episode": episode,
-                "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price),
+                "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(execution_price),
                 "instrument": INSTRUMENT, "allocation": {
                     "target": canonical_decimal_text(allocation.targets[0].quantity),
                     "lifecycle_cost_digest": lifecycle_cost.lifecycle_cost_digest,
@@ -3168,7 +3292,7 @@ def _run_autonomous_locked(
                 intent_id=intent_id, intent_hash=intent_hash, account_id=ACCOUNT, environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID, instrument_version=1, action="ORDER.SUBMIT", notional=amount,
                 capability_snapshot_id="simulated-capability-v1", risk_intent=RiskIntent.create(symbol=INSTRUMENT,
-                    side=side, quantity=exact_abs(quantity), price=price, expected_state_version=episode,
+                    side=side, quantity=exact_abs(quantity), price=execution_price, expected_state_version=episode,
                     instrument_type="EQUITY", reduce_only=side == "SELL", action="REDUCE" if side == "SELL" else "TRADE"),
                 risk_context=context, risk_policy=policy, risk_valid_until=future, reservation_book=reservations,
                 reservation_id=reservation_id, reservation_requirements={resource: required},
@@ -3186,7 +3310,7 @@ def _run_autonomous_locked(
                     topic="autotrade.order-projection.events",
                     expected_cut=JournalStore.whole_store_state_cut(store))
                 request = {"attempt_id": attempt_id, "instrument_version": INSTRUMENT, "side": side,
-                    "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price), "now": timestamp}
+                    "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(execution_price), "now": timestamp}
                 if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS":
                     request["fill_immediately"] = False
                 frozen_request = dict(request)
@@ -3218,7 +3342,7 @@ def _run_autonomous_locked(
                     for part in (1, 2):
                         provider.record_fill(client_order_id=order_id,
                             provider_execution_id=_uuid("loop-partial-execution", f"{key}:part:{part}"),
-                            quantity=part_quantity, now=timestamp, price=price)
+                            quantity=part_quantity, now=timestamp, price=execution_price)
                 fresh_fills = [f for f in provider.activity_fills() if f["order_ref"] == dispatched.response["provider_order_id"]]
                 if len(fresh_fills) != (2 if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS" else 1):
                     raise ValueError("ACK is not fill evidence")
@@ -3248,7 +3372,9 @@ def _run_autonomous_locked(
             "cash": canonical_decimal_text(economic.cash("USD")), "position": canonical_decimal_text(economic.position(INSTRUMENT)),
             "equity": canonical_decimal_text(equity), "reconciled": True, "order_id": order_id, "fill_id": fill_id,
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
-            "provider_state": provider.export_state(), "emergency": emergency}
+            "emergency": emergency}
+        if "signal_prices" not in protocol:
+            result["provider_state"] = provider.export_state()
         _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
         from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
         deliver_autonomous_owned_publications(store, run_id=run_id)

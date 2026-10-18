@@ -5,13 +5,15 @@ This is provider-free process/UI-API evidence, not Windows/NVDA qualification.
 from concurrent.futures import ThreadPoolExecutor
 import http.client
 import json
+from io import BytesIO
+from zipfile import ZipFile
 import os
 from pathlib import Path
 import socket
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
 import time
 import unittest
 from unittest.mock import patch
@@ -37,6 +39,7 @@ from mvp.autotrade_mvp.simulation_status import SimulationStateChanging
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.backup import verify_backup, restore_requires_reconciliation
+from research.autotrade_research.artifacts.resource_lock import ResourceLock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,7 +75,9 @@ class ProductClient:
         try:
             connection.request(method, path, None if payload is None else json.dumps(payload), headers)
             response = connection.getresponse(); raw = response.read()
-            data = json.loads(raw) if 'json' in response.getheader('Content-Type', '') else raw.decode()
+            content_type = response.getheader('Content-Type', '')
+            data = (json.loads(raw) if 'json' in content_type else
+                    raw if 'zip' in content_type else raw.decode())
             return response.status, data, dict(response.getheaders())
         finally: connection.close()
 
@@ -118,6 +123,140 @@ class ProductClient:
 
 
 class ProviderFreeProductAcceptance(unittest.TestCase):
+    def test_lifecycle_worker_waits_for_short_snapshot_lock_then_starts(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            original_run = subprocess.run
+            state = Path(directory) / 'state'
+
+            def launch_while_reader_finishes(*args, **kwargs):
+                acquired = Event()
+
+                def hold_snapshot_lock():
+                    with ResourceLock(state / '.canonical-simulation.lock'):
+                        acquired.set()
+                        time.sleep(0.25)
+
+                holder = Thread(target=hold_snapshot_lock)
+                holder.start()
+                self.assertTrue(acquired.wait(timeout=5))
+                try:
+                    return original_run(*args, **kwargs)
+                finally:
+                    holder.join(timeout=5)
+                    self.assertFalse(holder.is_alive())
+
+            try:
+                with patch('subprocess.run', side_effect=launch_while_reader_finishes):
+                    _command_id, operation = client.command(
+                        'START_SIMULATION', {'stop_after_episodes': 2})
+                self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
+                self.assertEqual(operation['remaining_uncertainty'], [])
+                self.assertEqual(
+                    client.state()['portfolio']['status']['session_status'],
+                    'PAUSED',
+                )
+            finally:
+                client.close()
+
+    def test_independent_technical_and_agent_downloads_survive_restart(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                technical_status, technical, technical_headers = client.request(
+                    'GET', '/api/v1/technical-diagnostics')
+                agent_status, agent, agent_headers = client.request(
+                    'GET', '/api/v1/agent-report')
+                self.assertEqual(technical_status, 200, technical)
+                self.assertEqual(agent_status, 200, agent)
+                self.assertEqual(
+                    technical_headers['Content-Disposition'],
+                    'attachment; filename="autotrade-technical-diagnostics.zip"')
+                self.assertEqual(
+                    agent_headers['Content-Disposition'],
+                    'attachment; filename="autotrade-agent-report.zip"')
+                with ZipFile(BytesIO(technical)) as archive:
+                    technical_manifest = json.loads(archive.read('manifest.json'))
+                    first_technical = [
+                        json.loads(line) for line in
+                        archive.read('technical-heartbeats.jsonl').splitlines()
+                    ]
+                    self.assertEqual(
+                        technical_manifest['report_kind'], 'TECHNICAL_DIAGNOSTICS')
+                    self.assertNotIn('journal-events.jsonl', archive.namelist())
+                with ZipFile(BytesIO(agent)) as archive:
+                    agent_manifest = json.loads(archive.read('manifest.json'))
+                    self.assertEqual(agent_manifest['report_kind'], 'AGENT_REPORT')
+                    self.assertIn('journal-events.jsonl', archive.namelist())
+                    self.assertNotIn('technical-heartbeats.jsonl', archive.namelist())
+
+                client.cookie = None
+                self.assertEqual(
+                    client.request('GET', '/api/v1/technical-diagnostics')[0], 403)
+                self.assertEqual(client.request('GET', '/api/v1/agent-report')[0], 403)
+            finally:
+                client.close()
+
+            restarted = ProductClient(directory)
+            try:
+                status, technical_after, _ = restarted.request(
+                    'GET', '/api/v1/technical-diagnostics')
+                self.assertEqual(status, 200, technical_after)
+                with ZipFile(BytesIO(technical_after)) as archive:
+                    after = [
+                        json.loads(line) for line in
+                        archive.read('technical-heartbeats.jsonl').splitlines()
+                    ]
+                self.assertGreater(after[-1]['sequence'], first_technical[-1]['sequence'])
+                self.assertEqual(
+                    [row['sequence'] for row in after],
+                    list(range(after[0]['sequence'], after[-1]['sequence'] + 1)))
+            finally:
+                restarted.close()
+
+    def test_downloadable_diagnostics_are_durable_owner_only_and_redacted(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                status, report, headers = client.request('GET', '/api/v1/local-diagnostics')
+                self.assertEqual(status, 200, report)
+                self.assertEqual(headers['Content-Disposition'],
+                    'attachment; filename="autotrade-diagnostics.zip"')
+                with ZipFile(BytesIO(report)) as archive:
+                    manifest = json.loads(archive.read('manifest.json'))
+                    events = [json.loads(line) for line in archive.read('journal-events.jsonl').splitlines()]
+                    self.assertEqual(manifest['journal_event_count'], len(events))
+                    self.assertGreater(len(events), 0)
+                    self.assertIn('journal_sequence', events[0])
+                    self.assertFalse(manifest['technical_sampling_complete'])
+                    first_ids = [event['event_id'] for event in events]
+                # Browser same-origin GET requests normally omit Origin.
+                connection = http.client.HTTPConnection('127.0.0.1', client.port, timeout=30)
+                try:
+                    connection.request('GET', '/api/v1/local-diagnostics',
+                        headers={'Cookie': client.cookie})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    with ZipFile(BytesIO(response.read())) as archive:
+                        self.assertEqual(json.loads(archive.read('manifest.json'))['journal_event_count'], len(events))
+                finally:
+                    connection.close()
+                client.cookie = None
+                rejected, _, _ = client.request('GET', '/api/v1/local-diagnostics')
+                self.assertEqual(rejected, 403)
+            finally:
+                client.close()
+            restarted = ProductClient(directory)
+            try:
+                status, after, _ = restarted.request('GET', '/api/v1/local-diagnostics')
+                self.assertEqual(status, 200)
+                with ZipFile(BytesIO(after)) as archive:
+                    recovered = [json.loads(line) for line in archive.read('journal-events.jsonl').splitlines()]
+                self.assertEqual(first_ids,
+                    [event['event_id'] for event in recovered][:len(first_ids)])
+            finally:
+                restarted.close()
+
     def test_owned_desktop_child_uses_direct_ephemeral_session_handoff(self):
         from mvp.autotrade_mvp import product_runtime
 

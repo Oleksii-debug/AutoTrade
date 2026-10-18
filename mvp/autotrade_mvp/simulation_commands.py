@@ -12,12 +12,41 @@ SIMULATION_ACTIONS = frozenset({'START_SIMULATION', 'RECOVER_SIMULATION', 'BACKU
 _RECEIPT_TYPE = 'simulation_operator_receipt'
 
 
-def _require_explicit_recovery_for_unknown_start(journal, action):
-    """Keep ordinary START from acquiring recovery authority implicitly."""
+def _require_explicit_recovery_for_unknown_start(
+    journal,
+    action,
+    *,
+    _lock_already_held=False,
+):
+    """Keep ordinary START from acquiring recovery authority implicitly.
+
+    Host admission performs a bounded coherent read.  The isolated lifecycle
+    worker repeats the same check while owning the simulation writer lock, so
+    browser snapshot polling cannot race a second non-blocking acquisition and
+    an UNKNOWN state cannot change between preflight and mutation.
+    """
+    if type(_lock_already_held) is not bool:
+        raise TypeError('simulation lock ownership marker must be bool')
     if action != 'START_SIMULATION':
         return
-    from .simulation_status import inspect_canonical_simulation
-    inspected = inspect_canonical_simulation(Path(journal.path).parent)
+    from .simulation_status import (
+        SimulationStateChanging,
+        _inspect,
+        inspect_canonical_simulation,
+    )
+    root = Path(journal.path).parent
+    if _lock_already_held:
+        inspected = _inspect(root, history_limit=0)
+    else:
+        import time
+        for attempt in range(20):
+            try:
+                inspected = inspect_canonical_simulation(root)
+                break
+            except SimulationStateChanging:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
     if type(inspected) is not dict:
         raise ValueError('canonical simulation state is unavailable')
     status = inspected.get('status')

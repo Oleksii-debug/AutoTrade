@@ -440,7 +440,7 @@ class ModelPricingEvidenceAuthorityTests(unittest.TestCase):
                 budget_id="pricing-integration-budget",
                 ceiling="5",
                 environment="PAPER",
-                clock=lambda: AS_OF,
+                clock=lambda: AS_OF.replace("Z", "+00:00"),
             )
             orchestrator = DurableModelCallOrchestrator(
                 budget=budget,

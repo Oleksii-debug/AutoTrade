@@ -85,6 +85,43 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/provider.schema.json#/$defs/HealthResult
+  /api/v1/local-diagnostics:
+    get:
+      operationId: downloadLocalDiagnostics
+      deprecated: true
+      description: Compatibility-only combined local diagnostics export; new clients use the two independent report routes.
+      responses:
+        "200":
+          description: Legacy diagnostic ZIP
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+  /api/v1/technical-diagnostics:
+    get:
+      operationId: downloadTechnicalDiagnostics
+      description: Owner-only bounded technical heartbeat export; never grants trading authority.
+      responses:
+        "200":
+          description: Persistent rotating technical heartbeat ZIP
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+  /api/v1/agent-report:
+    get:
+      operationId: downloadAgentReport
+      description: Owner-only agent decisions, learning evidence and simulation outcomes export.
+      responses:
+        "200":
+          description: Complete agent report ZIP from the durable local journal
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
 
 components:
   securitySchemes:

@@ -70,7 +70,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "checkpoint-account-owner"
-            store.append_event(_start_event(run_id=run_id))
+            store.append_event(_start_event(run_id=run_id), outbox_topic="autotrade.simulation.events")
             owned = _event(
                 aggregate_type="economic_book",
                 aggregate_id="owned-economic",
@@ -110,7 +110,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "positive-publication-owner"
-            store.append_event(_start_event(run_id=run_id))
+            store.append_event(_start_event(run_id=run_id), outbox_topic="autotrade.simulation.events")
             foreign = _event(
                 aggregate_type="economic_book",
                 aggregate_id="other-account-book",
@@ -123,7 +123,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
             )
             store.append_event(foreign, outbox_topic="autotrade.economic.events")
             deliver_autonomous_owned_publications(store, run_id=run_id)
-            state = store.outbox_delivery_state(foreign["event_id"])
+            state = store.outbox_delivery_state(foreign["event_id"], topic="autotrade.economic.events")
             self.assertIsNotNone(state)
             self.assertFalse(state["delivered"])
 
@@ -131,7 +131,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "hostless-owned-economic"
-            store.append_event(_start_event(run_id=run_id))
+            store.append_event(_start_event(run_id=run_id), outbox_topic="autotrade.simulation.events")
             owned = _event(
                 aggregate_type="economic_book",
                 aggregate_id="zero-account-book",
@@ -144,7 +144,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
             )
             store.append_event(owned, outbox_topic="autotrade.economic.events")
             deliver_autonomous_owned_publications(store, run_id=run_id)
-            state = store.outbox_delivery_state(owned["event_id"])
+            state = store.outbox_delivery_state(owned["event_id"], topic="autotrade.economic.events")
             self.assertIsNotNone(state)
             self.assertTrue(state["delivered"])
 
@@ -152,7 +152,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "misrouted-economic"
-            store.append_event(_start_event(run_id=run_id))
+            store.append_event(_start_event(run_id=run_id), outbox_topic="autotrade.simulation.events")
             owned = _event(
                 aggregate_type="economic_book",
                 aggregate_id="zero-account-book",
@@ -169,7 +169,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
                 "topic|routing|publication",
             ):
                 deliver_autonomous_owned_publications(store, run_id=run_id)
-            state = store.outbox_delivery_state(owned["event_id"])
+            state = store.outbox_delivery_state(owned["event_id"], topic="autotrade.submission.events")
             self.assertIsNotNone(state)
             self.assertFalse(state["delivered"])
 
@@ -177,7 +177,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "risk-outbox-rejected"
-            store.append_event(_start_event(run_id=run_id))
+            store.append_event(_start_event(run_id=run_id), outbox_topic="autotrade.simulation.events")
             risk = _event(
                 aggregate_type="risk_decision",
                 aggregate_id="risk:sha256:" + "1" * 64,
@@ -193,7 +193,7 @@ class ZeroRuntimeFinancialScopeTests(unittest.TestCase):
                 "outbox|publication|topic|routing",
             ):
                 deliver_autonomous_owned_publications(store, run_id=run_id)
-            state = store.outbox_delivery_state(risk["event_id"])
+            state = store.outbox_delivery_state(risk["event_id"], topic="autotrade.economic.events")
             self.assertIsNotNone(state)
             self.assertFalse(state["delivered"])
 

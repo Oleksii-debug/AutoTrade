@@ -71,7 +71,7 @@ jobs:
         working-directory: tests/Product
       - run: python -m unittest mvp.tests.test_provider_free_product mvp.tests.test_provider_free_candidate_builder mvp.tests.test_autonomous_simulation mvp.tests.test_atomic_oms_financial_bust -v
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - run: npm test
         working-directory: tests/Product
       - name: Same-source keyboard semantic route/focus/history/host-outage qualification
@@ -235,7 +235,7 @@ jobs:
           mvp.tests.test_shared_store_zero_checkpoint_outbox
           -v
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - run: python tools/write_ci_evidence.py --suite plan8-m1-s4-crash-restore-financial-conservation --command "real Host restore/recover/restart, backup/checkpoint/UNKNOWN/split-brain/sender-fence/crash negatives" --output artifacts/m1-s4-recovery.json
       - uses: actions/upload-artifact@v4
         with:
@@ -270,7 +270,7 @@ jobs:
           mvp.tests.test_accessible_status
           -v
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - name: Canonical update/rollback, installed fixture and fail-closed security negatives
         run: >-
           python -m unittest
@@ -282,7 +282,7 @@ jobs:
           mvp.tests.test_runtime_locality_packaging
           -v
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - name: Reuse Plan 7 source load/budget and event-conservation negative tests
         run: >-
           python -m unittest
@@ -290,7 +290,7 @@ jobs:
           mvp.tests.test_runtime_resource_budget
           -v
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - name: Reuse durable restart/backlog, slow disk and target-host load evidence tests
         shell: bash
         run: |
@@ -358,7 +358,7 @@ jobs:
       - name: Fail-closed M1 freeze contract fixture and negative tests
         run: python -m unittest mvp.tests.test_plan8_m1_freeze_gate -v
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - uses: actions/download-artifact@v4
         with:
           name: AutoTrade-ZERO-UNQUALIFIED-${{ env.AUTOTRADE_SOURCE_SHA }}
@@ -394,7 +394,7 @@ jobs:
             --composed artifacts/freeze/composed/m1-s5-composed.json \
             --output artifacts/freeze/m1-s6-nonrelease-freeze.json
         env:
-          PYTHONPATH: research:.
+          PYTHONPATH: research
       - name: Issue same-source non-release engineering evidence only after all real jobs passed
         run: >-
           python tools/write_ci_evidence.py
@@ -408,3 +408,4 @@ jobs:
             artifacts/freeze/m1-s6-nonrelease-freeze.json
             artifacts/freeze/m1-s6-execution-evidence.json
           if-no-files-found: error
+

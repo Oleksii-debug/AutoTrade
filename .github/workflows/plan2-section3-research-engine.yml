@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      PYTHONPATH: research:.
+      PYTHONPATH: research
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,3 +62,4 @@ jobs:
           research.tests.test_scientific_trial_owner_stable_cut
           research.tests.test_scientific_trial_owner_completeness_policy
           research.tests.test_jobs
+

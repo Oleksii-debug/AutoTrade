@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 45
     env:
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      PYTHONPATH: research:.
+      PYTHONPATH: research
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,3 +63,4 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
+

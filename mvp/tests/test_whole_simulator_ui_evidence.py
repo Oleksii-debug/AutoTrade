@@ -150,7 +150,6 @@ def _authenticated_snapshot_payload(
             "portfolio": dict(portfolio),
             "risk": dict(risk),
             "strategy": dict(strategy),
-            "whitebit_learning": {"status": "MISSING"},
             "jobs": [],
             "reason_codes": list(reason_codes),
         }
@@ -524,7 +523,6 @@ class WholeSimulatorUiEvidenceTests(unittest.TestCase):
                         "evidence_count": status["evidence_count"],
                         "resumed_from_durable_state": True,
                     },
-                    "whitebit_learning": {"status": "MISSING"},
                     "jobs": [],
                     "reason_codes": [],
                 }

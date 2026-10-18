@@ -481,7 +481,7 @@
     const allowed = new Set([
       "state_version", "event_cursor", "server_time", "host_id", "account_id",
       "environment", "permission_summary", "connection_freshness", "portfolio",
-      "risk", "strategy", "whitebit_learning", "jobs", "reason_codes"
+      "risk", "strategy", "jobs", "reason_codes"
     ]);
     for (const key of Object.keys(snapshot)) {
       if (!allowed.has(key)) throw new Error("UiSnapshot contains non-canonical field " + key);
@@ -500,6 +500,14 @@
       throw new Error("jobs must be an array of objects");
     }
 
+    const strategy = requiredObject(snapshot.strategy, "strategy");
+    const learningValue = strategy.whitebit_learning;
+    const whitebitLearning = learningValue === undefined
+      ? {}
+      : requiredObject(learningValue, "strategy.whitebit_learning");
+    const strategyProjection = Object.fromEntries(
+      Object.entries(strategy).filter(([key]) => key !== "whitebit_learning"));
+
     return {
       version: exactCounter(snapshot.state_version, "state_version"),
       cursor: exactCounter(snapshot.event_cursor, "event_cursor"),
@@ -513,9 +521,8 @@
         connectionFreshness.whitebit_public),
       portfolio: requiredObject(snapshot.portfolio, "portfolio"),
       risk: requiredObject(snapshot.risk, "risk"),
-      strategy: requiredObject(snapshot.strategy, "strategy"),
-      whitebitLearning: requiredObject(
-        snapshot.whitebit_learning, "whitebit_learning"),
+      strategy: strategyProjection,
+      whitebitLearning,
       jobs: snapshot.jobs,
       reasonCodes: requiredStringArray(snapshot.reason_codes, "reason_codes"),
       sessionIdentity: readSessionIdentity(permissionSummary)

@@ -399,10 +399,10 @@ def build_product(
             'strategy': {'strategy': 'moving-average-2-3-long-only-target-2',
                 'decisions': [{k: v for k, v in e.items() if k != 'provider_state'} for e in completed[-100:]],
                 'agent_decisions': [e['payload'] for e in store.load_events_by_aggregate_type('simulation_agent_decision')[-100:]],
-                'economic_edge_status': 'INCONCLUSIVE'},
-            'whitebit_learning': read_whitebit_live_learning_status(
-                whitebit_learning_state
-            ),
+                'economic_edge_status': 'INCONCLUSIVE',
+                'whitebit_learning': read_whitebit_live_learning_status(
+                    whitebit_learning_state
+                )},
             'jobs': [{'kind': 'provider-free-research', 'result': e['payload']} for e in research] + [{'kind': 'provider-free-lifecycle', 'result': e['payload']} for e in receipts[-20:]],
             'reason_codes': ['SIMULATION_ONLY', 'ECONOMIC_EDGE_UNPROVEN']}
 

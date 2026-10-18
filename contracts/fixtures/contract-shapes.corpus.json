@@ -3473,8 +3473,7 @@
         "risk": null,
         "server_time": null,
         "state_version": null,
-        "strategy": null,
-        "whitebit_learning": null
+        "strategy": null
       }
     },
     {
@@ -3496,8 +3495,7 @@
         "risk": null,
         "server_time": null,
         "state_version": null,
-        "strategy": null,
-        "whitebit_learning": null
+        "strategy": null
       }
     },
     {
@@ -3517,8 +3515,7 @@
         "risk": null,
         "server_time": null,
         "state_version": null,
-        "strategy": null,
-        "whitebit_learning": null
+        "strategy": null
       }
     }
   ],

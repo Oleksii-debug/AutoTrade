@@ -172,6 +172,50 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertEqual(cycle["evaluation"]["candidate_trades"], 2)
             self.assertEqual(cycle["phase"], "COOLDOWN")
 
+    def test_paired_abstention_rejects_once_minimum_trades_are_unreachable(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(
+                root, evaluation_episodes=4, min_evaluation_trades=2
+            )
+            for i in range(1, 8):
+                self.tick(learner, i, 100+i)
+            self.assertEqual(
+                learner.status()["learning_cycle"]["phase"], "EVALUATING"
+            )
+
+            # A flat market makes both the legacy MOMENTUM incumbent and the
+            # cost-hurdle candidate abstain.  Stop once too few windows remain
+            # for the candidate to satisfy the preregistered minimum trades.
+            for i in range(8, 12):
+                self.tick(learner, i, 107)
+                learner = self.learner(
+                    root, evaluation_episodes=4, min_evaluation_trades=2
+                )
+
+            cycle = learner.status()["learning_cycle"]
+            self.assertEqual(cycle["phase"], "COOLDOWN")
+            self.assertEqual(cycle["evaluation"]["count"], 3)
+            self.assertEqual(cycle["evaluation"]["no_trade"], "0")
+            self.assertEqual(cycle["evaluation"]["candidate_trades"], 0)
+            self.assertEqual(cycle["evaluation"]["incumbent_trades"], 0)
+            self.assertEqual(
+                cycle["reason"],
+                "PROSPECTIVE_MINIMUM_TRADE_COUNT_UNREACHABLE",
+            )
+            self.assertFalse(
+                cycle["evaluation"]["qualifies_for_research_simulation"]
+            )
+            self.assertFalse(cycle["champion_promotion"])
+            self.assertFalse(cycle["trading_authority"])
+            with closing(sqlite3.connect(learner.database)) as con:
+                self.assertEqual(
+                    con.execute(
+                        "SELECT COUNT(*) FROM live_shadow_episodes"
+                    ).fetchone()[0],
+                    3,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

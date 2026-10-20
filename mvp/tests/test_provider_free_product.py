@@ -3,6 +3,8 @@
 This is provider-free process/UI-API evidence, not Windows/NVDA qualification.
 """
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from decimal import Decimal
 import http.client
 import json
 from io import BytesIO
@@ -37,11 +39,38 @@ from mvp.autotrade_mvp.simulation_commands import _protocol, resolve_simulation_
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
 from mvp.autotrade_mvp.simulation_status import SimulationStateChanging
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
+from mvp.autotrade_mvp.groq_advisory_research import (
+    ADVISORY_ROLES,
+    DurableGroqAdvisoryWave,
+)
+from mvp.autotrade_mvp.model_call import ModelCallObservation
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.backup import verify_backup, restore_requires_reconciliation
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _populate_product_groq_advisory(directory):
+    calls = {}
+    now = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+    for role in ADVISORY_ROLES:
+        def call(binding, _cancelled, selected=role):
+            return ModelCallObservation(
+                provider_id='groq', model_id=binding.model_id,
+                revision=binding.revision, observed_at='2026-10-20T12:00:00Z',
+                incurred_cost=Decimal(0), estimated_unbilled=Decimal(0),
+                output={'text': selected.role + ': numeric evaluation only',
+                        'prompt_tokens': 5, 'completion_tokens': 3},
+                provider_response_id='response-' + selected.role,
+                usage_id='usage-' + selected.role,
+            )
+        calls[role.role] = call
+    DurableGroqAdvisoryWave(
+        Path(directory) / 'groq-advisory',
+        calls_by_role=calls,
+        clock=lambda: now,
+    ).run(wave_id='product-diagnostic-wave', research_input={'mode': 'ZERO'})
 
 
 class ProductClient:
@@ -161,6 +190,7 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
 
     def test_independent_technical_and_agent_downloads_survive_restart(self):
         with TemporaryDirectory() as directory:
+            _populate_product_groq_advisory(directory)
             client = ProductClient(directory)
             try:
                 technical_status, technical, technical_headers = client.request(
@@ -188,6 +218,11 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                     agent_manifest = json.loads(archive.read('manifest.json'))
                     self.assertEqual(agent_manifest['report_kind'], 'AGENT_REPORT')
                     self.assertIn('journal-events.jsonl', archive.namelist())
+                    self.assertIn('groq-advisory/events.jsonl', archive.namelist())
+                    self.assertIn('groq-advisory/summary.json', archive.namelist())
+                    self.assertIn(
+                        'groq-advisory/quota-snapshot.json', archive.namelist())
+                    self.assertTrue(agent_manifest['groq_advisory']['included'])
                     self.assertNotIn('technical-heartbeats.jsonl', archive.namelist())
 
                 client.cookie = None
@@ -213,6 +248,26 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                     list(range(after[0]['sequence'], after[-1]['sequence'] + 1)))
             finally:
                 restarted.close()
+
+    def test_agent_report_uses_explicit_groq_advisory_environment_path(self):
+        with TemporaryDirectory() as directory, TemporaryDirectory() as external:
+            _populate_product_groq_advisory(external)
+            with patch.dict(
+                os.environ,
+                {'AUTOTRADE_GROQ_ADVISORY_STATE_DIR': str(
+                    Path(external) / 'groq-advisory')},
+            ):
+                client = ProductClient(directory)
+            try:
+                status, report, _headers = client.request(
+                    'GET', '/api/v1/agent-report')
+                self.assertEqual(status, 200, report)
+                with ZipFile(BytesIO(report)) as archive:
+                    manifest = json.loads(archive.read('manifest.json'))
+                    self.assertTrue(manifest['groq_advisory']['included'])
+                    self.assertEqual(manifest['groq_advisory']['wave_count'], 1)
+            finally:
+                client.close()
 
     def test_downloadable_diagnostics_are_durable_owner_only_and_redacted(self):
         with TemporaryDirectory() as directory:
@@ -1595,3 +1650,4 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
 
 
 if __name__ == '__main__': unittest.main()
+

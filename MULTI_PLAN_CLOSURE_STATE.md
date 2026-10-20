@@ -210,3 +210,25 @@ Missing real provider/account/credential data is a normal expected state, not a 
 ## Canonical UI rule — 2026-10-08
 
 Plan 5 develops the existing semantic browser-like Web UI as the canonical navigation experience. Desktop embeds that same UI and may add only native host/emergency surfaces. Provider absence must render as NOT_CONFIGURED/UNAVAILABLE while ZERO/SIMULATION/research workflows remain usable.
+
+
+## 2026-10-20 — post-terminal ZERO-learning code convergence
+
+**Receipt scope:** approved Plan 9 `PRIVATE/ZERO` and Plan 10 `HISTORICAL/ZERO` status does **not** change. Previously resolved **30/30 + 23/23 = 53/53** remains the terminal *approved scope*, not activation of provider accounts, PAPER/LIVE, live orders, actual profits or paid-model inference. This entry documents **additive research/product integration**, **not** newly closed numbered Sections. No new `CLOSED_FOR_DEVELOPMENT / TERMINAL` section is asserted by the convergence alone.
+
+### Source-complete addenda now in `main`
+
+| Original PR | Accepted integration | Actual integration commit | Scope / state |
+|---|---|---|---|
+| [#2400](https://github.com/Oleksii-debug/AutoTrade/pull/2400) | #2400 | `e3f0eb9c80439d5a72e237818434ac5af546915c` | Historical after-cost outcome vs exact objective/risk/horizon; direct merged |
+| [#2401](https://github.com/Oleksii-debug/AutoTrade/pull/2401) | #2401 | `d3fe9680b20263d7ac464eedaf3670ac453ac768` | Bounded public-data ZERO learning pause→analysis→prospective frozen evaluation; direct merged |
+| [#2402](https://github.com/Oleksii-debug/AutoTrade/pull/2402) | [#2407](https://github.com/Oleksii-debug/AutoTrade/pull/2407) | `4761effdcbeb78b0c726c979ea781b62d18ceb66` | Exactly 13 original unique source/test paths forward-ported after squash-lineage divergence; original #2402 CLOSED UNMERGED/SUPERSEDED with attribution |
+| [#2403](https://github.com/Oleksii-debug/AutoTrade/pull/2403) | [#2408](https://github.com/Oleksii-debug/AutoTrade/pull/2408) | `08c5be1ce5059206ee3e6f579f281fed3b7c9b08` | Exactly 14 original unique source/test paths: truthful Learning/Models Web/product view and cost-aware historical screening; original #2403 CLOSED UNMERGED/SUPERSEDED |
+| [#2404](https://github.com/Oleksii-debug/AutoTrade/pull/2404) | [#2409](https://github.com/Oleksii-debug/AutoTrade/pull/2409) | `b622a375002741ab616f0786a45f4ddfc2630a4c` | Exact 2 original model-adapter/test blobs: retain only genuine observed Mistral request identity; NOT provider activation; original #2404 CLOSED UNMERGED/SUPERSEDED |
+| [#2405](https://github.com/Oleksii-debug/AutoTrade/pull/2405) **feature slice only** | [#2411](https://github.com/Oleksii-debug/AutoTrade/pull/2411) | `32b435d40fcf93e39ab69ac99cc645f3da241fc3` | Exactly 5 source/test Windows and Python product paths: opt-in owned public numerical collector/learner companion; original #2405 **REMAINS OPEN** because other subsequently authored Verify/sender-takeover changes are NOT included; do not close or remerge stale cumulative stack |
+
+**Source readback:** successive GitHub `main` SHA and representative exact original blob for each of #2400, #2407, #2408, #2409, #2411 verified after each merge. All copied original files have original source bytes; already-merged predecessor files were preserved, not rewritten. Fresh `main` before this documentation commit: `32b435d40fcf93e39ab69ac99cc645f3da241fc3`.
+
+**Actual QA boundary:** Original upstream authors reported focused Python/Windows/Node, simulated-restart and packaged product PASS; GitHub workflow runs for the original #2401/#2402/#2403/#2405 heads show `provider-free-product` success, including real Windows candidate jobs and browser source tests. Conversely `Verify AutoTrade` **FAILED** in multiple original-head runs, with a sampled Ubuntu run reporting `6438 tests / 92 failures / 195 errors / 35 skipped` on #2402. These are real existing issues, not PASS and not resolved by a closure claim. This connector session did **not** run native full-repository Python or newly built Windows packaging for the integrated main: the available shell cannot resolve github.com. Do not assert fresh full-suite GREEN, installed artifact, LIVE deployment, authenticated provider, economic edge, or physical NVDA result.
+
+**Next ownership:** Reconcile the still-open [#2405](https://github.com/Oleksii-debug/AutoTrade/pull/2405) only for its genuinely outstanding sender-takeover/Verify repairs after current-main source comparison and tests; do not merge its historical 18-file cumulative stack wholesale and do not rewrite accepted five-file numerical product integration. Prioritize actual Verify failures by reproducible independent symptoms, distinguishing optional PAPER/LIVE external work from approved PRIVATE/ZERO. Terminal Plans 1–10 must not be reopened without a concrete accepted-scope defect or new owner requirement.

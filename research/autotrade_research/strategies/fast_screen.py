@@ -11,9 +11,9 @@ from .deterministic import (
     _threshold_signal,
 )
 
-EVIDENCE = "SCREENING_ONLY_APPROXIMATE_EXECUTION"
-VERSION = "fast-historical-screen-v1"
-CANDIDATES = ("CASH", "MOMENTUM", "MEAN_REVERSION")
+EVIDENCE = "ZERO_RESEARCH_SCREENING_ONLY_APPROXIMATE_EXECUTION"
+VERSION = "fast-historical-screen-v2-entry-gate-matrix"
+CANDIDATES = ("CASH", "MOMENTUM", "MEAN_REVERSION", "MOMENTUM_QUICK_REJECT")
 
 
 def digest(value):
@@ -55,7 +55,35 @@ class Costs:
             raise ValueError("threshold outside [0,1]")
 
 
-def validate_bars(bars):
+@dataclass(frozen=True)
+class QuickReject:
+    """Causal entry-only gate intended to reject costly marginal turnover.
+
+    Every feature uses the trailing completed OHLCV window.  The gate can
+    abstain from a new BUY, but it never blocks an exit from an open position.
+    """
+
+    lookback: int = 24
+    min_volatility_fraction: str = "0.001"
+    max_volatility_fraction: str = "0.03"
+    min_direction_agreement: str = "0.60"
+    min_quote_volume: str = "1000000"
+
+    def validate(self):
+        if type(self.lookback) is not int or not 3 <= self.lookback <= 1000:
+            raise ValueError("quick-reject lookback outside 3..1000")
+        minimum = decimal(self.min_volatility_fraction)
+        maximum = decimal(self.max_volatility_fraction)
+        if not 0 <= minimum <= maximum <= 1:
+            raise ValueError("quick-reject volatility bounds must satisfy 0 <= min <= max <= 1")
+        agreement = decimal(self.min_direction_agreement)
+        if not Decimal("0.5") <= agreement <= 1:
+            raise ValueError("quick-reject direction agreement outside [0.5,1]")
+        if not 0 <= decimal(self.min_quote_volume) <= Decimal("1e18"):
+            raise ValueError("quick-reject quote-volume floor outside [0,1e18]")
+
+
+def validate_bars(bars, *, require_ohlcv=False):
     if len(bars) < 4:
         raise ValueError("at least four chronological bars required")
     previous = None
@@ -65,12 +93,48 @@ def validate_bars(bars):
                 or opened.utcoffset() is None or closed.utcoffset() is None
                 or opened >= closed or (previous is not None and opened != previous)):
             raise ValueError("bars must form a continuous chronological timezone-aware cut")
-        if decimal(bar["open"]) <= 0 or decimal(bar["close"]) <= 0:
+        opened_price, close = decimal(bar["open"]), decimal(bar["close"])
+        if opened_price <= 0 or close <= 0:
             raise ValueError("prices must be positive")
+        available = tuple(name in bar for name in ("high", "low", "volume"))
+        if any(available) and not all(available):
+            raise ValueError("OHLCV bars must include high, low and volume together")
+        if require_ohlcv and not all(available):
+            raise ValueError("quick-reject candidate requires complete OHLCV bars")
+        if all(available):
+            high, low, volume = (decimal(bar[name]) for name in ("high", "low", "volume"))
+            if low <= 0 or high < max(opened_price, close) or low > min(opened_price, close):
+                raise ValueError("OHLCV price envelope is invalid")
+            if volume < 0:
+                raise ValueError("OHLCV volume must be non-negative")
         previous = closed
 
 
-def simulate(bars, *, candidate, costs, trace=False):
+def _quick_reject(window, configuration):
+    """Return deterministic rejection reasons from completed trailing bars."""
+    if len(window) < configuration.lookback:
+        return ("INSUFFICIENT_HISTORY",)
+    closes = [decimal(bar["close"]) for bar in window]
+    returns = [(current - previous) / previous
+               for previous, current in zip(closes, closes[1:])]
+    mean_absolute_return = sum((value.copy_abs() for value in returns), Decimal(0)) / len(returns)
+    positive_fraction = sum(value > 0 for value in returns) / Decimal(len(returns))
+    mean_quote_volume = sum(
+        (decimal(bar["close"]) * decimal(bar["volume"]) for bar in window), Decimal(0)
+    ) / len(window)
+    reasons = []
+    if mean_absolute_return < decimal(configuration.min_volatility_fraction):
+        reasons.append("LOW_VOLATILITY")
+    if mean_absolute_return > decimal(configuration.max_volatility_fraction):
+        reasons.append("HIGH_VOLATILITY")
+    if positive_fraction < decimal(configuration.min_direction_agreement):
+        reasons.append("CHOPPY_OR_WRONG_REGIME")
+    if mean_quote_volume < decimal(configuration.min_quote_volume):
+        reasons.append("LOW_LIQUIDITY")
+    return tuple(reasons)
+
+
+def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False):
     """Signal at bar close; execute only at the following open.
 
     One long position, no borrowing or shorting. Partition-end liquidation is
@@ -78,9 +142,11 @@ def simulate(bars, *, candidate, costs, trace=False):
     capacity, latency, intrabar paths, queue and exchange lot rules are absent.
     """
     costs.validate()
-    validate_bars(bars)
+    quick_reject.validate()
     if candidate not in CANDIDATES:
         raise ValueError("unknown screening candidate")
+    gated = candidate == "MOMENTUM_QUICK_REJECT"
+    validate_bars(bars, require_ohlcv=gated)
     with localcontext() as context:
         context.prec = 50
         cash = decimal(costs.initial_cash)
@@ -91,8 +157,10 @@ def simulate(bars, *, candidate, costs, trace=False):
         adverse = (decimal(costs.spread_bps) / 2 + decimal(costs.slippage_bps)) / 10000
         pending = "HOLD"
         window = deque(maxlen=costs.lookback)
+        gate_window = deque(maxlen=quick_reject.lookback)
         fills = []
-        count = cycles = 0
+        count = cycles = entry_signals = entry_rejections = 0
+        rejection_reasons = {}
         evidence = sha256()
 
         def mark(price):
@@ -140,29 +208,48 @@ def simulate(bars, *, candidate, costs, trace=False):
             if candidate != "CASH":
                 window.append(CausalObservation.create(event_id=str(index), symbol="SCREEN",
                     available_at=bar["closed_at"], price=close))
+                if gated:
+                    gate_window.append(bar)
                 if len(window) == costs.lookback:
-                    family = ReturnThresholdBaseline if candidate == "MOMENTUM" else MeanReversionThresholdBaseline
+                    family = (MeanReversionThresholdBaseline if candidate == "MEAN_REVERSION"
+                              else ReturnThresholdBaseline)
                     pending = _threshold_signal(family, list(window), decimal(costs.threshold))[0]
+                    # Repeated BUY signals while already long are not new
+                    # turnover opportunities and therefore are not counted as
+                    # gate decisions or rejections.
+                    if pending == "BUY" and quantity == 0:
+                        entry_signals += 1
+                        if gated:
+                            reasons = _quick_reject(gate_window, quick_reject)
+                            if reasons:
+                                entry_rejections += 1
+                                pending = "HOLD"
+                                for reason in reasons:
+                                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
         execute("SELL", decimal(bars[-1]["close"]), bars[-1]["closed_at"], "PRECOMMITTED_PARTITION_END")
         mark(decimal(bars[-1]["close"]))
         result = dict(candidate=candidate, observations=len(bars), final_cash=str(cash),
             net_pnl=str(cash-initial), return_fraction=str((cash-initial)/initial),
             max_drawdown_fraction=str(drawdown), fees=str(fees), fills=count,
             closed_cycles=cycles, execution_digest=evidence.hexdigest(),
+            entry_signals=entry_signals, entry_rejections=entry_rejections,
+            entry_rejection_reasons=dict(sorted(rejection_reasons.items())),
             first_open=bars[0]["opened_at"].isoformat(), last_close=bars[-1]["closed_at"].isoformat())
         if trace:
             result["trace"] = fills
         return result
 
 
-def screen(bars, *, train_count, dataset_sha256, costs=Costs(), checkpoint=None):
+def screen(bars, *, train_count, dataset_sha256, costs=Costs(),
+           quick_reject=QuickReject(), checkpoint=None):
     """Freeze selection from TRAIN only, then evaluate on the later partition.
 
     checkpoint(key, producer) may persist completed stages and reuse them after
     restart. This never resumes an unfinished stage or supplies ledger evidence.
     """
-    validate_bars(bars)
+    validate_bars(bars, require_ohlcv=True)
     costs.validate()
+    quick_reject.validate()
     if type(train_count) is not int or not 4 <= train_count <= len(bars)-4:
         raise ValueError("TRAIN and later evaluation must each contain four bars")
     if (type(dataset_sha256) is not str or len(dataset_sha256) != 64
@@ -171,22 +258,30 @@ def screen(bars, *, train_count, dataset_sha256, costs=Costs(), checkpoint=None)
     content = sha256()
     for bar in bars:
         content.update(json.dumps([bar["opened_at"].isoformat(), bar["closed_at"].isoformat(),
-                                   str(decimal(bar["open"])), str(decimal(bar["close"]))]).encode())
+                                   *[str(decimal(bar[name])) for name in
+                                     ("open", "high", "low", "close", "volume")]]).encode())
     config = dict(version=VERSION, costs=asdict(costs), candidates=CANDIDATES,
+                  quick_reject=asdict(quick_reject),
                   train_count=train_count, observations=len(bars), dataset_sha256=dataset_sha256,
                   consumed_bars_sha256=content.hexdigest(),
-                  end_policy="FORCED_CLOSE_BOTH_PARTITIONS", evaluation_policy="FRESH_CASH_COLD_SIGNALS")
+                  end_policy="FORCED_CLOSE_BOTH_PARTITIONS",
+                  evaluation_policy="FRESH_CASH_COLD_SIGNALS_ALL_CANDIDATES_TRAIN_SELECTION_ONLY")
     config_sha = digest(config)
     run = checkpoint or (lambda key, producer: producer())
     training = [run(f"{config_sha}-train-{name}", lambda name=name:
-                   simulate(bars[:train_count], candidate=name, costs=costs)) for name in CANDIDATES]
+                   simulate(bars[:train_count], candidate=name, costs=costs,
+                            quick_reject=quick_reject)) for name in CANDIDATES]
     # Prefer the cash control on equal PnL; never mine evaluation to choose.
     selected = max(training, key=lambda row: (Decimal(row["net_pnl"]),
                    Decimal(row["max_drawdown_fraction"]).copy_negate(), -CANDIDATES.index(row["candidate"])))
-    evaluation = run(f"{config_sha}-eval-{selected['candidate']}", lambda:
-                     simulate(bars[train_count:], candidate=selected["candidate"], costs=costs))
+    evaluation_matrix = [run(f"{config_sha}-eval-{name}", lambda name=name:
+                         simulate(bars[train_count:], candidate=name, costs=costs,
+                                  quick_reject=quick_reject)) for name in CANDIDATES]
+    evaluation = next(row for row in evaluation_matrix
+                      if row["candidate"] == selected["candidate"])
     result = dict(schema=VERSION, evidence_class=EVIDENCE, config=config, config_sha256=config_sha,
-        training=training, selected_candidate=selected["candidate"], evaluation=evaluation,
+        training=training, selected_candidate=selected["candidate"],
+        evaluation=evaluation, evaluation_matrix=evaluation_matrix,
         network_orders=False, paid_model_calls=0, canonical_qualification=False,
         limitations=["NO_INTRABAR_DRAWDOWN", "NO_CAPACITY_OR_QUEUE_MODEL", "NO_EXCHANGE_LOT_RULES",
                      "RETROSPECTIVE_BAR_AVAILABILITY", "CANONICAL_FINALIST_VALIDATION_REQUIRED"])

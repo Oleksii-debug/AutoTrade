@@ -1247,6 +1247,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_id="PROVIDER-A",
             account_id="acct-1",
             environment="PAPER",
+            provider_environment="PAPER",
             complete=False,
             matched_execution_ids=(),
             unexpected_execution_ids=(execution_id,),
@@ -1286,7 +1287,7 @@ class FillAccountingTests(unittest.TestCase):
             ),
             observed_at="2026-01-01T00:00:02Z",
             host_id="host-1",
-            owner_epoch="epoch-1",
+            owner_epoch="1",
         )
         return event["event_id"]
 
@@ -1664,6 +1665,7 @@ class FillAccountingTests(unittest.TestCase):
                 provider_id="PROVIDER-A",
                 account_id="acct-1",
                 environment="PAPER",
+                provider_environment="PAPER",
                 complete=False,
                 matched_execution_ids=(),
                 unexpected_execution_ids=(fill.provider_execution_id,),
@@ -1689,7 +1691,7 @@ class FillAccountingTests(unittest.TestCase):
                 result=legacy,
                 observed_at="2026-01-01T00:00:02Z",
                 host_id="host-1",
-                owner_epoch="epoch-1",
+                owner_epoch="1",
             )
             book = DurableProviderEconomicBook(
                 store,

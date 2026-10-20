@@ -58,6 +58,8 @@ def _ready_reconciliation():
         price="100",
         fee_currency="USD",
         trade_time="2026-10-04T00:30:30Z",
+        side="BUY",
+        evidence_refs=("fixture:takeover-lock-order:exec-1",),
     )
     return reconcile_account(
         provider_id="SIMULATED",

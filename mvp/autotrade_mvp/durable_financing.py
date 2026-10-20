@@ -6,10 +6,11 @@ This module composes three existing authorities without replacing any of them:
 * :class:`JournalStore` owns durable atomic journal commits.
 * :class:`DurableProviderEconomicBook` owns provider/account economic state.
 
-A provider financing observation can become durable PAPER/LIVE economics only when
-it is reconstructed from one authenticated immutable ArtifactStore snapshot.
-The financing revision fact and any non-zero economic delta are then committed by
-one JournalStore command transaction.
+Recorded financing inputs are reconstructed from authenticated immutable artifact
+snapshots. Parsing a receipt does not establish provider-origin financial
+authority: direct PAPER/LIVE posting remains unavailable here. Provider-free
+financing revisions and any non-zero economic delta commit atomically in one
+JournalStore command transaction.
 """
 
 from __future__ import annotations
@@ -673,6 +674,89 @@ def _bybit_funding_event_from_exact_response(
     return event, "INSTRUMENT", instrument_version
 
 
+def authenticated_bybit_funding_event(
+    observation: ProviderResponseObservation,
+    artifact_store: AuthenticatedArtifactStore,
+    *,
+    artifact_id: str,
+    row_id: str,
+    instrument_registry: InstrumentRegistry,
+    instrument_versions: Mapping[str, str],
+) -> tuple[FinancingEvent, str, str, str]:
+    """Parse an exact Bybit receipt without granting financial authority.
+
+    Query, artifact, and instrument bindings are checked here so recorded
+    fixtures can exercise the normalizer independently of provider-origin
+    admission. The returned event alone cannot authorize PAPER/LIVE posting.
+    """
+
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError(
+            "observation must be the exact canonical ProviderResponseObservation"
+        )
+    observation.require_scope(
+        provider_id="BYBIT",
+        surface=Surface.ACTIVITIES,
+        endpoint="/v5/account/transaction-log",
+    )
+    query = dict(observation.query_binding.query)
+    allowed_query_keys = {
+        "accountType",
+        "category",
+        "currency",
+        "baseCoin",
+        "type",
+        "startTime",
+        "endTime",
+        "limit",
+        "cursor",
+    }
+    if (
+        query.get("accountType") != "UNIFIED"
+        or query.get("category") != "linear"
+        or set(query) - allowed_query_keys
+        or ("type" in query and query["type"] != "SETTLEMENT")
+    ):
+        raise FinancingError(
+            "Bybit funding requires a qualified linear transaction-log query"
+        )
+    aid = _text(artifact_id, name="artifact_id")
+    try:
+        manifest, raw = artifact_store.read_authenticated_snapshot(aid)
+    except Exception as error:
+        raise FinancingError(
+            "Bybit financing artifact could not be authenticated"
+        ) from error
+    if type(manifest) is not dict or manifest.get("artifact_id") != aid:
+        raise FinancingError("Bybit financing artifact identity mismatch")
+    if manifest.get("media_type") != "application/json":
+        raise FinancingError("Bybit financing artifact must be application/json")
+    rights = manifest.get("rights")
+    if type(rights) is not dict or rights.get("storage") is not True:
+        raise FinancingError("Bybit financing artifact lacks storage rights")
+    artifact_digest = _normalize_artifact_digest(manifest)
+    _verify_authenticated_snapshot_bytes(
+        raw,
+        artifact_digest=artifact_digest,
+    )
+    if artifact_digest != observation.response_sha256:
+        raise FinancingError(
+            "Bybit financing artifact bytes do not match provider observation"
+        )
+    event, charge_scope_type, charge_scope_id = (
+        _bybit_funding_event_from_exact_response(
+            raw,
+            observation=observation,
+            artifact_id=aid,
+            artifact_digest=artifact_digest,
+            row_id=row_id,
+            instrument_registry=instrument_registry,
+            instrument_versions=instrument_versions,
+        )
+    )
+    return event, artifact_digest, charge_scope_type, charge_scope_id
+
+
 def _revision_book_digest(events: list[FinancingEvent]) -> str:
     return payload_digest(
         {
@@ -1102,12 +1186,6 @@ class DurableFinancingBook:
             )
             cut_after = self.store.current_journal_sequence()
             if cut_before == cut_after:
-                # Keep the public durable facade synchronized after a stable
-                # cross-book read.  Conservation is still evaluated against
-                # the sealed ``economic_cut`` above; refresh only publishes
-                # the successfully authenticated durable projection to later
-                # readers of this same facade.
-                self.economic_book.refresh()
                 return cut_before, durable_events, economic_cut.transactions, book
         raise FinancingConflict(
             "financing authority could not obtain a stable JournalStore cut"
@@ -1309,56 +1387,11 @@ class DurableFinancingBook:
             raise FinancingError(
                 "PAPER/LIVE Bybit financing requires journal-derived provider-origin authority"
             )
-        query = dict(observation.query_binding.query)
-        allowed_query_keys = {
-            "accountType",
-            "category",
-            "currency",
-            "baseCoin",
-            "type",
-            "startTime",
-            "endTime",
-            "limit",
-            "cursor",
-        }
-        if (
-            query.get("accountType") != "UNIFIED"
-            or query.get("category") != "linear"
-            or set(query) - allowed_query_keys
-            or ("type" in query and query["type"] != "SETTLEMENT")
-        ):
-            raise FinancingError(
-                "Bybit funding requires a qualified linear transaction-log query"
-            )
-        aid = _text(artifact_id, name="artifact_id")
-        try:
-            manifest, raw = artifact_store.read_authenticated_snapshot(aid)
-        except Exception as error:
-            raise FinancingError(
-                "Bybit financing artifact could not be authenticated"
-            ) from error
-        if type(manifest) is not dict or manifest.get("artifact_id") != aid:
-            raise FinancingError("Bybit financing artifact identity mismatch")
-        if manifest.get("media_type") != "application/json":
-            raise FinancingError("Bybit financing artifact must be application/json")
-        rights = manifest.get("rights")
-        if type(rights) is not dict or rights.get("storage") is not True:
-            raise FinancingError("Bybit financing artifact lacks storage rights")
-        artifact_digest = _normalize_artifact_digest(manifest)
-        _verify_authenticated_snapshot_bytes(
-            raw,
-            artifact_digest=artifact_digest,
-        )
-        if artifact_digest != observation.response_sha256:
-            raise FinancingError(
-                "Bybit financing artifact bytes do not match provider observation"
-            )
-        event, charge_scope_type, charge_scope_id = (
-            _bybit_funding_event_from_exact_response(
-                raw,
-                observation=observation,
-                artifact_id=aid,
-                artifact_digest=artifact_digest,
+        event, artifact_digest, charge_scope_type, charge_scope_id = (
+            authenticated_bybit_funding_event(
+                observation,
+                artifact_store,
+                artifact_id=artifact_id,
                 row_id=row_id,
                 instrument_registry=instrument_registry,
                 instrument_versions=instrument_versions,
@@ -1366,7 +1399,7 @@ class DurableFinancingBook:
         )
         return self._record_preverified(
             event=event,
-            artifact_id=aid,
+            artifact_id=artifact_id,
             artifact_digest=artifact_digest,
             charge_scope_type=charge_scope_type,
             charge_scope_id=charge_scope_id,

@@ -4,9 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from autotrade_mvp.persistence import JournalStore
-from autotrade_mvp.recovery import RecoveryController
-from autotrade_mvp.sender_gate import journal_sender_gate
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.sender_gate import journal_sender_gate
 
 
 class RecoverySenderGateCurrentTests(unittest.TestCase):

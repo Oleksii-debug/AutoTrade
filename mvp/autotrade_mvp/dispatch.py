@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -20,6 +21,7 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
+from .sender_authority import sender_authority_window
 from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
     require_provider_json_depth,
@@ -1548,6 +1550,7 @@ class GuardedDispatcher:
         guard_called = False
         barrier_passed = False
         barrier_now = now
+        sender_gate = ExitStack()
 
         def final_guard() -> None:
             nonlocal guard_called, barrier_passed, barrier_now
@@ -1591,6 +1594,24 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            # Hold the inter-process takeover gate from final validation through
+            # the actual transport call, not merely through the journal CAS.
+            if self.environment in {"PAPER", "LIVE"}:
+                try:
+                    sender_gate.enter_context(sender_authority_window(
+                        self._journal_store_authority(),
+                        owner_scope=f"{self.environment}:{self.account_id}",
+                    ))
+                except Exception as error:
+                    barrier_reason = f"sender_authority_gate_failed:{type(error).__name__}"
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={"client_order_id": client_order_id, "reason": barrier_reason},
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(barrier_reason) from error
             # Fixed journal cut before untrusted sender/authority callbacks.
             barrier_journal_sequence = journal_current_sequence(self._journal_store_authority())
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
@@ -1748,7 +1769,8 @@ class GuardedDispatcher:
 
         canonical_response_guard = _require_canonical_exact_transport_response
         try:
-            response = transport_send(client_order_id, request_frozen, final_guard)
+            with sender_gate:
+                response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
             events = self._events(attempt_id)
             if events:

@@ -201,12 +201,12 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         with self.assertRaisesRegex(FinancingConflict, "canonical economic batch"):
             restarted.latest(CHARGE_ID)
 
-    def test_live_read_refreshes_economic_projection_before_conservation_check(self) -> None:
+    def test_live_read_uses_current_durable_cut_despite_stale_economic_facade(self) -> None:
         event = self._event()
         aggregate_id, delta = self._append_financing_only(event)
 
         # Mutate the shared durable economic authority through a separate facade,
-        # leaving self.economic intentionally stale until financing replay refreshes it.
+        # leaving self.economic intentionally stale while replay reads a sealed cut.
         separate_economic = DurableProviderEconomicBook(
             self.store,
             provider_id="SIMULATED",
@@ -225,7 +225,7 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         latest = self.financing.latest(CHARGE_ID)
         self.assertIsNotNone(latest)
         self.assertEqual(latest, event)
-        self.assertEqual(len(self.economic.transactions), 1)
+        self.assertEqual(len(self.economic.read_cut().transactions), 1)
 
 
 if __name__ == "__main__":

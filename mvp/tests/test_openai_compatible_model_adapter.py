@@ -9,16 +9,16 @@ import json
 import unittest
 from unittest.mock import patch
 
-from autotrade_mvp.model_call import ModelCallBinding
-from autotrade_mvp.model_credentials import _target
-from autotrade_mvp.model_provider_registry import (
+from mvp.autotrade_mvp.model_call import ModelCallBinding
+from mvp.autotrade_mvp.model_credentials import _target
+from mvp.autotrade_mvp.model_provider_registry import (
     MODEL_PROVIDER_ENDPOINTS,
     ModelProviderConfiguration,
     SUPPORTED_CREDENTIAL_PROVIDERS,
     SUPPORTED_MODEL_PROVIDERS,
     model_provider_endpoint,
 )
-from autotrade_mvp.openai_compatible_model_adapter import (
+from mvp.autotrade_mvp.openai_compatible_model_adapter import (
     OpenAICompatibleAdapterError,
     OpenAICompatibleInferenceAdapter,
     OpenAICompatibleModelRegistration,

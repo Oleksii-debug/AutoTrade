@@ -9,12 +9,12 @@ import json
 import unittest
 from unittest.mock import patch, Mock
 
-from autotrade_mvp.mistral_model_adapter import (
+from mvp.autotrade_mvp.mistral_model_adapter import (
     MistralAdapterError, MistralInferenceAdapter, MistralSettings,
     _transport,
 )
-from autotrade_mvp.model_call import ModelCallBinding
-from autotrade_mvp.model_credentials import _target
+from mvp.autotrade_mvp.model_call import ModelCallBinding
+from mvp.autotrade_mvp.model_credentials import _target
 
 
 def _settings() -> MistralSettings:
@@ -51,7 +51,7 @@ class MistralAdapterTests(unittest.TestCase):
         connection = Mock()
         connection.getresponse.return_value = response
         settings = _settings()
-        with patch("autotrade_mvp.mistral_model_adapter.http.client.HTTPSConnection", return_value=connection):
+        with patch("mvp.autotrade_mvp.mistral_model_adapter.http.client.HTTPSConnection", return_value=connection):
             adapter = MistralInferenceAdapter(settings,
                 key_resolver=lambda **kwargs: "private-key-value", transport=_transport)
             result = adapter.inference(_binding(settings), lambda: False, prompt="Observe")

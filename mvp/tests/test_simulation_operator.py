@@ -15,6 +15,9 @@ from mvp.autotrade_mvp import simulation_session
 from mvp.autotrade_mvp.accounting import book_external_cash_flow, book_equity_fill
 from mvp.autotrade_mvp.cli import get_status, main
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp._persistence_impl import (
+    canonical_json, _event_envelope_digest, _outbox_envelope_digest,
+)
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, run_canonical_simulation
@@ -44,26 +47,48 @@ def command(directory, *args):
 
 class SimulationOperatorTests(unittest.TestCase):
     def _invalid_journal(self, transform, prices=BUY, *, runtime_rejection=None):
-        """Produce integrity-valid malformed fixtures at the canonical write seam."""
-        append = JournalStore.append_event
-        commit = JournalStore.commit_command
-        def changed(envelope):
-            envelope = deepcopy(envelope)
-            transform(envelope)
-            envelope["payload_hash"] = payload_digest(envelope["payload"])
-            return envelope
-        def altered(store, envelope, **kwargs):
-            return append(store, changed(envelope), **kwargs)
-        def altered_command(store, **kwargs):
-            kwargs["events"] = [(changed(envelope), topic) for envelope, topic in kwargs["events"]]
-            return commit(store, **kwargs)
+        """Corrupt only a closed temporary fixture; never replace store authority.
+
+        Keep row/envelope/publication hashes consistent so readers must reject
+        the intended business inconsistency rather than a stale digest.
+        """
         with TemporaryDirectory() as directory:
-            with patch.object(JournalStore, "append_event", altered), patch.object(JournalStore, "commit_command", altered_command):
-                if runtime_rejection is None:
+            run(directory, prices)
+            changed_count = 0
+            with closing(sqlite3.connect(Path(directory) / "journal.sqlite3")) as connection:
+                rows = connection.execute("SELECT event_id, envelope_json FROM events").fetchall()
+                for old_id, raw in rows:
+                    envelope = json.loads(raw)
+                    transform(envelope)
+                    envelope["payload_hash"] = payload_digest(envelope["payload"])
+                    encoded = canonical_json(envelope)
+                    if encoded == raw:
+                        continue
+                    changed_count += 1
+                    connection.execute(
+                        "UPDATE events SET event_id=?, event_type=?, aggregate_type=?, aggregate_id=?, "
+                        "aggregate_version=?, payload_json=?, payload_hash=?, committed_at=?, "
+                        "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                        (envelope["event_id"], envelope["event_type"], envelope["aggregate_type"],
+                         envelope["aggregate_id"], int(envelope["aggregate_version"]),
+                         canonical_json(envelope["payload"]), envelope["payload_hash"],
+                         envelope["committed_at"], encoded, _event_envelope_digest(encoded), old_id),
+                    )
+                    publications = connection.execute(
+                        "SELECT outbox_id, topic FROM outbox WHERE event_id=?", (old_id,)
+                    ).fetchall()
+                    for publication_id, topic in publications:
+                        connection.execute(
+                            "UPDATE outbox SET event_id=?, payload_json=?, envelope_hash=? WHERE outbox_id=?",
+                            (envelope["event_id"], encoded, _outbox_envelope_digest(topic, encoded), publication_id),
+                        )
+                connection.commit()
+            self.assertGreater(changed_count, 0, "invalid fixture did not alter its intended event")
+            if runtime_rejection is not None:
+                before = dump(directory)
+                with self.assertRaisesRegex(ValueError, runtime_rejection):
                     run(directory, prices)
-                else:
-                    with self.assertRaisesRegex(ValueError, runtime_rejection):
-                        run(directory, prices)
+                self.assertEqual(dump(directory), before)
             self._assert_untrusted_read(directory)
 
     def _assert_untrusted_read(self, directory):
@@ -199,7 +224,7 @@ class SimulationOperatorTests(unittest.TestCase):
     def test_completed_session_cannot_use_another_started_event_identity(self):
         def alter(event):
             if event["event_type"] == "SimulationSessionStarted":
-                event["event_id"] = "other-started-event"
+                event["event_id"] = "00000000-0000-0000-0000-000000000001"
         self._invalid_journal(alter, ["100", "101"])
 
     def test_completed_session_input_digest_must_be_canonical(self):

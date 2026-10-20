@@ -215,8 +215,16 @@ class LiveCycle:
             evaluation.update(count=evaluation["count"]+1, peak=str(peak),
                 drawdown=str(max(Decimal(evaluation["drawdown"]), peak-total)), pending=None,
                 last_outcome_key=key)
-        if evaluation["count"] >= self.cycle_config["evaluation"]:
-            qualifies = (Decimal(evaluation["candidate"]) > 0 and
+        remaining = self.cycle_config["evaluation"] - evaluation["count"]
+        minimum_trades_unreachable = (
+            self.cycle_config["min_evaluation_trades"]
+            <= self.cycle_config["evaluation"]
+            and evaluation["candidate_trades"] + remaining
+            < self.cycle_config["min_evaluation_trades"]
+        )
+        if evaluation["count"] >= self.cycle_config["evaluation"] or minimum_trades_unreachable:
+            qualifies = (not minimum_trades_unreachable and
+                Decimal(evaluation["candidate"]) > 0 and
                 evaluation["candidate_trades"] >= self.cycle_config["min_evaluation_trades"] and
                 Decimal(evaluation["candidate"]) >= Decimal(evaluation["incumbent"]) and
                 Decimal(evaluation["drawdown"]) < Decimal(self.cycle_config["drawdown"]))
@@ -228,7 +236,9 @@ class LiveCycle:
                     cycle=state["cycle"]+1, reason="PROSPECTIVE_RESEARCH_GATE_PASSED")
             else:
                 state.update(phase="COOLDOWN", cooldown_at=current["available_at"],
-                             reason="PROSPECTIVE_COST_OR_RISK_GATE_FAILED")
+                    reason=("PROSPECTIVE_MINIMUM_TRADE_COUNT_UNREACHABLE"
+                        if minimum_trades_unreachable else
+                        "PROSPECTIVE_COST_OR_RISK_GATE_FAILED"))
             return
         previous = con.execute("SELECT mid,available_at FROM observations WHERE observation_key != ? "
                                "ORDER BY available_at DESC LIMIT 1", (key,)).fetchone()

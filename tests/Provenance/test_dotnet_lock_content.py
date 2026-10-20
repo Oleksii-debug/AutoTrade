@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import subprocess
@@ -51,6 +52,32 @@ def write_lock(project: Path, *, resolved: str = '1.0.4191.47', content_hash: ob
         }
     payload = {'version': version, 'dependencies': {'net10.0-windows7.0': records}}
     (project.parent / 'packages.lock.json').write_text(json.dumps(payload), encoding='utf-8')
+
+
+class ProvenanceManifestScriptModeImportTests(unittest.TestCase):
+    def test_script_mode_imports_restore_environment_authority_helper(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "tools" / "build_provenance_manifest.py").read_text(
+            encoding="utf-8"
+        )
+        module = ast.parse(source)
+        package_guard = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "__package__"
+        )
+        script_import = next(
+            node
+            for node in package_guard.orelse
+            if isinstance(node, ast.ImportFrom) and node.module == "dotnet_lock"
+        )
+        imported = {alias.name for alias in script_import.names}
+        self.assertIn(
+            "dotnet_restore_workflow_environment_authority_lines",
+            imported,
+        )
 
 
 class NugetLockGateCandidateTests(unittest.TestCase):

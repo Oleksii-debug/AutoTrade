@@ -68,11 +68,43 @@ class MistralSettings:
         ) / Decimal(1_000_000)
 
 
-Transport = Callable[[str, str, bytes | None, str, int], dict]
+@dataclass(frozen=True, slots=True)
+class MistralTransportResponse:
+    """Body and allowlisted HTTP request identity; no raw headers retained."""
+    body: dict
+    provider_request_id: str | None
+
+
+Transport = Callable[[str, str, bytes | None, str, int], dict | MistralTransportResponse]
+
+
+def _request_id(headers: list[tuple[str, str]], key: str) -> str | None:
+    # Observed directly on api.mistral.ai GET /v1/models, 2026-10-18.
+    # Chat responses may omit it; correlation/body IDs are not substitutes.
+    values = [value for name, value in headers if name.lower() == "x-kong-request-id"]
+    if not values:
+        return None
+    if (len(values) != 1 or type(values[0]) is not str
+            or not _MODEL.fullmatch(values[0]) or key in values[0]):
+        raise MistralAdapterError("Mistral request identity header is invalid")
+    return values[0]
+
+
+def _unpack(response: dict | MistralTransportResponse) -> tuple[dict, str | None]:
+    # Legacy injected transports carry no HTTP provenance. Never infer an ID
+    # from body fields, response ID, or the local durable attempt identity.
+    if type(response) is dict:
+        return response, None
+    if type(response) is not MistralTransportResponse or type(response.body) is not dict:
+        raise MistralAdapterError("Mistral transport response shape is invalid")
+    value = response.provider_request_id
+    if value is not None and (type(value) is not str or not _MODEL.fullmatch(value)):
+        raise MistralAdapterError("Mistral request identity header is invalid")
+    return response.body, value
 
 
 def _transport(method: str, path: str, body: bytes | None,
-               key: str, timeout: int) -> dict:
+               key: str, timeout: int) -> MistralTransportResponse:
     # A direct HTTPS connection deliberately does not follow redirects.
     connection = http.client.HTTPSConnection(
         _HOST, timeout=timeout, context=ssl.create_default_context(),
@@ -92,7 +124,7 @@ def _transport(method: str, path: str, body: bytes | None,
         value = json.loads(raw)
         if type(value) is not dict:
             raise MistralAdapterError("Mistral response shape is invalid")
-        return value
+        return MistralTransportResponse(value, _request_id(response.getheaders(), key))
     except MistralAdapterError:
         raise
     except (OSError, UnicodeError, ValueError, http.client.HTTPException) as error:
@@ -122,9 +154,9 @@ class MistralInferenceAdapter:
 
     def test_connection(self) -> bool:
         """Read-only authentication check; never submits a trading decision."""
-        response = self._transport("GET", "/v1/models", None,
+        response, _request_identity = _unpack(self._transport("GET", "/v1/models", None,
                                    self._key(),
-                                   self.settings.timeout_seconds)
+                                   self.settings.timeout_seconds))
         data = response.get("data")
         if type(data) is not list:
             raise MistralAdapterError("Mistral model catalog is invalid")
@@ -153,9 +185,9 @@ class MistralInferenceAdapter:
             "max_tokens": settings.maximum_output_tokens,
             "stream": False,
         }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        response = self._transport("POST", "/v1/chat/completions", request,
+        response, request_identity = _unpack(self._transport("POST", "/v1/chat/completions", request,
                                    self._key(),
-                                   settings.timeout_seconds)
+                                   settings.timeout_seconds))
         usage = response.get("usage")
         if type(usage) is not dict:
             raise MistralAdapterError("Mistral token usage is missing")
@@ -192,5 +224,6 @@ class MistralInferenceAdapter:
             output={"text": message["content"], "prompt_tokens": input_tokens,
                     "completion_tokens": output_tokens},
             provider_response_id=response_id,
+            provider_request_id=request_identity,
             usage_id="mistral-usage-sha256:" + usage_identity,
         )

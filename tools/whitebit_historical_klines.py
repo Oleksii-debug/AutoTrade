@@ -21,9 +21,18 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import sys
 from tempfile import NamedTemporaryFile
 import time
 from typing import Callable
+
+# Keep direct checkout invocation (``python tools/...``) independent of the
+# caller's working directory and PYTHONPATH.  Packaged/module invocation keeps
+# the same imports, and no user-controlled path is added.
+ROOT = Path(__file__).resolve().parents[1]
+for dependency_root in (ROOT, ROOT / "research"):
+    if str(dependency_root) not in sys.path:
+        sys.path.insert(0, str(dependency_root))
 
 from autotrade_research.integrations.whitebit_public import (
     ACTIVITY_KLINE_ADAPTER_VERSION,

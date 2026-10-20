@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from decimal import Decimal, ROUND_DOWN, localcontext
@@ -7,6 +8,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 import tempfile
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from typing import Mapping
@@ -17,6 +19,7 @@ from mvp.autotrade_mvp.durable_financing import (
     _milliseconds_instant,
     _revision_book_digest,
     authenticated_financing_event,
+    authenticated_bybit_funding_event,
 )
 from mvp.autotrade_mvp.financing import FinancingConflict, FinancingError
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
@@ -124,6 +127,7 @@ def bybit_activity_observation(
             account_id="acct-1",
             entity_id="bybit-financing-test",
             environment=environment,
+            provider_environment="MAINNET" if environment == "LIVE" else "TESTNET",
             instrument_version=(
                 capability_instrument_version
                 or f"{BYBIT_XRP_INSTRUMENT_ID}@1"
@@ -177,6 +181,38 @@ def bybit_activity_observation(
     )
 
 
+def record_simulated_bybit_fixture(
+    financing,
+    observation,
+    artifact_store,
+    *,
+    committed_at=None,
+    **parser_arguments,
+):
+    """Exercise recorded Bybit parsing and a separate provider-free ledger.
+
+    This test adapter deliberately uses the neutral account-level financing
+    convention. It cannot grant provider-scoped PAPER/LIVE cash authority.
+    """
+    if financing.provider_id != "SIMULATED" or financing.environment != "SIMULATION":
+        raise AssertionError("recorded fixture requires a provider-free simulation")
+    event, digest, scope_type, _scope_id = authenticated_bybit_funding_event(
+        observation, artifact_store, **parser_arguments
+    )
+    if scope_type != "INSTRUMENT" or event.source_account != f"CASH:{event.unit}":
+        raise AssertionError("Bybit parser must preserve its exact instrument cash scope")
+    simulated_event = replace(event, source_account=f"BORROW_LIABILITY:{event.unit}")
+    return financing._record_preverified(
+        event=simulated_event,
+        artifact_id=parser_arguments["artifact_id"],
+        artifact_digest=digest,
+        charge_scope_type="ACCOUNT",
+        charge_scope_id=financing.account_id,
+        committed_at=committed_at,
+        allow_provider_fact_reobservation=True,
+    )
+
+
 class FakeArtifactStore:
     def __init__(self):
         self.items: dict[str, bytes] = {}
@@ -189,7 +225,7 @@ class FakeArtifactStore:
         kind: str = "FINAL",
         amount: str = "1.2",
         available_at: datetime | None = None,
-        provider_id: str = "BYBIT",
+        provider_id: str = "SIMULATED",
         account_id: str = "acct-1",
         environment: str = "SIMULATION",
         unit: str = "BTC",
@@ -284,14 +320,14 @@ class DurableFinancingTests(unittest.TestCase):
         self.store = JournalStore(Path(self.temp.name) / "journal.sqlite3")
         self.economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         self.financing = DurableFinancingBook(
             self.store,
             self.economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -330,7 +366,7 @@ class DurableFinancingTests(unittest.TestCase):
     def test_economic_book_retarget_fails_before_artifact_callback(self):
         alternate_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -359,7 +395,7 @@ class DurableFinancingTests(unittest.TestCase):
         other_store = JournalStore(Path(self.temp.name) / "reinit.sqlite3")
         other_economic = DurableProviderEconomicBook(
             other_store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -371,7 +407,7 @@ class DurableFinancingTests(unittest.TestCase):
             self.financing.__init__(
                 other_store,
                 other_economic,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
@@ -476,14 +512,14 @@ class DurableFinancingTests(unittest.TestCase):
 
         restarted_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         restarted = DurableFinancingBook(
             self.store,
             restarted_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -790,13 +826,13 @@ class DurableFinancingTests(unittest.TestCase):
         ) = authenticated_financing_event(
             self.artifacts,
             artifact_id=artifact,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         aggregate_id = self.financing._aggregate_id(event.charge_id)
         payload = _event_payload(
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
             event=event,
@@ -864,21 +900,16 @@ class DurableFinancingTests(unittest.TestCase):
     def test_command_failure_exposes_neither_revision_nor_economics(self):
         artifact = "00000000-0000-0000-0000-000000000061"
         self.artifacts.put(artifact, revision=1)
-        original = JournalStore.commit_command
-
         def fail_commit(selected_store, **kwargs):
             raise RuntimeError("injected SQL/commit failure")
 
-        JournalStore.commit_command = fail_commit
-        try:
+        with patch.object(JournalStore, "commit_command", fail_commit):
             with self.assertRaisesRegex(RuntimeError, "injected"):
                 self.financing.record_authenticated_artifact(
                     self.artifacts,
                     artifact_id=artifact,
                     committed_at=BASE.isoformat(),
                 )
-        finally:
-            JournalStore.commit_command = original
 
         self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
         self.assertEqual(
@@ -888,14 +919,14 @@ class DurableFinancingTests(unittest.TestCase):
         reopened_store = JournalStore(Path(self.temp.name) / "journal.sqlite3")
         reopened_economic = DurableProviderEconomicBook(
             reopened_store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         reopened_financing = DurableFinancingBook(
             reopened_store,
             reopened_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -943,9 +974,9 @@ class DurableFinancingTests(unittest.TestCase):
             first,
             revision=1,
             amount="1.2",
-            source_account="CASH:BTC",
-            charge_scope_type="INSTRUMENT",
-            charge_scope_id="instrument-alpha",
+            source_account="BORROW_LIABILITY:BTC",
+            charge_scope_type="ACCOUNT",
+            charge_scope_id="acct-1",
         )
         self.financing.record_authenticated_artifact(
             self.artifacts,
@@ -955,14 +986,14 @@ class DurableFinancingTests(unittest.TestCase):
 
         restarted_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         restarted = DurableFinancingBook(
             self.store,
             restarted_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -971,18 +1002,29 @@ class DurableFinancingTests(unittest.TestCase):
             revision=2,
             amount="1.50",
             available_at=BASE + timedelta(minutes=1),
-            source_account="CASH:BTC",
-            charge_scope_type="INSTRUMENT",
-            charge_scope_id="instrument-beta",
+            source_account="BORROW_LIABILITY:BTC",
+            charge_scope_type="ACCOUNT",
+            charge_scope_id="acct-1",
         )
 
+        migrated_event, digest, _scope_type, _scope_id = authenticated_financing_event(
+            self.artifacts,
+            artifact_id=migrated,
+            provider_id="SIMULATED",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        # An internal preverified caller still cannot retarget a durable charge.
         with self.assertRaisesRegex(
             FinancingConflict,
             "charge scope cannot change across revisions",
         ):
-            restarted.record_authenticated_artifact(
-                self.artifacts,
+            restarted._record_preverified(
+                event=migrated_event,
                 artifact_id=migrated,
+                artifact_digest=digest,
+                charge_scope_type="INSTRUMENT",
+                charge_scope_id="instrument-beta",
                 committed_at=(BASE + timedelta(minutes=1)).isoformat(),
             )
 
@@ -994,7 +1036,7 @@ class DurableFinancingTests(unittest.TestCase):
             "1.2",
         )
         self.assertEqual(
-            str(restarted_economic.balance("CASH:BTC", "BTC")),
+            str(restarted_economic.balance("BORROW_LIABILITY:BTC", "BTC")),
             "-1.2",
         )
         self.assertEqual(
@@ -1045,14 +1087,14 @@ class DurableFinancingTests(unittest.TestCase):
 
         restarted_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         restarted = DurableFinancingBook(
             self.store,
             restarted_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -1105,7 +1147,7 @@ class DurableFinancingTests(unittest.TestCase):
             "1.2",
         )
 
-    def test_bybit_exact_activity_funding_commits_simulation_economics(self):
+    def test_bybit_exact_activity_funding_parses_for_neutral_simulation(self):
         transaction_time = int(BASE.timestamp() * 1000)
         response = {
             "retCode": 0,
@@ -1153,20 +1195,34 @@ class DurableFinancingTests(unittest.TestCase):
             source_refs=[observation.evidence_ref],
             metadata={"evidence_class": "provider_response"},
         )
+        before_parse = self.store.current_journal_sequence()
+        parsed_event, _digest, scope_type, scope_id = authenticated_bybit_funding_event(
+            observation,
+            raw_store,
+            artifact_id=artifact,
+            row_id="funding-row-1",
+            instrument_registry=bybit_instrument_registry()[0],
+            instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
+        )
+        self.assertEqual(parsed_event.source_account, "CASH:USDT")
+        self.assertEqual(parsed_event.amount, Decimal("0.003676"))
+        self.assertEqual((scope_type, scope_id), ("INSTRUMENT", f"{BYBIT_XRP_INSTRUMENT_ID}@1"))
+        self.assertEqual(self.store.current_journal_sequence(), before_parse)
+
         paper_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         paper_financing = DurableFinancingBook(
             self.store,
             paper_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
-        result = paper_financing.record_bybit_funding_observation(
+        result = record_simulated_bybit_fixture(paper_financing,
             observation,
             raw_store,
             artifact_id=artifact,
@@ -1178,7 +1234,7 @@ class DurableFinancingTests(unittest.TestCase):
         self.assertTrue(result.inserted)
         self.assertEqual(result.event.amount, Decimal("0.003676"))
         self.assertEqual(result.event.unit, "USDT")
-        self.assertEqual(result.event.source_account, "CASH:USDT")
+        self.assertEqual(result.event.source_account, "BORROW_LIABILITY:USDT")
         self.assertEqual(
             paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
             Decimal("0.003676"),
@@ -1193,14 +1249,14 @@ class DurableFinancingTests(unittest.TestCase):
         )
         restarted_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         restarted_financing = DurableFinancingBook(
             self.store,
             restarted_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -1276,7 +1332,7 @@ class DurableFinancingTests(unittest.TestCase):
             FinancingError,
             "instrument_versions must be a mapping.*exact dict",
         ):
-            self.financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(self.financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1353,6 +1409,7 @@ class DurableFinancingTests(unittest.TestCase):
                     provider_id="BYBIT",
                     account_id="acct-1",
                     environment=environment,
+                    provider_environment="MAINNET" if environment == "LIVE" else "TESTNET",
                 )
                 financing = DurableFinancingBook(
                     self.store,
@@ -1427,21 +1484,21 @@ class DurableFinancingTests(unittest.TestCase):
         )
         paper_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         paper_financing = DurableFinancingBook(
             self.store,
             paper_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         registry, exact_ref = bybit_instrument_registry()
 
         with self.assertRaisesRegex(FinancingError, "canonical registry authority"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1457,7 +1514,7 @@ class DurableFinancingTests(unittest.TestCase):
             settlement_currency="USD"
         )
         with self.assertRaisesRegex(FinancingError, "settlement unit"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1471,7 +1528,7 @@ class DurableFinancingTests(unittest.TestCase):
             effective_from=BASE + timedelta(days=1)
         )
         with self.assertRaisesRegex(FinancingError, "event time"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1485,7 +1542,7 @@ class DurableFinancingTests(unittest.TestCase):
             successor_from=BASE - timedelta(hours=1)
         )
         with self.assertRaisesRegex(FinancingError, "event time"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1559,19 +1616,19 @@ class DurableFinancingTests(unittest.TestCase):
             )
             paper_economic = DurableProviderEconomicBook(
                 self.store,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
             paper_financing = DurableFinancingBook(
                 self.store,
                 paper_economic,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
             with self.assertRaisesRegex(FinancingError, expected):
-                paper_financing.record_bybit_funding_observation(
+                record_simulated_bybit_fixture(paper_financing,
                     observation,
                     raw_store,
                     artifact_id=artifact,
@@ -1655,19 +1712,19 @@ class DurableFinancingTests(unittest.TestCase):
 
         paper_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         paper_financing = DurableFinancingBook(
             self.store,
             paper_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         with self.assertRaisesRegex(FinancingError, "digest does not match returned bytes"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 LyingBybitSnapshotStore(),
                 artifact_id=artifact,
@@ -1718,19 +1775,19 @@ class DurableFinancingTests(unittest.TestCase):
         )
         paper_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         paper_financing = DurableFinancingBook(
             self.store,
             paper_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         with self.assertRaisesRegex(FinancingError, "paid funding"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1753,14 +1810,14 @@ class DurableFinancingTests(unittest.TestCase):
         )
         paper_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="PAPER",
         )
         paper_financing = DurableFinancingBook(
             self.store,
             paper_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="PAPER",
         )
@@ -1791,14 +1848,14 @@ class DurableFinancingTests(unittest.TestCase):
         second_store = JournalStore(Path(self.temp.name) / "journal.sqlite3")
         second_economic = DurableProviderEconomicBook(
             second_store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         composed = DurableFinancingBook(
             self.store,
             second_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
@@ -1810,7 +1867,7 @@ class DurableFinancingTests(unittest.TestCase):
         forged_store = ForgedStore(Path(self.temp.name) / "forged.sqlite3")
         with self.assertRaisesRegex(TypeError, "store must be exact JournalStore"):
             DurableProviderEconomicBook(
-                forged_store, provider_id="BYBIT", account_id="acct-1", environment="SIMULATION",
+                forged_store, provider_id="SIMULATED", account_id="acct-1", environment="SIMULATION",
             )
 
         class ForgedEconomicBook(DurableProviderEconomicBook):
@@ -1818,7 +1875,7 @@ class DurableFinancingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "economic_book must be exact DurableProviderEconomicBook"):
             ForgedEconomicBook(
-                self.store, provider_id="BYBIT", account_id="acct-1", environment="SIMULATION",
+                self.store, provider_id="SIMULATED", account_id="acct-1", environment="SIMULATION",
             )
 
     def test_durable_delta_is_independent_of_ambient_decimal_context(self):
@@ -1912,19 +1969,19 @@ class DurableFinancingTests(unittest.TestCase):
         )
         paper_economic = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         paper_financing = DurableFinancingBook(
             self.store,
             paper_economic,
-            provider_id="BYBIT",
+            provider_id="SIMULATED",
             account_id="acct-1",
             environment="SIMULATION",
         )
         with self.assertRaisesRegex(FinancingError, "companion cashFlow"):
-            paper_financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(paper_financing,
                 observation,
                 raw_store,
                 artifact_id=artifact,
@@ -1958,8 +2015,8 @@ class DurableFinancingTests(unittest.TestCase):
             ("missing_fee", {"fee": None}, "missing or noncanonical"),
             ("missing_change", {"change": None}, "missing or noncanonical"),
             ("nonzero_fee", {"fee": "0.10", "change": "-0.103676"}, "companion economics"),
-            ("nonzero_cash_flow", {"cashFlow": "1.25", "change": "1.246324"}, "companion economics"),
-            ("inconsistent_change", {"change": "-0.003675"}, "does not equal cashFlow + funding - fee"),
+            ("nonzero_cash_flow", {"cashFlow": "1.25", "change": "1.246324"}, "companion cashFlow"),
+            ("inconsistent_change", {"change": "-0.003675"}, r"does not equal cashFlow \+ funding - fee"),
         )
         for suffix, changes, expected in cases:
             with self.subTest(case=suffix):
@@ -1990,7 +2047,7 @@ class DurableFinancingTests(unittest.TestCase):
                     raw,
                     observed_at=observed_at,
                 )
-                artifact = f"00000000-0000-0000-0000-0000000001{suffix[-2:]}"
+                artifact = str(uuid4())
                 raw_store = ArtifactStore(
                     Path(self.temp.name) / f"bybit-complete-{suffix}"
                 )
@@ -2004,19 +2061,19 @@ class DurableFinancingTests(unittest.TestCase):
                 )
                 economic = DurableProviderEconomicBook(
                     self.store,
-                    provider_id="BYBIT",
+                    provider_id="SIMULATED",
                     account_id="acct-1",
                     environment="SIMULATION",
                 )
                 financing = DurableFinancingBook(
                     self.store,
                     economic,
-                    provider_id="BYBIT",
+                    provider_id="SIMULATED",
                     account_id="acct-1",
                     environment="SIMULATION",
                 )
                 with self.assertRaisesRegex(FinancingError, expected):
-                    financing.record_bybit_funding_observation(
+                    record_simulated_bybit_fixture(financing,
                         observation,
                         raw_store,
                         artifact_id=artifact,
@@ -2089,18 +2146,18 @@ class DurableFinancingTests(unittest.TestCase):
 
             economic = DurableProviderEconomicBook(
                 self.store,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
             financing = DurableFinancingBook(
                 self.store,
                 economic,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
-            first = financing.record_bybit_funding_observation(
+            first = record_simulated_bybit_fixture(financing,
                 first_observation,
                 first_store,
                 artifact_id=first_artifact,
@@ -2111,7 +2168,7 @@ class DurableFinancingTests(unittest.TestCase):
                 },
                 committed_at=first_seen.isoformat(),
             )
-            second = financing.record_bybit_funding_observation(
+            second = record_simulated_bybit_fixture(financing,
                 second_observation,
                 second_store,
                 artifact_id=second_artifact,
@@ -2198,18 +2255,18 @@ class DurableFinancingTests(unittest.TestCase):
             )
             economic = DurableProviderEconomicBook(
                 self.store,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
             financing = DurableFinancingBook(
                 self.store,
                 economic,
-                provider_id="BYBIT",
+                provider_id="SIMULATED",
                 account_id="acct-1",
                 environment="SIMULATION",
             )
-            financing.record_bybit_funding_observation(
+            record_simulated_bybit_fixture(financing,
                 first_observation,
                 first_store,
                 artifact_id=first_artifact,
@@ -2222,7 +2279,7 @@ class DurableFinancingTests(unittest.TestCase):
                 FinancingConflict,
                 "same financing revision has conflicting content",
             ):
-                financing.record_bybit_funding_observation(
+                record_simulated_bybit_fixture(financing,
                     altered_observation,
                     altered_store,
                     artifact_id=altered_artifact,
@@ -2261,3 +2318,69 @@ class DurableFinancingTests(unittest.TestCase):
                         "transactionTime": str(transaction_time),
                         "type": "SETTLEMENT",
                         "funding": "-0.003676",
+                        "currency": "USDT",
+                        "fee": "0",
+                        "cashFlow": "0",
+                        "change": "-0.003676",
+                    }
+                ],
+            },
+            "time": transaction_time + 1000,
+        }
+        raw = json.dumps(
+            response,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        observed_at = BASE + timedelta(seconds=2)
+        observation = bybit_activity_observation(
+            raw,
+            observed_at=observed_at,
+            extra_query={
+                "startTime": str(transaction_time + 1),
+                "endTime": str(transaction_time + 60000),
+            },
+        )
+        artifact = "00000000-0000-0000-0000-000000000094"
+        raw_store = ArtifactStore(Path(self.temp.name) / "bybit-window-artifacts")
+        raw_store.publish_bytes(
+            artifact_id=artifact,
+            data=raw,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[observation.evidence_ref],
+            metadata={"evidence_class": "provider_response"},
+        )
+        paper_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="SIMULATED",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        paper_financing = DurableFinancingBook(
+            self.store,
+            paper_economic,
+            provider_id="SIMULATED",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        with self.assertRaisesRegex(FinancingError, "precedes authenticated query"):
+            record_simulated_bybit_fixture(paper_financing,
+                observation,
+                raw_store,
+                artifact_id=artifact,
+                row_id="funding-outside-window",
+                instrument_registry=bybit_instrument_registry()[0],
+                instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
+                committed_at=observed_at.isoformat(),
+            )
+        self.assertEqual(
+            paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+            0,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -56,6 +56,7 @@ HISTORICAL_SOURCE = frozenset({
     'tools/run_goal_directed_attention.py',
     'tools/evaluate_historical_objectives.py',
     'tools/run_target_strategy_lifecycle.py',
+    'tools/screen_historical_candidates.py',
     'tools/configure_mistral.py',
     'tools/configure_model_provider.py',
     'tools/configure_whitebit.py',

@@ -170,11 +170,12 @@ def agent_report_zip(
     state_dir: Path,
     *,
     source_revision: str,
+    live_learning_status: dict[str, object] | None = None,
 ) -> DiagnosticZipExport:
     """Export durable agent decisions, learning evidence and outcomes only."""
     if type(journal) is not JournalStore or type(state_dir) is not type(Path()):
         raise TypeError("agent report inputs must be canonical journal and path")
-    return _zip_export(
+    report = _zip_export(
         journal,
         state_dir,
         source_revision=source_revision,
@@ -182,6 +183,26 @@ def agent_report_zip(
         report_kind="AGENT_REPORT",
         include_legacy_telemetry=False,
     )
+    if live_learning_status is None:
+        return report
+    if type(live_learning_status) is not dict:
+        raise TypeError("live learning status must be an exact dictionary")
+    status = redact_diagnostic_value(live_learning_status)
+    status_body = _json_line(status)
+    with ZipFile(BytesIO(report.data), "r") as source:
+        members = {name: source.read(name) for name in source.namelist()}
+    members["live-learning/status.json"] = status_body
+    manifest = json.loads(members["manifest.json"])
+    manifest["live_learning_status_included"] = True
+    manifest["members"]["live-learning/status.json"] = {
+        "bytes": len(status_body),
+        "sha256": sha256(status_body).hexdigest(),
+    }
+    members["manifest.json"] = json.dumps(
+        manifest, sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+    data = _zip_bytes(members)
+    return DiagnosticZipExport(report.filename, data, sha256(data).hexdigest())
 
 
 def technical_diagnostic_zip(

@@ -85,6 +85,8 @@
     "operations-copy",
     "risk-region",
     "jobs-region",
+    "learning-region",
+    "models-region",
     "historical-trades-region",
     "historical-start",
     "historical-pause",
@@ -498,6 +500,14 @@
       throw new Error("jobs must be an array of objects");
     }
 
+    const strategy = requiredObject(snapshot.strategy, "strategy");
+    const learningValue = strategy.whitebit_learning;
+    const whitebitLearning = learningValue === undefined
+      ? {}
+      : requiredObject(learningValue, "strategy.whitebit_learning");
+    const strategyProjection = Object.fromEntries(
+      Object.entries(strategy).filter(([key]) => key !== "whitebit_learning"));
+
     return {
       version: exactCounter(snapshot.state_version, "state_version"),
       cursor: exactCounter(snapshot.event_cursor, "event_cursor"),
@@ -511,7 +521,8 @@
         connectionFreshness.whitebit_public),
       portfolio: requiredObject(snapshot.portfolio, "portfolio"),
       risk: requiredObject(snapshot.risk, "risk"),
-      strategy: requiredObject(snapshot.strategy, "strategy"),
+      strategy: strategyProjection,
+      whitebitLearning,
       jobs: snapshot.jobs,
       reasonCodes: requiredStringArray(snapshot.reason_codes, "reason_codes"),
       sessionIdentity: readSessionIdentity(permissionSummary)
@@ -1144,6 +1155,26 @@ function appendProjectionRow(body, label, value) {
       }
       reapplyTableFilter("jobs-body");
     });
+  }
+
+  function renderWhitebitLearning(learning, {preserveSelection = true} = {}) {
+    const overview = {};
+    const modelsAndEvidence = {};
+    const modelKeys = new Set([
+      "model_version_count", "incumbent_model", "candidate_model",
+      "analysis", "evaluation"
+    ]);
+    for (const [key, value] of Object.entries(learning)) {
+      (modelKeys.has(key) ? modelsAndEvidence : overview)[key] = value;
+    }
+    renderProjection(
+      "learning-body", overview,
+      "WhiteBIT ZERO learning status is unavailable.",
+      {preserveSelection});
+    renderProjection(
+      "models-body", modelsAndEvidence,
+      "WhiteBIT ZERO model and evaluation evidence is unavailable.",
+      {preserveSelection});
   }
   function normalizedTableQuery(value) {
     return String(value ?? "").trim().toLowerCase();
@@ -1823,6 +1854,9 @@ function renderOperation(operation) {
       "strategy-body",
       parsed.strategy,
       "No strategy or decision projection reported by the host snapshot.",
+      {preserveSelection: !displayContextChanged});
+    renderWhitebitLearning(
+      parsed.whitebitLearning,
       {preserveSelection: !displayContextChanged});
     renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged});
     state.renderedHostId = parsed.hostId;

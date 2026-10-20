@@ -41,6 +41,7 @@ from .runtime_diagnostic_sampler import RuntimeDiagnosticSampler
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
 from .windows_host_session import persist_desktop_owner_session
 from .whitebit_public_status import read_whitebit_public_status
+from .live_learning_status import read_whitebit_live_learning_status
 
 ROOT = Path(__file__).resolve().parents[2]
 PRICES = ['100', '101', '103', '102', '100', '100', '101', '103']
@@ -148,6 +149,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         pairing_code,
         desktop_session_sink,
         diagnostic_sampler,
+        whitebit_learning_state_dir,
         **kwargs,
     ):
         self.state_dir = state_dir
@@ -155,6 +157,9 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         if type(diagnostic_sampler) is not RuntimeDiagnosticSampler:
             raise TypeError('diagnostic_sampler must be the canonical runtime sampler')
         self._diagnostic_sampler = diagnostic_sampler
+        if type(whitebit_learning_state_dir) is not type(Path()):
+            raise TypeError('whitebit learning state directory must be an exact path')
+        self._whitebit_learning_state_dir = whitebit_learning_state_dir
         self._pairing_code = pairing_code
         self._pairing_lock = Lock()
         if not callable(desktop_session_sink):
@@ -183,6 +188,9 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                 self._diagnostic_journal,
                 Path(self.state_dir),
                 source_revision=source_revision(),
+                live_learning_status=read_whitebit_live_learning_status(
+                    self._whitebit_learning_state_dir
+                ),
             ),
             '/api/v1/technical-diagnostics': lambda: technical_diagnostic_zip(
                 self._diagnostic_sampler,
@@ -313,6 +321,7 @@ def build_product(
     port=0,
     desktop_session_sink=None,
     whitebit_public_state_dir=None,
+    whitebit_learning_state_dir=None,
 ):
     if port == 0:
         import socket
@@ -331,6 +340,12 @@ def build_product(
             str(data / 'whitebit-public-supervisor'),
         )
     whitebit_public_state = Path(whitebit_public_state_dir).resolve(strict=False)
+    if whitebit_learning_state_dir is None:
+        whitebit_learning_state_dir = os.environ.get(
+            'AUTOTRADE_WHITEBIT_LEARNING_STATE_DIR',
+            str(data / 'whitebit-live-zero-learning'),
+        )
+    whitebit_learning_state = Path(whitebit_learning_state_dir).resolve(strict=False)
     origin = f'http://127.0.0.1:{port}'
     pairing = secrets.token_urlsafe(32)
     vault = ProtectedCredentialVault(data / 'credentials.json',
@@ -384,7 +399,10 @@ def build_product(
             'strategy': {'strategy': 'moving-average-2-3-long-only-target-2',
                 'decisions': [{k: v for k, v in e.items() if k != 'provider_state'} for e in completed[-100:]],
                 'agent_decisions': [e['payload'] for e in store.load_events_by_aggregate_type('simulation_agent_decision')[-100:]],
-                'economic_edge_status': 'INCONCLUSIVE'},
+                'economic_edge_status': 'INCONCLUSIVE',
+                'whitebit_learning': read_whitebit_live_learning_status(
+                    whitebit_learning_state
+                )},
             'jobs': [{'kind': 'provider-free-research', 'result': e['payload']} for e in research] + [{'kind': 'provider-free-lifecycle', 'result': e['payload']} for e in receipts[-20:]],
             'reason_codes': ['SIMULATION_ONLY', 'ECONOMIC_EDGE_UNPROVEN']}
 
@@ -405,6 +423,7 @@ def build_product(
             pairing_code=pairing,
             desktop_session_sink=session_sink,
             diagnostic_sampler=diagnostic_sampler,
+            whitebit_learning_state_dir=whitebit_learning_state,
         ))
     runtime.bind_terminal_finalizer(diagnostic_sampler.stop)
     try:

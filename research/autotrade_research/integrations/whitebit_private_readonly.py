@@ -68,15 +68,19 @@ def _reject_json_constant(_value: str) -> object:
     raise ValueError("non-finite JSON constant")
 
 
-def _decode_json_object(raw: bytes, *, error_code: str) -> dict[str, object]:
+def _decode_json_value(raw: bytes, *, error_code: str) -> object:
     try:
-        decoded = json.loads(
+        return json.loads(
             raw,
             object_pairs_hook=_strict_object,
             parse_constant=_reject_json_constant,
         )
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise PrivateReadError(error_code) from None
+
+
+def _decode_json_object(raw: bytes, *, error_code: str) -> dict[str, object]:
+    decoded = _decode_json_value(raw, error_code=error_code)
     if type(decoded) is not dict:
         raise PrivateReadError(error_code)
     return decoded
@@ -318,11 +322,21 @@ class WhitebitPrivateReader:
                 raise PrivateReadError("WHITEBIT_READ_EMPTY_RESPONSE")
             if len(response.body) > MAX_RESPONSE_BYTES:
                 raise PrivateReadError("WHITEBIT_READ_RESPONSE_TOO_LARGE")
-            decoded = _decode_json_object(
+            decoded = _decode_json_value(
                 response.body, error_code="WHITEBIT_READ_JSON_INVALID"
             )
-            if "code" in decoded and "message" in decoded:
+            if type(decoded) is dict and "code" in decoded and "message" in decoded:
                 raise PrivateReadError("WHITEBIT_READ_REMOTE_REJECTED")
+            if path == MAIN_BALANCE_PATH:
+                # WhiteBIT returns a JSON array for the main-account balance,
+                # including [] for a valid empty account.  Keep the boundary
+                # strict by accepting only object entries in that array.
+                if type(decoded) is not list or any(
+                    type(item) is not dict for item in decoded
+                ):
+                    raise PrivateReadError("WHITEBIT_READ_JSON_INVALID")
+            elif type(decoded) is not dict:
+                raise PrivateReadError("WHITEBIT_READ_JSON_INVALID")
             return PrivateReadObservation(
                 datetime.now(timezone.utc),
                 sha256(response.body).hexdigest(),

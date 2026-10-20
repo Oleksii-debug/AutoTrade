@@ -5,7 +5,9 @@ from pathlib import Path
 from time import perf_counter
 import json
 
-from research.autotrade_research.strategies.fast_screen import Costs, QuickReject, digest, screen
+from research.autotrade_research.strategies.fast_screen import (
+    CostHurdle, Costs, QuickReject, digest, screen,
+)
 from tools.train_historical_agent import save_model
 from tools.historical_public_klines import _reject_symlink_ancestors
 
@@ -40,6 +42,8 @@ def main(argv=None):
     parser.add_argument("--from-month", default="2024-01")
     parser.add_argument("--through-month", default="2024-03")
     parser.add_argument("--train-count", required=True, type=int)
+    parser.add_argument("--development-count", type=int)
+    parser.add_argument("--min-development-cycles", type=int, default=5)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--synthetic-bars", type=int, default=0,
                         help="explicit deterministic benchmark only; no market evidence")
@@ -51,6 +55,11 @@ def main(argv=None):
                   "min_direction_agreement", "min_quote_volume"):
         parser.add_argument("--quick-reject-" + field.replace("_", "-"),
                             default=getattr(QuickReject(), field))
+    parser.add_argument("--cost-hurdle-lookback", type=int,
+                        default=CostHurdle().lookback)
+    for field in ("cost_multiplier", "cushion_bps"):
+        parser.add_argument("--cost-hurdle-" + field.replace("_", "-"),
+                            default=getattr(CostHurdle(), field))
     args = parser.parse_args(argv)
     started = perf_counter()
     if args.synthetic_bars:
@@ -84,9 +93,14 @@ def main(argv=None):
     quick_reject = QuickReject(**{
         field: getattr(args, "quick_reject_" + field) for field in QuickReject.__dataclass_fields__
     })
+    cost_hurdle = CostHurdle(**{
+        field: getattr(args, "cost_hurdle_" + field) for field in CostHurdle.__dataclass_fields__
+    })
     output = Path(args.output_dir)
     result = screen(bars, train_count=args.train_count, dataset_sha256=dataset_sha,
-                    costs=costs, quick_reject=quick_reject,
+                    costs=costs, quick_reject=quick_reject, cost_hurdle=cost_hurdle,
+                    development_count=args.development_count,
+                    min_development_cycles=args.min_development_cycles,
                     checkpoint=stage_checkpoint(output / "stages"))
     artifact = dict(source=source, result=result)
     target = output / (result["config_sha256"] + ".json")

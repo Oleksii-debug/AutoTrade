@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Any
 
 from research.autotrade_research.artifacts import trusted_authenticated_reader
@@ -62,6 +63,10 @@ class WindowsUpdateTrustContext:
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_MAX_WINDOWS_UPDATE_PAYLOAD_BYTES = 8 * 1024 * 1024 * 1024
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(
+    stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+)
 
 _INSTALL_STEPS = (
     "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
@@ -618,6 +623,7 @@ class WindowsUpdateCheckpoint:
     update_completed_steps: tuple[str, ...] = ()
     rollback_started: bool = False
     rollback_completed_steps: tuple[str, ...] = ()
+    verified_candidate_package_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -638,10 +644,65 @@ class WindowsUpdateCheckpoint:
             if len(set(normalized)) != len(normalized):
                 raise WindowsUpdateError(f"{field_name} contains duplicate steps")
             object.__setattr__(self, field_name, normalized)
+        verified_package = self.verified_candidate_package_sha256
+        verification_completed = _INSTALL_STEPS[0] in self.update_completed_steps
+        if verification_completed:
+            if verified_package is None:
+                raise WindowsUpdateError(
+                    "completed candidate verification requires its package digest"
+                )
+            object.__setattr__(
+                self,
+                "verified_candidate_package_sha256",
+                _sha256(
+                    verified_package,
+                    name="verified_candidate_package_sha256",
+                ),
+            )
+        elif verified_package is not None:
+            raise WindowsUpdateError(
+                "candidate package digest cannot precede candidate verification"
+            )
         if not self.rollback_started and self.rollback_completed_steps:
             raise WindowsUpdateError(
                 "rollback steps cannot exist before rollback starts"
             )
+
+
+@dataclass(frozen=True)
+class VerifiedWindowsUpdatePayload:
+    """Exact local candidate bytes observed through one stable file handle."""
+
+    plan_sha256: str
+    candidate_manifest_sha256: str
+    candidate_package_sha256: str
+    byte_length: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "plan_sha256", _sha256(self.plan_sha256, name="plan_sha256")
+        )
+        object.__setattr__(
+            self,
+            "candidate_manifest_sha256",
+            _sha256(
+                self.candidate_manifest_sha256,
+                name="candidate_manifest_sha256",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "candidate_package_sha256",
+            _sha256(
+                self.candidate_package_sha256,
+                name="candidate_package_sha256",
+            ),
+        )
+        if (
+            type(self.byte_length) is not int
+            or not 0 < self.byte_length <= _MAX_WINDOWS_UPDATE_PAYLOAD_BYTES
+        ):
+            raise WindowsUpdateError("candidate payload byte_length is invalid")
 
 
 def _validated_plan_release(
@@ -926,6 +987,116 @@ def _plan_document(
     return document
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def verify_windows_update_payload(
+    plan: WindowsUpdatePlan,
+    *,
+    trust: WindowsUpdateTrustContext,
+    payload_path: Path,
+) -> VerifiedWindowsUpdatePayload:
+    """Hash the downloaded candidate from one stable, unaliased file snapshot.
+
+    The candidate manifest is reverified first. The payload path and every
+    ancestor must be direct (no symlink, junction or other reparse traversal),
+    and the target must remain the same single-link regular file for the whole
+    streaming hash. A caller must run this at the verification checkpoint and
+    again immediately before the install side effect; metadata alone is never
+    accepted as evidence that candidate bytes were downloaded intact.
+    """
+
+    document = _plan_document(plan, trust=trust)
+    if type(payload_path) is not type(Path()) or not payload_path.is_absolute():
+        raise WindowsUpdateError(
+            "candidate payload path must be an exact absolute Path"
+        )
+    try:
+        for ancestor in (payload_path, *payload_path.parents):
+            if _is_reparse_point(ancestor.lstat()):
+                raise WindowsUpdateError(
+                    "candidate payload path crosses a symbolic link or reparse point"
+                )
+        initial = payload_path.lstat()
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or not 0 < initial.st_size <= _MAX_WINDOWS_UPDATE_PAYLOAD_BYTES
+        ):
+            raise WindowsUpdateError(
+                "candidate payload must be one bounded, non-empty regular file"
+            )
+        with payload_path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (initial.st_dev, initial.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                raise WindowsUpdateError("candidate payload file identity changed")
+            digest = sha256()
+            observed_size = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                observed_size += len(chunk)
+                if observed_size > _MAX_WINDOWS_UPDATE_PAYLOAD_BYTES:
+                    raise WindowsUpdateError("candidate payload exceeds size limit")
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
+        current = payload_path.lstat()
+    except WindowsUpdateError:
+        raise
+    except OSError as error:
+        raise WindowsUpdateError("candidate payload cannot be read safely") from error
+
+    def identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+
+    if (
+        identity(initial) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+        or observed_size != initial.st_size
+        or _is_reparse_point(current)
+    ):
+        raise WindowsUpdateError(
+            "candidate payload bytes or identity changed during verification"
+        )
+
+    candidate = document.get("candidate_release")
+    if not isinstance(candidate, dict):
+        raise WindowsUpdateError("candidate release metadata is invalid")
+    expected_package = _sha256(
+        candidate.get("windows_package_sha256"),
+        name="candidate windows_package_sha256",
+    )
+    observed_package = "sha256:" + digest.hexdigest()
+    if observed_package != expected_package:
+        raise WindowsUpdateError(
+            "candidate payload digest does not match the frozen release"
+        )
+    assert plan.plan_sha256 is not None
+    return VerifiedWindowsUpdatePayload(
+        plan_sha256=plan.plan_sha256,
+        candidate_manifest_sha256=_sha256(
+            candidate.get("manifest_sha256"),
+            name="candidate manifest_sha256",
+        ),
+        candidate_package_sha256=observed_package,
+        byte_length=observed_size,
+    )
+
+
 def _step_sequence(document: dict[str, Any], *, rollback: bool) -> tuple[str, ...]:
     raw = (
         document.get("rollback", {}).get("steps")
@@ -965,12 +1136,32 @@ def _validate_prefix(
         raise WindowsUpdateError(f"{name} is not a valid ordered plan prefix")
 
 
+def _validate_checkpoint_payload_binding(
+    document: dict[str, Any],
+    checkpoint: WindowsUpdateCheckpoint,
+) -> None:
+    if checkpoint.verified_candidate_package_sha256 is None:
+        return
+    candidate = document.get("candidate_release")
+    if not isinstance(candidate, dict):
+        raise WindowsUpdateError("candidate release metadata is invalid")
+    expected = _sha256(
+        candidate.get("windows_package_sha256"),
+        name="candidate windows_package_sha256",
+    )
+    if checkpoint.verified_candidate_package_sha256 != expected:
+        raise WindowsUpdateError(
+            "checkpoint candidate package digest differs from the frozen release"
+        )
+
+
 def advance_update_checkpoint(
     plan: WindowsUpdatePlan,
     checkpoint: WindowsUpdateCheckpoint,
     step: str,
     *,
     trust: WindowsUpdateTrustContext,
+    payload_path: Path | None = None,
 ) -> WindowsUpdateCheckpoint:
     document = _plan_document(plan, trust=trust)
     if not isinstance(checkpoint, WindowsUpdateCheckpoint):
@@ -985,6 +1176,7 @@ def advance_update_checkpoint(
         expected,
         name="update checkpoint",
     )
+    _validate_checkpoint_payload_binding(document, checkpoint)
     normalized = _text(step, name="step").upper()
     if normalized in checkpoint.update_completed_steps:
         return checkpoint
@@ -995,11 +1187,27 @@ def advance_update_checkpoint(
         raise WindowsUpdateError(
             f"out-of-order update step: expected {expected[index]}"
         )
+    verified_digest = checkpoint.verified_candidate_package_sha256
+    if normalized in {
+        "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+        "INSTALL_CANDIDATE_SIDE_BY_SIDE",
+    }:
+        if payload_path is None:
+            raise WindowsUpdateError(
+                f"{normalized} requires the exact local candidate payload"
+            )
+        verified = verify_windows_update_payload(
+            plan,
+            trust=trust,
+            payload_path=payload_path,
+        )
+        verified_digest = verified.candidate_package_sha256
     return WindowsUpdateCheckpoint(
         plan_sha256=checkpoint.plan_sha256,
         update_completed_steps=checkpoint.update_completed_steps + (normalized,),
         rollback_started=False,
         rollback_completed_steps=(),
+        verified_candidate_package_sha256=verified_digest,
     )
 
 
@@ -1020,6 +1228,7 @@ def start_rollback_checkpoint(
         expected_update,
         name="update checkpoint",
     )
+    _validate_checkpoint_payload_binding(document, checkpoint)
     expected_rollback = _step_sequence(document, rollback=True)
     _validate_prefix(
         checkpoint.rollback_completed_steps,
@@ -1033,6 +1242,9 @@ def start_rollback_checkpoint(
         update_completed_steps=checkpoint.update_completed_steps,
         rollback_started=True,
         rollback_completed_steps=(),
+        verified_candidate_package_sha256=(
+            checkpoint.verified_candidate_package_sha256
+        ),
     )
 
 
@@ -1057,6 +1269,7 @@ def advance_rollback_checkpoint(
         expected_update,
         name="update checkpoint",
     )
+    _validate_checkpoint_payload_binding(document, checkpoint)
     _validate_prefix(
         checkpoint.rollback_completed_steps,
         expected_rollback,
@@ -1077,6 +1290,9 @@ def advance_rollback_checkpoint(
         update_completed_steps=checkpoint.update_completed_steps,
         rollback_started=True,
         rollback_completed_steps=checkpoint.rollback_completed_steps + (normalized,),
+        verified_candidate_package_sha256=(
+            checkpoint.verified_candidate_package_sha256
+        ),
     )
 
 
@@ -1087,11 +1303,14 @@ def serialize_update_checkpoint(checkpoint: WindowsUpdateCheckpoint) -> str:
     if not isinstance(checkpoint, WindowsUpdateCheckpoint):
         raise TypeError("checkpoint must be WindowsUpdateCheckpoint")
     body = {
-        "schema_version": 1,
+        "schema_version": 2,
         "plan_sha256": checkpoint.plan_sha256,
         "update_completed_steps": list(checkpoint.update_completed_steps),
         "rollback_started": checkpoint.rollback_started,
         "rollback_completed_steps": list(checkpoint.rollback_completed_steps),
+        "verified_candidate_package_sha256": (
+            checkpoint.verified_candidate_package_sha256
+        ),
     }
     return json.dumps(
         body,
@@ -1123,9 +1342,10 @@ def restore_update_checkpoint(
         "update_completed_steps",
         "rollback_started",
         "rollback_completed_steps",
+        "verified_candidate_package_sha256",
     }:
         raise WindowsUpdateError("serialized checkpoint structure is invalid")
-    if body["schema_version"] != 1:
+    if body["schema_version"] != 2:
         raise WindowsUpdateError("unsupported checkpoint schema version")
     update_steps = body["update_completed_steps"]
     rollback_steps = body["rollback_completed_steps"]
@@ -1137,6 +1357,9 @@ def restore_update_checkpoint(
             update_completed_steps=tuple(update_steps),
             rollback_started=body["rollback_started"],
             rollback_completed_steps=tuple(rollback_steps),
+            verified_candidate_package_sha256=body[
+                "verified_candidate_package_sha256"
+            ],
         )
     except (TypeError, ValueError, WindowsUpdateError) as error:
         raise WindowsUpdateError("serialized checkpoint fields are invalid") from error
@@ -1155,6 +1378,7 @@ def restore_update_checkpoint(
         expected_rollback,
         name="rollback checkpoint",
     )
+    _validate_checkpoint_payload_binding(document, checkpoint)
     if not checkpoint.rollback_started and checkpoint.rollback_completed_steps:
         raise WindowsUpdateError(
             "rollback steps cannot exist before rollback starts"
@@ -1229,6 +1453,7 @@ def assess_windows_update_restart(
         expected_rollback,
         name="rollback checkpoint",
     )
+    _validate_checkpoint_payload_binding(document, checkpoint)
 
     observed_package = _sha256(
         observed_windows_package_sha256,
@@ -1379,6 +1604,7 @@ def prepare_windows_update_step_intent(
         else checkpoint.update_completed_steps
     )
     _validate_prefix(completed, steps, name="intent checkpoint")
+    _validate_checkpoint_payload_binding(document, checkpoint)
     if len(completed) >= len(steps):
         raise WindowsUpdateError("no uncompleted canonical update step")
     return WindowsUpdateStepIntent(

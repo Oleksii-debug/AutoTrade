@@ -42,6 +42,7 @@ from mvp.autotrade_mvp.windows_update import (
     serialize_update_checkpoint,
     start_rollback_checkpoint,
     start_update_checkpoint,
+    verify_windows_update_payload,
 )
 
 
@@ -91,6 +92,21 @@ _RSA_D = int(
 _DER_SHA256 = bytes.fromhex("3031300d060960864801650304020105000420")
 
 
+def release_artifact_bytes(
+    release_id: str,
+    source_sha: str,
+    digest_seed: int,
+    role: str,
+) -> bytes:
+    index = REQUIRED_ROLES.index(role)
+    digest_char = hex((digest_seed + index) % 16)[2:]
+    identity = (
+        f"autotrade-windows-update-test:{release_id}:"
+        f"{source_sha}:{role}:{digest_char}"
+    )
+    return ("release-evidence:" + identity).encode("utf-8")
+
+
 def _trust_root():
     return TrustRoot(
         producer_id="qualifier.release.service",
@@ -134,7 +150,7 @@ def frozen_release(
             f"{source_sha}:{role}:{digest_char}"
         )
         artifact_id = str(uuid5(NAMESPACE_URL, identity))
-        data = ("release-evidence:" + identity).encode("utf-8")
+        data = release_artifact_bytes(release_id, source_sha, digest_seed, role)
         signature_status = (
             "VERIFIED"
             if role in {"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"}
@@ -314,6 +330,17 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             CANDIDATE_SOURCE,
             5,
         )
+        self.candidate_payload_path = (
+            Path(self._tempdir.name) / "candidate-update.zip"
+        )
+        self.candidate_payload_path.write_bytes(
+            release_artifact_bytes(
+                "autotrade-1.1.0",
+                CANDIDATE_SOURCE,
+                5,
+                "WINDOWS_PACKAGE",
+            )
+        )
         self.backup = BackupEvidence(
             manifest_sha256="sha256:" + "c" * 64,
             source_sha=CURRENT_SOURCE,
@@ -473,6 +500,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 checkpoint,
                 step,
                 trust=self.trust,
+                payload_path=self.candidate_payload_path,
             )
 
         with self.assertRaisesRegex(
@@ -532,6 +560,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 checkpoint,
                 step,
                 trust=self.trust,
+                payload_path=self.candidate_payload_path,
             )
         with self.assertRaisesRegex(
             WindowsUpdateError,
@@ -854,6 +883,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             checkpoint,
             expected_prefix[0],
             trust=self.trust,
+            payload_path=self.candidate_payload_path,
         )
         replay = advance_update_checkpoint(
             plan,
@@ -868,8 +898,149 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 checkpoint,
                 step,
                 trust=self.trust,
+                payload_path=self.candidate_payload_path,
             )
         self.assertEqual(checkpoint.update_completed_steps, expected_prefix)
+
+    def test_candidate_payload_bytes_are_bound_to_checkpoint_v2(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        verified = verify_windows_update_payload(
+            plan,
+            trust=self.trust,
+            payload_path=self.candidate_payload_path,
+        )
+        expected_digest = "sha256:" + sha256(
+            self.candidate_payload_path.read_bytes()
+        ).hexdigest()
+        self.assertEqual(verified.candidate_package_sha256, expected_digest)
+
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "requires the exact local candidate payload",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+                trust=self.trust,
+            )
+        checkpoint = advance_update_checkpoint(
+            plan,
+            checkpoint,
+            "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+            trust=self.trust,
+            payload_path=self.candidate_payload_path,
+        )
+        serialized = json.loads(serialize_update_checkpoint(checkpoint))
+        self.assertEqual(serialized["schema_version"], 2)
+        self.assertEqual(
+            serialized["verified_candidate_package_sha256"],
+            expected_digest,
+        )
+        forged = dict(serialized)
+        forged["verified_candidate_package_sha256"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "differs from the frozen release",
+        ):
+            restore_update_checkpoint(
+                plan,
+                json.dumps(forged, sort_keys=True, separators=(",", ":")),
+                trust=self.trust,
+            )
+        legacy = dict(serialized)
+        legacy["schema_version"] = 1
+        with self.assertRaisesRegex(WindowsUpdateError, "unsupported"):
+            restore_update_checkpoint(
+                plan,
+                json.dumps(legacy, sort_keys=True, separators=(",", ":")),
+                trust=self.trust,
+            )
+
+    def test_tampered_or_hardlinked_candidate_payload_fails_closed(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        self.candidate_payload_path.write_bytes(b"tampered download")
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "digest does not match the frozen release",
+        ):
+            verify_windows_update_payload(
+                plan,
+                trust=self.trust,
+                payload_path=self.candidate_payload_path,
+            )
+
+        self.candidate_payload_path.write_bytes(
+            release_artifact_bytes(
+                "autotrade-1.1.0",
+                CANDIDATE_SOURCE,
+                5,
+                "WINDOWS_PACKAGE",
+            )
+        )
+        alias = Path(self._tempdir.name) / "candidate-alias.zip"
+        try:
+            alias.hardlink_to(self.candidate_payload_path)
+        except OSError:
+            self.skipTest("hard links are unavailable")
+        with self.assertRaisesRegex(WindowsUpdateError, "non-empty regular file"):
+            verify_windows_update_payload(
+                plan,
+                trust=self.trust,
+                payload_path=self.candidate_payload_path,
+            )
+
+    def test_install_boundary_rehashes_candidate_after_initial_verification(self):
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        for step in (
+            "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
+            "QUIESCE_NEW_ADMISSIONS",
+            "SURFACE_AND_RECONCILE_IN_FLIGHT_PROVIDER_SENDS",
+            "VERIFY_PRE_UPDATE_BACKUP",
+            "STOP_AND_FENCE_FINANCIAL_SENDER",
+        ):
+            checkpoint = advance_update_checkpoint(
+                plan,
+                checkpoint,
+                step,
+                trust=self.trust,
+                payload_path=self.candidate_payload_path,
+            )
+        self.candidate_payload_path.write_bytes(b"changed after verification")
+        with self.assertRaisesRegex(
+            WindowsUpdateError,
+            "digest does not match the frozen release",
+        ):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "INSTALL_CANDIDATE_SIDE_BY_SIDE",
+                trust=self.trust,
+                payload_path=self.candidate_payload_path,
+            )
 
     def test_restart_checkpoint_rejects_nonprefix_history(self):
         plan = build_windows_update_plan(
@@ -911,6 +1082,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 checkpoint,
                 step,
                 trust=self.trust,
+                payload_path=self.candidate_payload_path,
             )
         checkpoint = start_rollback_checkpoint(
             plan,
@@ -1047,6 +1219,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 checkpoint,
                 step,
                 trust=self.trust,
+                payload_path=self.candidate_payload_path,
             )
         serialized = serialize_update_checkpoint(checkpoint)
         restored = restore_update_checkpoint(

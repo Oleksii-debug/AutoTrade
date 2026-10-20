@@ -12,8 +12,11 @@ from .deterministic import (
 )
 
 EVIDENCE = "ZERO_RESEARCH_SCREENING_ONLY_APPROXIMATE_EXECUTION"
-VERSION = "fast-historical-screen-v2-entry-gate-matrix"
-CANDIDATES = ("CASH", "MOMENTUM", "MEAN_REVERSION", "MOMENTUM_QUICK_REJECT")
+VERSION = "fast-historical-screen-v3-cost-hurdle-three-way"
+CANDIDATES = (
+    "CASH", "MOMENTUM", "MEAN_REVERSION", "MOMENTUM_QUICK_REJECT",
+    "MOMENTUM_COST_HURDLE",
+)
 
 
 def digest(value):
@@ -83,6 +86,25 @@ class QuickReject:
             raise ValueError("quick-reject quote-volume floor outside [0,1e18]")
 
 
+@dataclass(frozen=True)
+class CostHurdle:
+    """Causal entry gate requiring trailing drift to clear explicit friction."""
+
+    lookback: int = 24
+    cost_multiplier: str = "1"
+    cushion_bps: str = "5"
+
+    def validate(self):
+        if type(self.lookback) is not int or not 3 <= self.lookback <= 1000:
+            raise ValueError("cost-hurdle lookback outside 3..1000")
+        multiplier = decimal(self.cost_multiplier)
+        if not Decimal("1") <= multiplier <= Decimal("10"):
+            raise ValueError("cost-hurdle multiplier outside [1,10]")
+        cushion = decimal(self.cushion_bps)
+        if not 0 <= cushion <= 1000:
+            raise ValueError("cost-hurdle cushion outside [0,1000] bps")
+
+
 def validate_bars(bars, *, require_ohlcv=False):
     if len(bars) < 4:
         raise ValueError("at least four chronological bars required")
@@ -134,7 +156,31 @@ def _quick_reject(window, configuration):
     return tuple(reasons)
 
 
-def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False):
+def _round_trip_hurdle(costs, configuration):
+    fee = decimal(costs.fee_bps) / 10000
+    adverse = (decimal(costs.spread_bps) / 2 + decimal(costs.slippage_bps)) / 10000
+    # Exact underlying-price appreciation required to recover both adverse
+    # prices and both fees under the same conservative execution model.
+    friction = ((1 + adverse) * (1 + fee)) / ((1 - adverse) * (1 - fee)) - 1
+    return (friction * decimal(configuration.cost_multiplier)
+            + decimal(configuration.cushion_bps) / 10000)
+
+
+def _cost_hurdle_reject(window, costs, configuration):
+    """Use only completed close-to-close returns available at decision time."""
+    if len(window) < configuration.lookback:
+        return ("INSUFFICIENT_COST_HISTORY",), None
+    closes = [decimal(bar["close"]) for bar in window]
+    returns = [(current - previous) / previous
+               for previous, current in zip(closes, closes[1:])]
+    estimated_edge = sum(returns, Decimal(0)) / len(returns)
+    if estimated_edge <= _round_trip_hurdle(costs, configuration):
+        return ("ESTIMATED_EDGE_BELOW_COST_HURDLE",), estimated_edge
+    return (), estimated_edge
+
+
+def simulate(bars, *, candidate, costs, quick_reject=QuickReject(),
+             cost_hurdle=CostHurdle(), trace=False):
     """Signal at bar close; execute only at the following open.
 
     One long position, no borrowing or shorting. Partition-end liquidation is
@@ -143,10 +189,12 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False)
     """
     costs.validate()
     quick_reject.validate()
+    cost_hurdle.validate()
     if candidate not in CANDIDATES:
         raise ValueError("unknown screening candidate")
-    gated = candidate == "MOMENTUM_QUICK_REJECT"
-    validate_bars(bars, require_ohlcv=gated)
+    quick_gated = candidate == "MOMENTUM_QUICK_REJECT"
+    cost_gated = candidate == "MOMENTUM_COST_HURDLE"
+    validate_bars(bars, require_ohlcv=quick_gated)
     with localcontext() as context:
         context.prec = 50
         cash = decimal(costs.initial_cash)
@@ -158,6 +206,7 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False)
         pending = "HOLD"
         window = deque(maxlen=costs.lookback)
         gate_window = deque(maxlen=quick_reject.lookback)
+        cost_window = deque(maxlen=cost_hurdle.lookback)
         fills = []
         count = cycles = entry_signals = entry_rejections = 0
         rejection_reasons = {}
@@ -208,8 +257,10 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False)
             if candidate != "CASH":
                 window.append(CausalObservation.create(event_id=str(index), symbol="SCREEN",
                     available_at=bar["closed_at"], price=close))
-                if gated:
+                if quick_gated:
                     gate_window.append(bar)
+                if cost_gated:
+                    cost_window.append(bar)
                 if len(window) == costs.lookback:
                     family = (MeanReversionThresholdBaseline if candidate == "MEAN_REVERSION"
                               else ReturnThresholdBaseline)
@@ -219,13 +270,17 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False)
                     # gate decisions or rejections.
                     if pending == "BUY" and quantity == 0:
                         entry_signals += 1
-                        if gated:
+                        reasons = ()
+                        if quick_gated:
                             reasons = _quick_reject(gate_window, quick_reject)
-                            if reasons:
-                                entry_rejections += 1
-                                pending = "HOLD"
-                                for reason in reasons:
-                                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                        elif cost_gated:
+                            reasons, _ = _cost_hurdle_reject(
+                                cost_window, costs, cost_hurdle)
+                        if reasons:
+                            entry_rejections += 1
+                            pending = "HOLD"
+                            for reason in reasons:
+                                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
         execute("SELL", decimal(bars[-1]["close"]), bars[-1]["closed_at"], "PRECOMMITTED_PARTITION_END")
         mark(decimal(bars[-1]["close"]))
         result = dict(candidate=candidate, observations=len(bars), final_cash=str(cash),
@@ -234,6 +289,8 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False)
             closed_cycles=cycles, execution_digest=evidence.hexdigest(),
             entry_signals=entry_signals, entry_rejections=entry_rejections,
             entry_rejection_reasons=dict(sorted(rejection_reasons.items())),
+            round_trip_cost_hurdle_fraction=(str(_round_trip_hurdle(costs, cost_hurdle))
+                if cost_gated else None),
             first_open=bars[0]["opened_at"].isoformat(), last_close=bars[-1]["closed_at"].isoformat())
         if trace:
             result["trace"] = fills
@@ -241,17 +298,26 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(), trace=False)
 
 
 def screen(bars, *, train_count, dataset_sha256, costs=Costs(),
-           quick_reject=QuickReject(), checkpoint=None):
-    """Freeze selection from TRAIN only, then evaluate on the later partition.
+           quick_reject=QuickReject(), cost_hurdle=CostHurdle(),
+           development_count=None, min_development_cycles=5, checkpoint=None):
+    """Freeze on TRAIN, quick-reject on DEVELOPMENT, then touch FINAL once.
 
     checkpoint(key, producer) may persist completed stages and reuse them after
     restart. This never resumes an unfinished stage or supplies ledger evidence.
+    Omitting development_count retains the legacy two-way screening path.
     """
     validate_bars(bars, require_ohlcv=True)
     costs.validate()
     quick_reject.validate()
+    cost_hurdle.validate()
+    if type(min_development_cycles) is not int or not 1 <= min_development_cycles <= 10000:
+        raise ValueError("minimum development cycles outside 1..10000")
     if type(train_count) is not int or not 4 <= train_count <= len(bars)-4:
         raise ValueError("TRAIN and later evaluation must each contain four bars")
+    if development_count is not None:
+        if (type(development_count) is not int or development_count < 4
+                or train_count + development_count > len(bars)-4):
+            raise ValueError("DEVELOPMENT and final holdout must each contain four bars")
     if (type(dataset_sha256) is not str or len(dataset_sha256) != 64
             or any(c not in "0123456789abcdef" for c in dataset_sha256)):
         raise ValueError("dataset identity must be a SHA-256")
@@ -262,21 +328,77 @@ def screen(bars, *, train_count, dataset_sha256, costs=Costs(),
                                      ("open", "high", "low", "close", "volume")]]).encode())
     config = dict(version=VERSION, costs=asdict(costs), candidates=CANDIDATES,
                   quick_reject=asdict(quick_reject),
+                  cost_hurdle=asdict(cost_hurdle),
                   train_count=train_count, observations=len(bars), dataset_sha256=dataset_sha256,
+                  development_count=development_count,
+                  final_holdout_count=(len(bars) - train_count - development_count
+                                       if development_count is not None else None),
+                  min_development_cycles=min_development_cycles,
                   consumed_bars_sha256=content.hexdigest(),
-                  end_policy="FORCED_CLOSE_BOTH_PARTITIONS",
-                  evaluation_policy="FRESH_CASH_COLD_SIGNALS_ALL_CANDIDATES_TRAIN_SELECTION_ONLY")
+                  end_policy="FORCED_CLOSE_EACH_CONSUMED_PARTITION",
+                  evaluation_policy=("TRAIN_SELECT_DEVELOPMENT_QUICK_REJECT_FINAL_UNTOUCHED_UNTIL_PASS"
+                      if development_count is not None else
+                      "FRESH_CASH_COLD_SIGNALS_ALL_CANDIDATES_TRAIN_SELECTION_ONLY"))
     config_sha = digest(config)
     run = checkpoint or (lambda key, producer: producer())
     training = [run(f"{config_sha}-train-{name}", lambda name=name:
                    simulate(bars[:train_count], candidate=name, costs=costs,
-                            quick_reject=quick_reject)) for name in CANDIDATES]
+                            quick_reject=quick_reject, cost_hurdle=cost_hurdle))
+                for name in CANDIDATES]
     # Prefer the cash control on equal PnL; never mine evaluation to choose.
     selected = max(training, key=lambda row: (Decimal(row["net_pnl"]),
                    Decimal(row["max_drawdown_fraction"]).copy_negate(), -CANDIDATES.index(row["candidate"])))
+    if development_count is not None:
+        development_bars = bars[train_count:train_count + development_count]
+        development_candidates = tuple(dict.fromkeys(("CASH", selected["candidate"])))
+        development = [run(f"{config_sha}-development-{name}", lambda name=name:
+                       simulate(development_bars, candidate=name, costs=costs,
+                                quick_reject=quick_reject, cost_hurdle=cost_hurdle))
+                       for name in development_candidates]
+        selected_development = next(row for row in development
+                                    if row["candidate"] == selected["candidate"])
+        cash_development = next(row for row in development if row["candidate"] == "CASH")
+        rejection_reasons = []
+        if selected["candidate"] == "CASH":
+            rejection_reasons.append("TRAIN_SELECTED_CASH_CONTROL")
+        else:
+            if selected_development["closed_cycles"] < min_development_cycles:
+                rejection_reasons.append("MINIMUM_DEVELOPMENT_CYCLES_NOT_MET")
+            if Decimal(selected_development["net_pnl"]) <= Decimal(cash_development["net_pnl"]):
+                rejection_reasons.append("DEVELOPMENT_DID_NOT_BEAT_CASH")
+        if rejection_reasons:
+            evaluation_matrix = []
+            evaluation = None
+            final_selected = "CASH"
+            holdout_consumed = False
+        else:
+            final_selected = selected["candidate"]
+            final_bars = bars[train_count + development_count:]
+            final_candidates = tuple(dict.fromkeys(("CASH", final_selected)))
+            evaluation_matrix = [run(f"{config_sha}-final-{name}", lambda name=name:
+                                 simulate(final_bars, candidate=name, costs=costs,
+                                          quick_reject=quick_reject,
+                                          cost_hurdle=cost_hurdle))
+                                 for name in final_candidates]
+            evaluation = next(row for row in evaluation_matrix
+                              if row["candidate"] == final_selected)
+            holdout_consumed = True
+        result = dict(schema=VERSION, evidence_class=EVIDENCE, config=config,
+            config_sha256=config_sha, training=training,
+            training_selected_candidate=selected["candidate"], development=development,
+            development_rejection_reasons=rejection_reasons,
+            selected_candidate=final_selected, evaluation=evaluation,
+            evaluation_matrix=evaluation_matrix, holdout_consumed=holdout_consumed,
+            network_orders=False, paid_model_calls=0, canonical_qualification=False,
+            limitations=["NO_INTRABAR_DRAWDOWN", "NO_CAPACITY_OR_QUEUE_MODEL",
+                         "NO_EXCHANGE_LOT_RULES", "RETROSPECTIVE_BAR_AVAILABILITY",
+                         "CACHED_PERIODS_USED_BY_PRIOR_UNRELATED_RESEARCH",
+                         "CANONICAL_FINALIST_VALIDATION_REQUIRED"])
+        return {**result, "result_sha256": digest(result)}
     evaluation_matrix = [run(f"{config_sha}-eval-{name}", lambda name=name:
                          simulate(bars[train_count:], candidate=name, costs=costs,
-                                  quick_reject=quick_reject)) for name in CANDIDATES]
+                                  quick_reject=quick_reject,
+                                  cost_hurdle=cost_hurdle)) for name in CANDIDATES]
     evaluation = next(row for row in evaluation_matrix
                       if row["candidate"] == selected["candidate"])
     result = dict(schema=VERSION, evidence_class=EVIDENCE, config=config, config_sha256=config_sha,

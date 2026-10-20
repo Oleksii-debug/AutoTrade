@@ -33,7 +33,7 @@ _EVIDENCE_AUTHORITIES = WeakKeyDictionary()
 # Automatic lease retry is code-reviewed capability, never caller authority.
 # Callers may disable retry for a safe kind, but cannot promote an arbitrary
 # research/external job into the retry-safe class.
-_REQUEUEABLE_JOB_KINDS = frozenset({"research.replay"})
+_REQUEUEABLE_JOB_KINDS = frozenset({'research.alpha', 'research.replay'})
 ALLOWED_STATES = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "PAUSED", *FINAL_STATES}
 
 
@@ -613,8 +613,10 @@ class ResearchJobStore:
         *,
         now: datetime | None = None,
         lease_seconds: int = 60,
+        job_id: str | None = None,
     ) -> dict[str, Any] | None:
         worker = _require_text(worker_id, "worker_id")
+        selected = None if job_id is None else str(UUID(_require_text(job_id, "job_id")))
         if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
             raise ValueError("lease_seconds must be a positive integer")
         current = _utc(now or datetime.now(timezone.utc))
@@ -625,10 +627,11 @@ class ResearchJobStore:
             row = connection.execute(
                 """
                 SELECT * FROM jobs
-                WHERE state = 'QUEUED'
+                WHERE state = 'QUEUED' AND (? IS NULL OR job_id = ?)
                 ORDER BY created_at, job_id
                 LIMIT 1
-                """
+                """,
+                (selected, selected),
             ).fetchone()
             if row is None:
                 connection.commit()

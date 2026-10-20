@@ -17,6 +17,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 from typing import Any
+from .live_cycle import LiveCycle
 
 
 SCHEMA = "autotrade-whitebit-live-zero-learning-v1"
@@ -122,7 +123,7 @@ def validate_public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(snapshot, sort_keys=True))
 
 
-class WhiteBitLiveZeroLearning:
+class WhiteBitLiveZeroLearning(LiveCycle):
     """One durable authority for observations, episodes and model versions."""
 
     def __init__(
@@ -133,6 +134,14 @@ class WhiteBitLiveZeroLearning:
         fee_bps_per_leg: str = "10",
         slippage_bps_per_leg: str = "5",
         evaluation_every: int = 5,
+        cycle_episodes: int = 20,
+        cycle_seconds: int = 1200,
+        evaluation_episodes: int = 12,
+        max_drawdown_usdt: str = "2",
+        cooldown_seconds: int = 3600,
+        max_trials: int = 3,
+        max_observation_gap_seconds: int = 180,
+        min_evaluation_trades: int = 3,
     ) -> None:
         if type(state_dir) is not type(Path()):
             raise TypeError("state_dir must be an exact Path")
@@ -152,6 +161,9 @@ class WhiteBitLiveZeroLearning:
         if not Decimal("0") <= self.slippage_bps <= Decimal("100"):
             raise ValueError("slippage scenario is outside 0..100 bps")
         self.evaluation_every = evaluation_every
+        self._configure_cycle(cycle_episodes, cycle_seconds, evaluation_episodes,
+                              max_drawdown_usdt, cooldown_seconds, max_trials,
+                              max_observation_gap_seconds, min_evaluation_trades)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database = self.state_dir / "episode-memory.sqlite3"
         self._initialize()
@@ -223,6 +235,7 @@ class WhiteBitLiveZeroLearning:
                     contrarian_correct=0,
                 )
             connection.commit()
+            self._initialize_cycle(connection)
 
     def _insert_model(self, connection: sqlite3.Connection, *, version: int,
                       created_at: str, parameter: str, trained: int,
@@ -273,18 +286,13 @@ class WhiteBitLiveZeroLearning:
         actual = "UP" if exit_mid > entry_mid else "DOWN" if exit_mid < entry_mid else "FLAT"
         correct = decision["prediction"] == actual
         if decision["action"] == "SIMULATED_BUY":
-            entry_ask = _decimal(source["ask"], name="entry_ask", positive=True)
-            with localcontext() as context:
-                context.prec = 42
-                entry = entry_ask * (Decimal("1") + self.slippage_bps / Decimal("10000"))
-                exit_price = exit_bid * (Decimal("1") - self.slippage_bps / Decimal("10000"))
-                quantity = self.notional / entry
-                gross = quantity * (exit_price - entry)
-                fees = self.notional * self.fee_bps / Decimal("10000")
-                fees += quantity * exit_price * self.fee_bps / Decimal("10000")
-                net = gross - fees
+            quantity, gross, fees, net = self._buy_outcome(source["ask"], current["bid_price"])
         else:
             quantity = gross = fees = net = Decimal("0")
+        with localcontext() as context:
+            context.prec = 42
+            spread_cost = quantity * (Decimal(source["ask"]) - entry_mid + exit_mid - exit_bid)
+            slippage_cost = quantity * (Decimal(source["ask"]) + exit_bid) * self.slippage_bps / 10000
         episode_payload = {
             "schema": SCHEMA,
             "decision_id": decision["decision_id"],
@@ -302,6 +310,8 @@ class WhiteBitLiveZeroLearning:
             "virtual_quantity": format(quantity, "f"),
             "gross_outcome_usdt": format(gross, "f"),
             "fees_usdt": format(fees, "f"),
+            "spread_cost_usdt": format(spread_cost, "f"),
+            "slippage_cost_usdt": format(slippage_cost, "f"),
             "slippage_bps_per_leg": format(self.slippage_bps, "f"),
             "net_outcome_usdt": format(net, "f"),
             "cost_scope": "HYPOTHETICAL_CONSERVATIVE_NOT_ACCOUNT_FEE",
@@ -319,35 +329,6 @@ class WhiteBitLiveZeroLearning:
             (current_key, episode_id, json.dumps(episode_payload, sort_keys=True),
              decision["decision_sequence"]),
         )
-        if decision["split"] == "TRAIN":
-            current_model = connection.execute(
-                "SELECT * FROM models ORDER BY version DESC LIMIT 1"
-            ).fetchone()
-            momentum_prediction = (
-                "UP" if _decimal(decision["feature_momentum"], name="feature") > 0
-                else "DOWN" if _decimal(decision["feature_momentum"], name="feature") < 0
-                else "FLAT"
-            )
-            momentum_correct = current_model["momentum_correct"] + (momentum_prediction == actual)
-            contrarian_prediction = (
-                "DOWN" if momentum_prediction == "UP" else
-                "UP" if momentum_prediction == "DOWN" else "FLAT"
-            )
-            contrarian_correct = current_model["contrarian_correct"] + (
-                contrarian_prediction == actual
-            )
-            parameter = (
-                "CONTRARIAN" if contrarian_correct > momentum_correct else "MOMENTUM"
-            )
-            self._insert_model(
-                connection,
-                version=current_model["version"] + 1,
-                created_at=current["available_at"],
-                parameter=parameter,
-                trained=current_model["trained_episode_count"] + 1,
-                momentum_correct=momentum_correct,
-                contrarian_correct=contrarian_correct,
-            )
         return episode_payload
 
     def process_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -356,6 +337,12 @@ class WhiteBitLiveZeroLearning:
         result: dict[str, Any]
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            cycle_state = self._load_cycle(connection)
+            if cycle_state.get("market") not in (None, canonical["market"]):
+                raise ValueError("live learning market differs from bound market")
+            if cycle_state.get("market") is None:
+                cycle_state["market"] = canonical["market"]
+                self._save_cycle(connection, cycle_state)
             if connection.execute(
                 "SELECT 1 FROM observations WHERE observation_key=?", (key,)
             ).fetchone() is not None:
@@ -386,17 +373,32 @@ class WhiteBitLiveZeroLearning:
             if len(pending) > 1:
                 connection.rollback()
                 raise ValueError("live research has multiple unresolved decisions")
-            episode = self._mature(connection, pending[0], canonical, key) if pending else None
+            gap = previous is not None and (
+                _instant(canonical["available_at"], name="available_at") -
+                _instant(previous["available_at"], name="previous_available_at")
+            ).total_seconds() > self.cycle_config["max_observation_gap_seconds"]
+            episode = None
+            if pending:
+                if gap:
+                    invalid = dict(status="INVALID_OBSERVATION_GAP", training_eligible=False,
+                        decision_id=pending[0]["decision_id"], outcome_key=key,
+                        available_at=canonical["available_at"], split=pending[0]["split"])
+                    connection.execute("UPDATE decisions SET outcome_observation_key=?, "
+                        "episode_id=?,episode_json=? WHERE decision_sequence=?",
+                        (key, _digest(invalid), json.dumps(invalid, sort_keys=True), pending[0]["decision_sequence"]))
+                else:
+                    episode = self._mature(connection, pending[0], canonical, key)
+            cycle = self._advance_cycle(connection, canonical, key, episode)
             decision_payload = None
-            if previous is not None:
+            if previous is not None and not gap and cycle["phase"] in {"RUNNING", "RESEARCH"}:
                 feature = current_mid - _decimal(previous["mid"], name="previous_mid")
                 model = connection.execute(
-                    "SELECT * FROM models ORDER BY version DESC LIMIT 1"
+                    "SELECT * FROM models WHERE version=?", (cycle["incumbent_version"],)
                 ).fetchone()
                 prediction = (
                     "UP" if feature > 0 else "DOWN" if feature < 0 else "FLAT"
                 )
-                if model["parameter"] == "CONTRARIAN":
+                if model["parameter"].startswith("CONTRARIAN"):
                     prediction = (
                         "DOWN" if prediction == "UP" else
                         "UP" if prediction == "DOWN" else "FLAT"
@@ -413,7 +415,8 @@ class WhiteBitLiveZeroLearning:
                     "model_sha256": model["model_sha256"],
                     "feature_momentum": format(feature, "f"),
                     "prediction": prediction,
-                    "action": "SIMULATED_BUY" if prediction == "UP" else "HOLD",
+                    "action": "SIMULATED_BUY" if cycle["phase"] == "RUNNING" and
+                        self._cycle_action(model["parameter"], feature, canonical) else "HOLD",
                     "environment": "SIMULATION",
                     "mode": "ZERO",
                     "network_orders": False,
@@ -456,9 +459,14 @@ class WhiteBitLiveZeroLearning:
                 "ORDER BY decision_sequence"
             ).fetchall()
             model_count = connection.execute("SELECT COUNT(*) FROM models").fetchone()[0]
+            cycle = self._load_cycle(connection)
+            incumbent = json.loads(connection.execute(
+                "SELECT model_json FROM models WHERE version=?",
+                (cycle["incumbent_version"],)).fetchone()[0])
         model = json.loads(model_row["model_json"])
         evaluation = [json.loads(row["episode_json"]) for row in episodes
-                      if row["split"] == "EVALUATION"]
+                      if row["split"] == "EVALUATION" and
+                      json.loads(row["episode_json"]).get("training_eligible") is not False]
         correct = sum(item["correct"] for item in evaluation)
         net = sum((_decimal(item["net_outcome_usdt"], name="net") for item in evaluation),
                   Decimal("0"))
@@ -482,6 +490,8 @@ class WhiteBitLiveZeroLearning:
             "last_available_at": None if latest is None else latest["available_at"],
             "last_evidence_sha256": None if latest is None else latest["evidence_sha256"],
             "episode_count": len(episodes),
+            "invalid_episode_count": sum(json.loads(row["episode_json"]).get(
+                "training_eligible") is False for row in episodes),
             "pending_decision_ids": [row["decision_id"] for row in pending],
             "model_version_count": model_count,
             "latest_model_sha256": model["model_sha256"],
@@ -489,9 +499,21 @@ class WhiteBitLiveZeroLearning:
             "public_data_only": True,
             "network_orders": False,
             "trading_authority": False,
+            "learning_cycle": cycle,
         }
         _write_json(self.state_dir / "checkpoint.json", checkpoint)
+        _write_json(self.state_dir / "learning-cycle.json", cycle)
         _write_json(self.state_dir / "latest-model.json", model)
+        _write_json(self.state_dir / "incumbent-model.json", incumbent)
+        _write_json(self.state_dir / "prospective-shadow-evaluation.json", {
+            "schema": "autotrade-live-shadow-evaluation-v1",
+            "phase": cycle["phase"], "cycle": cycle["cycle"],
+            "candidate_version": cycle["candidate_version"],
+            "evaluation": cycle.get("evaluation"),
+            "active_simulated_trades_during_evaluation": False,
+            "profitability_proven": False, "champion_promotion": False,
+            "network_orders": False,
+        })
         _write_json(self.state_dir / "independent-evaluation.json", evaluation_report)
 
     def status(self) -> dict[str, Any]:

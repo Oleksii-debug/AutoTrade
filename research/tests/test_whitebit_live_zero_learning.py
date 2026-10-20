@@ -65,14 +65,14 @@ class WhiteBitLiveZeroLearningTests(unittest.TestCase):
                 float(train_result["matured_episode"]["fees_usdt"]), 0.0
             )
             self.assertEqual(json.loads((root / "latest-model.json").read_text())[
-                "model_version"], 1)
+                "model_version"], 0)
 
             evaluation_result = learner.process_snapshot(
                 snapshot(4, bid="102", ask="103")
             )
             self.assertEqual(evaluation_result["matured_episode"]["split"], "EVALUATION")
             self.assertEqual(json.loads((root / "latest-model.json").read_text())[
-                "model_version"], 1)
+                "model_version"], 0)
             evaluation = json.loads((root / "independent-evaluation.json").read_text())
             self.assertEqual(evaluation["episode_count"], 1)
             self.assertEqual(evaluation["split"], "EVALUATION_ONLY_NO_MODEL_UPDATE")

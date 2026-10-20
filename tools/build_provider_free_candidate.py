@@ -32,6 +32,7 @@ SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
                    'autotrade_runtime/')
 HISTORICAL_SOURCE = frozenset({
     'tools/historical_public_klines.py',
+    'tools/whitebit_historical_klines.py',
     'tools/historical_causal_replay.py',
     'tools/historical_risk_context.py',
     'tools/historical_holdout_report.py',

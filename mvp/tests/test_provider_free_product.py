@@ -1650,4 +1650,3 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
 
 
 if __name__ == '__main__': unittest.main()
-

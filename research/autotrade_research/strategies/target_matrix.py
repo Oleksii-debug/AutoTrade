@@ -1021,3 +1021,4 @@ def read_checkpoint(path: Path, *, input_sha256: str) -> dict[str, object]:
     if value.get("phase") not in PHASES:
         raise ValueError("durable lifecycle checkpoint phase differs")
     return value
+

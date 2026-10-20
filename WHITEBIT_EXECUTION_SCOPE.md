@@ -1,6 +1,6 @@
 # AutoTrade — WhiteBIT-first private-local execution scope
 
-**Updated:** 2026-10-18. This file is the active scope for the private AutoTrade
+**Updated:** 2026-10-20. This file is the active scope for the private AutoTrade
 installation. It records authority and priorities; it is not evidence that an API
 request, simulated fill, model result, or financial profit occurred.
 
@@ -22,12 +22,18 @@ The functional priority order is:
 
 ## WhiteBIT authority
 
-WhiteBIT is the current primary exchange. The owner confirmed that a private API
-key was created on 2026-10-17 for the logical secure record `whitebit-primary`.
-This records external setup status only: it does not prove that the record is
-present or resolvable on this host, available to the runtime, authenticated, or
-authorized for any account capability. Its value must never be committed, logged,
-placed in diagnostics, or copied into an ordinary settings file.
+WhiteBIT is the current primary exchange. The dedicated
+`AutoTrade_Primary_Read` key was activated on 2026-10-20, stored in Windows
+Credential Manager under the logical record `whitebit-primary`, resolved by the
+runtime, and qualified through successful signed main-account and
+trading-balance reads. Its values must never be committed, logged, placed in
+diagnostics, model prompts, the Web UI, or an ordinary settings file.
+
+The verified key permissions are READ-only wallet balance/history, trade
+balance/order history, fee reads, and WebSocket token access. Order management,
+deposit, withdrawal, balance transfer, codes, convert, sub-accounts, mining,
+credit line, refund, and travel-rule actions are disabled. A valid private read
+does not grant or imply real trading authority.
 
 Allowed without private credentials:
 
@@ -35,7 +41,7 @@ Allowed without private credentials:
 - bounded historical data acquisition with provenance and checksums;
 - ZERO/local simulation, replay, agent learning, and evaluation.
 
-Allowed when the protected credential is actually available to the process:
+Allowed through the protected credential now available to the process:
 
 - authenticated account reads only, initially, with secret-redacted evidence.
 

@@ -30,12 +30,14 @@ The former 48-Section monolithic plan and `SEQUENTIAL_CLOSURE_STATE.md` are audi
 
 ## Provider-input independence
 
-The owner confirmed that a WhiteBIT private API key was created on 2026-10-17
-for the logical secure record `whitebit-primary`. This is an external setup fact,
-not evidence that the record is present or resolvable on this host, available to
-the runtime, authenticated successfully, or authorized for any account capability.
-Those binding and qualification states remain unverified and must not block
-offline development.
+The owner confirmed that a WhiteBIT private API key was created on 2026-10-17.
+On 2026-10-20 the replacement `AutoTrade_Primary_Read` key was installed under
+the logical secure record `whitebit-primary`, resolved by the runtime, and
+qualified with successful signed main-account and trading-balance reads. Its
+verified scope is READ-only; it grants no order-management, deposit, withdrawal,
+transfer, leverage, convert, sub-account, mining, credit-line, or refund authority.
+This authenticated binding must not be interpreted as PAPER/LIVE trade authority
+and must not block independent offline development.
 Plan 6 is therefore ACTIONABLE for offline/source engineering using existing code, public specifications, frozen/recorded/synthetic fixtures, mocks and non-secret test vectors.
 Workers MUST NOT ask the owner for provider credentials/accounts to close Plan-6 engineering Sections.
 Real authenticated account binding, PAPER/LIVE and bounded-real qualification remain the optional external track in Plan 9.

@@ -37,10 +37,14 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
     ) -> None:
         owner = recovery.owner
         self.assertIsNotNone(owner)
+        provider_environment = (
+            "TESTNET" if provider_id.strip().upper() == "BYBIT" else None
+        )
         result = reconciliation(
             provider_id=provider_id,
             account_id="acct",
             environment="PAPER",
+            provider_environment=provider_environment,
         )
         record_reconciliation_checkpoint(
             journal,
@@ -55,6 +59,7 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
             provider_id=provider_id,
             account_id="acct",
             environment="PAPER",
+            provider_environment=provider_environment,
         )
         self.assertIs(recovery.state, HostState.READY)
 
@@ -67,6 +72,7 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
             hostile_calls = []
             wire_calls = []
@@ -120,6 +126,7 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
 
             # Process-local flags are not financial authority. A production-issued
@@ -171,6 +178,7 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
             self._mark_ready(recovery, journal)
 
@@ -244,6 +252,7 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
             self._mark_ready(recovery, journal)
 
@@ -325,6 +334,7 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 journal,
                 environment="PAPER",
                 account_id="acct",
+                bybit_provider_environment="TESTNET",
             )
 
             # Establish real owner-bound journal readiness first so this test

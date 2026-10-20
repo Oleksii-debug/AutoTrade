@@ -75,6 +75,7 @@ class RecoveryIssuedDispatcherAuthorityIngressTests(unittest.TestCase):
             journal,
             environment="PAPER",
             account_id="acct",
+            bybit_provider_environment="TESTNET",
         )
         return journal, recovery, dispatcher
 

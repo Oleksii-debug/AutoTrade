@@ -25,6 +25,48 @@ from tools.historical_public_klines import (
     _reject_symlink_ancestors, _utc_day, _require_past_month,
 )
 from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
+from research.autotrade_research.io.strict_json import strict_json_loads
+
+
+MAX_STRATEGY_PLAN_BYTES = 5_000_000
+
+
+def _read_strategy_plan(
+    path: Path,
+    *,
+    dataset_identity_sha256: str,
+    symbol: str,
+    interval: str,
+    observation_count: int,
+    signal_prices: list[str],
+    available_at: list[datetime],
+) -> dict[str, object]:
+    """Read and reconstruct one causal plan without trusting its own digest."""
+    _reject_symlink_ancestors(path)
+    if (path.is_symlink() or not path.is_file()
+            or path.stat().st_size > MAX_STRATEGY_PLAN_BYTES):
+        raise HistoricalArchiveError(
+            "registered deterministic strategy plan is missing, redirected or unbounded"
+        )
+    try:
+        raw = strict_json_loads(path.read_text(encoding="utf-8"))
+        from research.autotrade_research.strategies.target_matrix import (
+            validate_strategy_plan,
+        )
+        return validate_strategy_plan(
+            raw,
+            dataset_identity_sha256="sha256:" + dataset_identity_sha256,
+            symbol=symbol,
+            interval=interval,
+            observation_count=observation_count,
+            signal_prices=signal_prices,
+            available_at=available_at,
+            interval_seconds=INTERVAL_SECONDS[interval],
+        )
+    except (OSError, UnicodeError, TypeError, ValueError) as exc:
+        raise HistoricalArchiveError(
+            "registered deterministic strategy plan is invalid"
+        ) from exc
 
 
 def _verify_artifact_evidence(
@@ -411,6 +453,11 @@ def main(argv=None) -> int:
                         help="research-only registered MA candidate; requires --candidate-slow and --next-bar-open")
     parser.add_argument("--candidate-slow", type=int, default=None,
                         help="research-only registered MA candidate; requires --candidate-fast and --next-bar-open")
+    parser.add_argument(
+        "--strategy-plan", default=None,
+        help=("content-addressed deterministic BUY/SELL/HOLD plan derived from "
+              "causal closed bars; requires --next-bar-open and no trained/MA candidate"),
+    )
     args = parser.parse_args(argv)
     try:
         data_root = Path(args.data_root)
@@ -465,6 +512,15 @@ def main(argv=None) -> int:
                 raise HistoricalArchiveError(
                     "research candidate parameters require --next-bar-open, no model, and a registered pair"
                 )
+        if args.strategy_plan is not None and (
+            not args.next_bar_open
+            or args.model_path is not None
+            or args.validation_report_path is not None
+            or args.candidate_fast is not None
+        ):
+            raise HistoricalArchiveError(
+                "registered deterministic strategy plan requires next-bar mode without another model"
+            )
         model_fast, model_slow, model_digest = 2, 3, None
         model_schema = None
         simulation_model_digest = None
@@ -498,6 +554,17 @@ def main(argv=None) -> int:
             )
         execution_prices = opens[1:] if args.next_bar_open else prices
         signal_prices = prices[:-1] if args.next_bar_open else None
+        strategy_plan = None
+        if args.strategy_plan is not None:
+            strategy_plan = _read_strategy_plan(
+                Path(args.strategy_plan),
+                dataset_identity_sha256=digest,
+                symbol=args.symbol,
+                interval=args.interval,
+                observation_count=len(execution_prices),
+                signal_prices=signal_prices,
+                available_at=dates[1:],
+            )
         first_execution_time = (dates[1] if args.next_bar_open else
                                 dates[0] + timedelta(seconds=INTERVAL_SECONDS[args.interval]))
         # The first CLOSED candle is known at first_close. Freeze a bounded,
@@ -583,6 +650,12 @@ def main(argv=None) -> int:
             strategy_fast=model_fast, strategy_slow=model_slow,
             model_sha256=simulation_model_digest,
             validation_sha256=validation_digest,
+            **({
+                "strategy_side_plan": strategy_plan["side_plan"],
+                "strategy_plan_sha256": strategy_plan["plan_sha256"].removeprefix(
+                    "sha256:"
+                ),
+            } if strategy_plan is not None else {}),
             should_pause=historical_risk,
         )
         comparative = None
@@ -616,6 +689,16 @@ def main(argv=None) -> int:
             "research_candidate_config_sha256": (
                 simulation_model_digest if args.candidate_fast is not None else None
             ),
+            "registered_strategy_plan_sha256": (
+                None if strategy_plan is None else strategy_plan["plan_sha256"]
+            ),
+            "registered_strategy_candidate": (
+                None if strategy_plan is None else strategy_plan["candidate"]
+            ),
+            "registered_strategy_quantity_semantics": (
+                None if strategy_plan is None else
+                "PROPOSAL_METADATA_ONLY; CANONICAL_ZERO_OWNS_EXECUTION_TARGET"
+            ),
             "validation_report_sha256": validation_digest,
             "trained_strategy_parameters": {"fast": model_fast, "slow": model_slow},
             "dataset_identity_sha256": digest,
@@ -627,7 +710,9 @@ def main(argv=None) -> int:
             ),
             "virtual_cash_usd": args.virtual_cash,
             "important_limitations": [
-                ("Selected moving-average parameters were updated only from earlier CLOSED reconciled simulation position cycles; this holdout run does not update them."
+                ("Registered deterministic strategy decisions were frozen from causal closed-bar prefixes; this evaluation run cannot change them."
+                 if strategy_plan is not None else
+                 "Selected moving-average parameters were updated only from earlier CLOSED reconciled simulation position cycles; this holdout run does not update them."
                  if model_schema == "autotrade-closed-simulation-training-v2" else
                  "Selected moving-average parameters use a legacy earlier closed-bar directional diagnostic; this holdout run does not update them."
                  if model_digest is not None else

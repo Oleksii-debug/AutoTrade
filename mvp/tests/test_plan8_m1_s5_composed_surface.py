@@ -32,7 +32,7 @@ class Plan8M1ComposedSurface(unittest.TestCase):
                         status, text, headers = client.request("GET", route)
                         self.assertEqual(status, 200, route)
                         self.assertEqual(
-                            text, (WEB / relative).read_text(encoding="utf-8"),
+                            text, (WEB / relative).read_bytes().decode("utf-8"),
                             "Host must serve exact canonical Web bytes, not a second UI",
                         )
                         self.assertIn("Content-Security-Policy", headers)

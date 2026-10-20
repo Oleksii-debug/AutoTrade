@@ -969,7 +969,7 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
 
     def test_rounding_policy_reseal_uses_one_held_object_state_cut(self):
         policy = FxRoundingPolicy(
-            reporting_currency="USD",
+            reporting_currency="EUR",
             quantum="0.01",
             version="held",
         )
@@ -978,7 +978,7 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         def snapshot_then_mutate(value, fields, *, name):
             snapshot = original_snapshot(value, fields, name=name)
             if name == "rounding_policy":
-                object.__setattr__(value, "reporting_currency", "EUR")
+                object.__setattr__(value, "reporting_currency", "USD")
                 object.__setattr__(value, "quantum", Decimal("100"))
                 object.__setattr__(value, "version", "mutated")
             return snapshot
@@ -989,16 +989,16 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         ):
             result = value_amount(
                 "1",
-                source_currency="EUR",
-                reporting_currency="USD",
-                quote=eurusd(bid="1.105", ask="1.105"),
+                source_currency="USD",
+                reporting_currency="EUR",
+                quote=eurusd(bid="1.1", ask="1.1"),
                 as_of=NOW,
                 max_age=timedelta(minutes=1),
                 rounding_policy=policy,
             )
 
-        self.assertEqual(policy.reporting_currency, "EUR")
-        self.assertEqual(result.converted_amount, Decimal("1.10"))
+        self.assertEqual(policy.reporting_currency, "USD")
+        self.assertEqual(result.converted_amount, Decimal("0.90"))
         self.assertEqual(result.rounding_quantum, Decimal("0.01"))
         self.assertIsNotNone(result.rounding_policy_id)
 

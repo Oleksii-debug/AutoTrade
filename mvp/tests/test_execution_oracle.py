@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
@@ -6,8 +7,14 @@ from mvp.autotrade_mvp.execution_oracle import (
     ExecutionOracleError,
     assert_conservative_execution,
 )
+from mvp.autotrade_mvp.instruments import (
+    InstrumentRegistry,
+    InstrumentVersion,
+    TradingCalendar,
+)
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceGrid,
     ExecutionPriceProjectionPolicy,
     ExecutionRealismError,
     LiquidityObservation,
@@ -19,9 +26,51 @@ from mvp.autotrade_mvp.execution_realism import (
 
 CALIBRATION = "a" * 64
 INSTRUMENT_BINDING = "c" * 64
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
+METADATA_ARTIFACT_ID = "22222222-2222-4222-8222-222222222222"
+METADATA_SHA256 = "d" * 64
+
+
+def price_authority():
+    instrument = InstrumentVersion(
+        instrument_id=INSTRUMENT_ID,
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="share",
+        contract_multiplier="1",
+        price_tick="0.01",
+        quantity_step="1",
+        minimum_quantity="1",
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        metadata_evidence=(
+            {
+                "artifact_id": METADATA_ARTIFACT_ID,
+                "sha256": f"sha256:{METADATA_SHA256}",
+                "observed_at": "2025-12-30T10:00:00Z",
+            },
+        ),
+    )
+    registry = InstrumentRegistry(
+        calendars=(TradingCalendar.continuous_24_7(),),
+        versions=(instrument,),
+    )
+    return (
+        ExecutionPriceProjectionPolicy.from_instrument(instrument),
+        ExecutionPriceGrid.from_registry(registry, INSTRUMENT_REF),
+    )
 
 
 def model(**overrides):
+    default_projection, default_grid = price_authority()
     values = dict(
         model_version="exec-realism-v1",
         calibration_sha256=CALIBRATION,
@@ -34,13 +83,8 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
-        price_projection=ExecutionPriceProjectionPolicy(
-            policy_id="ADVERSE_INSTRUMENT_TICK",
-            policy_version="1",
-            instrument_version="ABC@v1",
-            price_quantum="0.01",
-            instrument_metadata_binding=INSTRUMENT_BINDING,
-        ),
+        price_projection=default_projection,
+        price_grid=default_grid,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -49,7 +93,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -62,7 +106,7 @@ def order(**overrides):
 
 def observation(**overrides):
     values = dict(
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -74,6 +118,26 @@ def observation(**overrides):
 
 
 class ExecutionOracleTests(unittest.TestCase):
+    def test_oracle_independently_requires_registry_price_grid(self):
+        exact_order = order()
+        exact_observation = observation()
+        exact_model = model()
+        exact_result = simulate_execution(
+            exact_order,
+            exact_observation,
+            exact_model,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "requires canonical InstrumentRegistry price grid",
+        ):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=exact_observation,
+                model=model(price_grid=None),
+                result=exact_result,
+            )
+
     def test_oracle_rejects_domain_subclasses_before_economic_checks(self):
         class DerivedOrder(SimulatedOrder):
             pass
@@ -585,7 +649,7 @@ class ExecutionOracleTests(unittest.TestCase):
     def test_oracle_accepts_pre_arrival_bar_waiting_without_interval_start(self):
         o = order()
         q = LiquidityObservation.create(
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             market_time="2026-09-24T10:00:00.100000Z",
             available_at="2026-09-24T10:00:00.150000Z",
             available_volume="100",
@@ -622,7 +686,7 @@ class ExecutionOracleTests(unittest.TestCase):
     def test_oracle_requires_ambiguous_status_for_bar_overlapping_arrival(self):
         o = order(submitted_at="2026-09-24T10:00:30Z")
         q = LiquidityObservation.create(
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             market_time="2026-09-24T10:01:00Z",
             available_at="2026-09-24T10:01:01Z",
             available_volume="100",
@@ -651,7 +715,7 @@ class ExecutionOracleTests(unittest.TestCase):
             limit_price="103",
         )
         q = LiquidityObservation.create(
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             market_time="2026-09-24T10:01:00Z",
             available_at="2026-09-24T10:01:01Z",
             available_volume="100",
@@ -677,7 +741,7 @@ class ExecutionOracleTests(unittest.TestCase):
     def test_oracle_rejects_bar_ambiguity_without_causal_ambiguity(self):
         o = order(order_type="LIMIT", limit_price="90")
         q = LiquidityObservation.create(
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             market_time="2026-09-24T10:01:00Z",
             available_at="2026-09-24T10:01:01Z",
             available_volume="100",

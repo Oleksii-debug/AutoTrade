@@ -6,7 +6,7 @@ gate is satisfied.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
@@ -14,10 +14,10 @@ from .population_coverage import PopulationCoverageManifest
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -25,11 +25,107 @@ def _decimal(value, *, name: str) -> Decimal:
     return result
 
 
+def _regime_text(value: object, *, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
+
+
+def _regime_tuple(value: object, *, name: str) -> tuple[str, ...]:
+    if type(value) not in (list, tuple):
+        raise TypeError("regime lists must be exact list or tuple values")
+    items = tuple(value)
+    if any(type(item) is not str for item in items):
+        raise TypeError("regime lists must contain exact text values")
+    normalized = tuple(_regime_text(item, name=name) for item in items)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("regime lists must not contain duplicates")
+    return normalized
+
+
+def _detached_dataclass_state(
+    value: object,
+    expected_type: type,
+    *,
+    name: str,
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        raise TypeError(f"{name} must be exact {expected_type.__name__}")
+    state = object.__getattribute__(value, "__dict__")
+    expected_fields = {field.name for field in fields(expected_type)}
+    if any(field_name in expected_type.__dict__ for field_name in expected_fields):
+        raise TypeError(f"{name} class field descriptors changed")
+    if type(state) is not dict or set(state) != expected_fields:
+        raise TypeError(f"{name} has unexpected state fields")
+    return {field_name: state[field_name] for field_name in expected_fields}
+
+
+def _metrics_snapshot(metrics: object) -> dict[str, "RegimeMetric"]:
+    if type(metrics) is not dict:
+        raise TypeError("metrics must be an exact dict")
+    snapshot: dict[str, RegimeMetric] = {}
+    for key, metric in tuple(dict.items(metrics)):
+        if type(key) is not str:
+            raise TypeError("metric keys must be exact text")
+        metric_state = _detached_dataclass_state(
+            metric,
+            RegimeMetric,
+            name="metric value",
+        )
+        canonical_key = _regime_text(key, name="metric key")
+        canonical_metric = RegimeMetric(**metric_state)
+        if canonical_metric.regime != canonical_key:
+            raise ValueError(f"metric key/regime mismatch for {canonical_key}")
+        snapshot[canonical_key] = canonical_metric
+    return snapshot
+
+
 def _non_negative(value, *, name: str) -> Decimal:
     result = _decimal(value, name=name)
     if result < 0:
         raise ValueError(f"{name} must be non-negative")
     return result
+
+
+def _inert_manifest_value(value: object, *, name: str):
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if type(value) is tuple:
+        return tuple(
+            _inert_manifest_value(item, name=name)
+            for item in value
+        )
+    raise TypeError(f"{name} must contain only exact inert manifest values")
+
+
+def _population_snapshot(
+    population: object,
+) -> PopulationCoverageManifest:
+    state = _detached_dataclass_state(
+        population,
+        PopulationCoverageManifest,
+        name="population",
+    )
+    payload = {
+        field.name: _inert_manifest_value(
+            state[field.name],
+            name=f"population.{field.name}",
+        )
+        for field in fields(PopulationCoverageManifest)
+    }
+    return PopulationCoverageManifest(**payload)
+
+
+def _policy_snapshot(policy: object) -> "RetentionPolicy":
+    state = _detached_dataclass_state(
+        policy,
+        RetentionPolicy,
+        name="policy",
+    )
+    return RetentionPolicy(**state)
 
 
 @dataclass(frozen=True)
@@ -41,17 +137,15 @@ class RegimeMetric:
     label_complete: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.regime, str) or not self.regime.strip():
-            raise ValueError("regime is required")
-        if (
-            not isinstance(self.observations, int)
-            or isinstance(self.observations, bool)
-            or self.observations < 0
-        ):
-            raise ValueError("observations must be a non-negative integer")
-        if not isinstance(self.label_complete, bool):
-            raise TypeError("label_complete must be boolean")
-        object.__setattr__(self, "regime", self.regime.strip())
+        object.__setattr__(
+            self,
+            "regime",
+            _regime_text(self.regime, name="regime"),
+        )
+        if type(self.observations) is not int or self.observations < 0:
+            raise ValueError("observations must be a non-negative exact integer")
+        if type(self.label_complete) is not bool:
+            raise TypeError("label_complete must be exact boolean")
         object.__setattr__(
             self,
             "champion_net_score",
@@ -73,14 +167,13 @@ class RegimeMetric:
         observations: int,
         label_complete: bool,
     ) -> "RegimeMetric":
-        if not isinstance(regime, str) or not regime.strip():
-            raise ValueError("regime is required")
-        if not isinstance(observations, int) or isinstance(observations, bool) or observations < 0:
-            raise ValueError("observations must be a non-negative integer")
-        if not isinstance(label_complete, bool):
-            raise TypeError("label_complete must be boolean")
+        regime_value = _regime_text(regime, name="regime")
+        if type(observations) is not int or observations < 0:
+            raise ValueError("observations must be a non-negative exact integer")
+        if type(label_complete) is not bool:
+            raise TypeError("label_complete must be exact boolean")
         return cls(
-            regime=regime.strip(),
+            regime=regime_value,
             champion_net_score=_decimal(champion_net_score, name="champion_net_score"),
             candidate_net_score=_decimal(candidate_net_score, name="candidate_net_score"),
             observations=observations,
@@ -101,35 +194,28 @@ class RetentionPolicy:
     risk_gate_passed: bool
 
     def __post_init__(self) -> None:
-        if isinstance(self.protected_regimes, (str, bytes)) or isinstance(
-            self.recent_regimes, (str, bytes)
-        ):
-            raise TypeError("regime lists must be collections of text")
-        protected_raw = tuple(self.protected_regimes)
-        recent_raw = tuple(self.recent_regimes)
-        if any(not isinstance(value, str) for value in protected_raw + recent_raw):
-            raise TypeError("regime lists must contain text values")
-        protected = tuple(value.strip() for value in protected_raw)
-        recent = tuple(value.strip() for value in recent_raw)
-        if any(not value for value in protected + recent):
-            raise ValueError("regime identities must be non-empty")
-        if len(protected) != len(set(protected)) or len(recent) != len(set(recent)):
-            raise ValueError("regime lists must not contain duplicates")
+        protected = _regime_tuple(
+            self.protected_regimes,
+            name="protected regime",
+        )
+        recent = _regime_tuple(
+            self.recent_regimes,
+            name="recent regime",
+        )
         if not recent:
             raise ValueError("at least one recent regime is required")
         if (
-            not isinstance(self.min_observations_per_regime, int)
-            or isinstance(self.min_observations_per_regime, bool)
+            type(self.min_observations_per_regime) is not int
             or self.min_observations_per_regime < 1
         ):
-            raise ValueError("min_observations_per_regime must be positive")
+            raise ValueError("min_observations_per_regime must be a positive exact integer")
         for name in (
             "require_complete_labels",
             "independent_science_gate_passed",
             "risk_gate_passed",
         ):
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be boolean")
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be exact boolean")
         object.__setattr__(self, "protected_regimes", protected)
         object.__setattr__(self, "recent_regimes", recent)
         object.__setattr__(
@@ -171,31 +257,25 @@ class RetentionPolicy:
         independent_science_gate_passed: bool,
         risk_gate_passed: bool,
     ) -> "RetentionPolicy":
-        if isinstance(protected_regimes, (str, bytes)) or isinstance(
-            recent_regimes, (str, bytes)
-        ):
-            raise TypeError("regime lists must be collections of text")
-        protected_raw = tuple(protected_regimes)
-        recent_raw = tuple(recent_regimes)
-        if any(not isinstance(value, str) for value in protected_raw + recent_raw):
-            raise TypeError("regime lists must contain text values")
-        protected = tuple(value.strip() for value in protected_raw)
-        recent = tuple(value.strip() for value in recent_raw)
-        if any(not value for value in protected + recent):
-            raise ValueError("regime identities must be non-empty")
-        if len(protected) != len(set(protected)) or len(recent) != len(set(recent)):
-            raise ValueError("regime lists must not contain duplicates")
+        protected = _regime_tuple(
+            protected_regimes,
+            name="protected regime",
+        )
+        recent = _regime_tuple(
+            recent_regimes,
+            name="recent regime",
+        )
         if not recent:
             raise ValueError("at least one recent regime is required")
-        if not isinstance(min_observations_per_regime, int) or isinstance(min_observations_per_regime, bool) or min_observations_per_regime < 1:
-            raise ValueError("min_observations_per_regime must be positive")
+        if type(min_observations_per_regime) is not int or min_observations_per_regime < 1:
+            raise ValueError("min_observations_per_regime must be a positive exact integer")
         for name, value in (
             ("require_complete_labels", require_complete_labels),
             ("independent_science_gate_passed", independent_science_gate_passed),
             ("risk_gate_passed", risk_gate_passed),
         ):
-            if not isinstance(value, bool):
-                raise TypeError(f"{name} must be boolean")
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be exact boolean")
         return cls(
             protected_regimes=protected,
             recent_regimes=recent,
@@ -233,8 +313,10 @@ def evaluate_retention(
     metrics: Mapping[str, RegimeMetric],
     policy: RetentionPolicy,
 ) -> RetentionDecision:
-    required = set(policy.protected_regimes) | set(policy.recent_regimes)
-    missing = sorted(required - set(metrics))
+    canonical_policy = _policy_snapshot(policy)
+    metric_snapshot = _metrics_snapshot(metrics)
+    required = set(canonical_policy.protected_regimes) | set(canonical_policy.recent_regimes)
+    missing = sorted(required - set(metric_snapshot))
     reasons: list[str] = []
     if missing:
         reasons.append("missing registered regimes: " + ", ".join(missing))
@@ -243,30 +325,30 @@ def evaluate_retention(
     recent_deltas: list[Decimal] = []
     evidence_incomplete = bool(missing)
 
-    for regime in sorted(required & set(metrics)):
-        metric = metrics[regime]
+    for regime in sorted(required & set(metric_snapshot)):
+        metric = metric_snapshot[regime]
         if metric.regime != regime:
             raise ValueError(f"metric key/regime mismatch for {regime}")
-        protected = regime in policy.protected_regimes
-        recent = regime in policy.recent_regimes
+        protected = regime in canonical_policy.protected_regimes
+        recent = regime in canonical_policy.recent_regimes
         delta = metric.candidate_net_score - metric.champion_net_score
         passed = True
         local_reasons: list[str] = []
 
-        if metric.observations < policy.min_observations_per_regime:
+        if metric.observations < canonical_policy.min_observations_per_regime:
             passed = False
             evidence_incomplete = True
             local_reasons.append("insufficient observations")
-        if policy.require_complete_labels and not metric.label_complete:
+        if canonical_policy.require_complete_labels and not metric.label_complete:
             passed = False
             evidence_incomplete = True
             local_reasons.append("labels incomplete")
-        if protected and delta < -policy.max_protected_degradation:
+        if protected and delta < -canonical_policy.max_protected_degradation:
             passed = False
             local_reasons.append("protected-regime degradation exceeds tolerance")
         if recent:
             recent_deltas.append(delta)
-            if delta < -policy.max_recent_degradation:
+            if delta < -canonical_policy.max_recent_degradation:
                 passed = False
                 local_reasons.append("recent-regime degradation exceeds tolerance")
 
@@ -284,12 +366,12 @@ def evaluate_retention(
     recent_improvement = None
     if recent_deltas:
         recent_improvement = sum(recent_deltas, Decimal("0")) / Decimal(len(recent_deltas))
-        if recent_improvement < policy.min_recent_improvement:
+        if recent_improvement < canonical_policy.min_recent_improvement:
             reasons.append("registered recent-regime improvement threshold not met")
 
-    if not policy.independent_science_gate_passed:
+    if not canonical_policy.independent_science_gate_passed:
         reasons.append("independent scientific gate has not passed")
-    if not policy.risk_gate_passed:
+    if not canonical_policy.risk_gate_passed:
         reasons.append("independent risk gate has not passed")
     if any(not row.passed for row in decisions):
         reasons.append("one or more registered regime constraints failed")
@@ -327,20 +409,21 @@ def evaluate_population_bound_retention(
     the same causal population that scientific qualification will attest.
     """
 
-    if not isinstance(population, PopulationCoverageManifest):
-        raise TypeError("population must be PopulationCoverageManifest")
-    base = evaluate_retention(metrics, policy)
+    canonical_population = _population_snapshot(population)
+    canonical_policy = _policy_snapshot(policy)
+    metric_snapshot = _metrics_snapshot(metrics)
+    base = evaluate_retention(metric_snapshot, canonical_policy)
     reasons = list(base.reasons)
-    evidence_incomplete = not population.complete
+    evidence_incomplete = not canonical_population.complete
     if evidence_incomplete:
         reasons.append("population coverage manifest is incomplete")
 
-    counts = dict(population.included_regime_counts)
-    labels = dict(population.included_labels_complete_by_regime)
-    required = set(policy.protected_regimes) | set(policy.recent_regimes)
+    counts = dict(canonical_population.included_regime_counts)
+    labels = dict(canonical_population.included_labels_complete_by_regime)
+    required = set(canonical_policy.protected_regimes) | set(canonical_policy.recent_regimes)
 
     for regime in sorted(required):
-        metric = metrics.get(regime)
+        metric = metric_snapshot.get(regime)
         if metric is None:
             continue
         expected_observations = counts.get(regime, 0)
@@ -377,5 +460,5 @@ def evaluate_population_bound_retention(
         recent_improvement=base.recent_improvement,
         regimes=base.regimes,
         reasons=tuple(dict.fromkeys(reasons)),
-        population_coverage_digest=population.digest,
+        population_coverage_digest=canonical_population.digest,
     )

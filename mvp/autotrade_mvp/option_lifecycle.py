@@ -1276,8 +1276,6 @@ class DurableOptionLifecycleAuthority:
                 raise OptionLifecycleConflict(
                     "correction cannot change instrument version authority"
                 )
-            if prior_payload.get("event_kind") != observation.event_kind:
-                raise OptionLifecycleConflict("correction cannot change lifecycle event kind")
             if prior_payload.get("effective_at") != _utc_text(observation.effective_at):
                 raise OptionLifecycleConflict(
                     "correction must preserve original economic effective time"

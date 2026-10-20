@@ -33,7 +33,7 @@ from .deterministic import (
 
 
 PLAN_SCHEMA = "autotrade-target-conditioned-strategy-plan-v1"
-MATRIX_SCHEMA = "autotrade-target-conditioned-candidate-matrix-v1"
+MATRIX_SCHEMA = "autotrade-target-conditioned-candidate-matrix-v2"
 LIFECYCLE_SCHEMA = "autotrade-target-conditioned-lifecycle-v1"
 PHASES = (
     "ACTIVE_SIMULATION",
@@ -459,6 +459,189 @@ def select_training_candidate(
     return {**body, "selection_sha256": _hash(body)}
 
 
+def _post_experiment_analysis(
+    *,
+    report: dict[str, object],
+    comparative: dict[str, object],
+    starting_capital: Decimal,
+    net_pnl_after_costs: Decimal,
+    completed_episodes: int,
+) -> dict[str, object]:
+    """Extract only economics the canonical report can actually prove.
+
+    The current historical report does not expose an evidence-bound fill ledger
+    containing reference price, modeled fill price and fee amount per fill.
+    Consequently gross PnL and the monetary fee/spread/slippage decomposition
+    cannot be reconstructed exactly here.  Keep those fields explicit and
+    unavailable instead of reverse-engineering them from marked equity.
+    """
+
+    unavailable_amount = {
+        "status": "UNAVAILABLE_EVIDENCE_GAP",
+        "amount_usd": None,
+    }
+
+    missed = comparative.get("missed_fill_metrics")
+    if missed is None:
+        trade_count: dict[str, object] = {
+            "status": "UNAVAILABLE_EVIDENCE_GAP",
+            "reconciled_trade_decisions": None,
+            "reason": "CANONICAL_REPORT_DID_NOT_EXPORT_MISSED_FILL_METRICS",
+        }
+    else:
+        if type(missed) is not dict:
+            raise ValueError("candidate missed-fill metrics are malformed")
+        count_fields = (
+            "execution_intents", "missed_fills", "non_order_decisions",
+            "reconciled_fills",
+        )
+        counts = {name: missed.get(name) for name in count_fields}
+        if any(type(value) is not int or value < 0 for value in counts.values()):
+            raise ValueError("candidate missed-fill counts are invalid")
+        if (
+            counts["execution_intents"]
+            != counts["reconciled_fills"] + counts["missed_fills"]
+            or completed_episodes
+            != counts["execution_intents"] + counts["non_order_decisions"]
+        ):
+            raise ValueError("candidate missed-fill counts do not reconcile")
+        trade_count = {
+            "status": "AVAILABLE_RECONCILED_DECISION_COUNT",
+            "reconciled_trade_decisions": counts["reconciled_fills"],
+            "unreconciled_or_missed_trade_decisions": counts["missed_fills"],
+            "execution_intents": counts["execution_intents"],
+            "non_order_decisions": counts["non_order_decisions"],
+            "fill_event_count": None,
+            "fill_event_count_status": "UNAVAILABLE_WITHOUT_COMPLETE_FILL_LEDGER",
+        }
+
+    turnover_fraction_raw = comparative.get(
+        "agent_gross_mark_turnover_proxy_fraction"
+    )
+    if turnover_fraction_raw is None:
+        turnover: dict[str, object] = {
+            "status": "UNAVAILABLE_EVIDENCE_GAP",
+            "reference_open_proxy_fraction": None,
+            "reference_open_proxy_notional_usd": None,
+            "modeled_fill_notional_usd": None,
+            "reason": "CANONICAL_REPORT_DID_NOT_EXPORT_TURNOVER",
+        }
+    else:
+        turnover_fraction = _decimal(
+            turnover_fraction_raw,
+            name="agent_gross_mark_turnover_proxy_fraction",
+        )
+        if turnover_fraction < 0:
+            raise ValueError("candidate turnover proxy cannot be negative")
+        turnover = {
+            "status": "AVAILABLE_REFERENCE_OPEN_PROXY_ONLY",
+            "reference_open_proxy_fraction": format(turnover_fraction, "f"),
+            "reference_open_proxy_notional_usd": format(
+                starting_capital * turnover_fraction, "f"
+            ),
+            "modeled_fill_notional_usd": None,
+            "reason": (
+                "PROXY_USES_POSITION_CHANGE_TIMES_REFERENCE_OPEN;"
+                "MODELED_FILL_NOTIONAL_NOT_EXPORTED"
+            ),
+        }
+
+    regime = comparative.get("causal_regime_analysis")
+    if regime is None:
+        regime_summary: dict[str, object] = {
+            "status": "UNAVAILABLE_EVIDENCE_GAP",
+            "source_status": None,
+            "regimes": None,
+            "reason": "CANONICAL_REPORT_DID_NOT_EXPORT_CAUSAL_REGIME_ANALYSIS",
+        }
+    else:
+        if type(regime) is not dict or type(regime.get("summary")) is not dict:
+            raise ValueError("candidate causal regime analysis is malformed")
+        source_status = regime.get("status")
+        if type(source_status) is not str or not source_status:
+            raise ValueError("candidate causal regime status is malformed")
+        summary = regime["summary"]
+        regime_episode_total = 0
+        for regime_id, row in summary.items():
+            if type(regime_id) is not str or not regime_id or type(row) is not dict:
+                raise ValueError("candidate causal regime summary is malformed")
+            if set(row) != {
+                "cost_adjusted_mark_pnl_usd", "episodes",
+                "nonpositive_episode_returns", "positive_episode_returns",
+            }:
+                raise ValueError("candidate causal regime row schema differs")
+            episode_count = row["episodes"]
+            nonpositive = row["nonpositive_episode_returns"]
+            positive = row["positive_episode_returns"]
+            if (
+                type(episode_count) is not int or episode_count < 0
+                or type(nonpositive) is not int or nonpositive < 0
+                or type(positive) is not int or positive < 0
+                or nonpositive + positive != episode_count
+            ):
+                raise ValueError("candidate causal regime counts do not reconcile")
+            _decimal(
+                row["cost_adjusted_mark_pnl_usd"],
+                name="regime cost_adjusted_mark_pnl_usd",
+            )
+            regime_episode_total += episode_count
+        if regime_episode_total != completed_episodes:
+            raise ValueError("candidate causal regime episodes do not reconcile")
+        regime_summary = {
+            "status": "AVAILABLE_CAUSAL_TIME_SLICE",
+            "source_status": source_status,
+            "regimes": json.loads(_canonical(summary)),
+        }
+
+    configured_cost_inputs: dict[str, str | None] = {}
+    for output_name, raw_value in (
+        ("fee_rate", comparative.get("scenario_fee_rate")),
+        ("half_spread_bps", report.get("adverse_half_spread_bps")),
+        ("slippage_bps", comparative.get("adverse_slippage_bps")),
+    ):
+        if raw_value is None:
+            configured_cost_inputs[output_name] = None
+            continue
+        parsed = _decimal(raw_value, name=output_name)
+        if parsed < 0:
+            raise ValueError(f"candidate {output_name} cannot be negative")
+        configured_cost_inputs[output_name] = format(parsed, "f")
+
+    cost_reason = (
+        "CANONICAL_REPORT_EXPORTS_CONFIGURED_RATES_BUT_NOT_PER_FILL_REFERENCE_"
+        "PRICE_MODELED_FILL_PRICE_AND_FEE_AMOUNT"
+    )
+    return {
+        "starting_capital": {
+            "status": "AVAILABLE_RECONCILED_REPORT",
+            "currency": "USD",
+            "amount": format(starting_capital, "f"),
+        },
+        "reconciled_trade_count": trade_count,
+        "net_pnl_after_modeled_costs": {
+            "status": "AVAILABLE_RECONCILED_REPORT",
+            "currency": "USD",
+            "amount": format(net_pnl_after_costs, "f"),
+        },
+        "gross_pnl_before_modeled_costs": {
+            **unavailable_amount,
+            "reason": cost_reason,
+        },
+        "modeled_cost_attribution": {
+            "status": "UNAVAILABLE_EVIDENCE_GAP",
+            "currency": "USD",
+            "configured_inputs": configured_cost_inputs,
+            "fees": {**unavailable_amount, "reason": cost_reason},
+            "spread": {**unavailable_amount, "reason": cost_reason},
+            "slippage": {**unavailable_amount, "reason": cost_reason},
+            "total": {**unavailable_amount, "reason": cost_reason},
+            "gross_minus_costs_equals_net_verified": False,
+        },
+        "turnover": turnover,
+        "causal_regime_summary": regime_summary,
+    }
+
+
 def evaluate_candidate_matrix(
     *,
     workstreams: Iterable[WorkstreamSpec],
@@ -592,10 +775,44 @@ def evaluate_candidate_matrix(
             "completed_episodes": episodes,
             "net_pnl_after_costs_usd": format(pnl, "f"),
             "max_drawdown_fraction": format(drawdown, "f"),
+            "post_experiment_analysis": _post_experiment_analysis(
+                report=report,
+                comparative=comparative,
+                starting_capital=initial,
+                net_pnl_after_costs=pnl,
+                completed_episodes=episodes,
+            ),
             "objectives": objective_rows,
             "eligible_for_external_promotion_review": candidate_qualified,
             "selected_on_training": spec.candidate_id == selected_candidate_id,
         })
+    controls = [
+        row for row in rows
+        if row["candidate"]["family"] == "NO_TRADE_CONTROL"
+    ]
+    if len(controls) != 1:
+        raise ValueError("candidate matrix requires exactly one no-trade control")
+    no_trade = controls[0]
+    no_trade_id = no_trade["candidate"]["candidate_id"]
+    no_trade_pnl = _decimal(
+        no_trade["net_pnl_after_costs_usd"],
+        name="no-trade net_pnl_after_costs_usd",
+    )
+    for row in rows:
+        candidate_pnl = _decimal(
+            row["net_pnl_after_costs_usd"],
+            name="candidate net_pnl_after_costs_usd",
+        )
+        difference = candidate_pnl - no_trade_pnl
+        row["post_experiment_analysis"]["versus_no_trade"] = {
+            "status": "AVAILABLE_SAME_CAUSAL_EVALUATION_CUT",
+            "baseline_candidate_id": no_trade_id,
+            "baseline_net_pnl_after_costs_usd": format(no_trade_pnl, "f"),
+            "candidate_minus_no_trade_net_pnl_after_costs_usd": format(
+                difference, "f"
+            ),
+            "beat_no_trade_after_costs": difference > 0,
+        }
     body = {
         "schema": MATRIX_SCHEMA,
         "manifest_sha256": manifest_digest,

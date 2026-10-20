@@ -1,6 +1,9 @@
 from datetime import date
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
+
+from mvp.autotrade_mvp import accounting as accounting_module
 
 from mvp.autotrade_mvp.accounting import (
     EconomicBook,
@@ -126,11 +129,9 @@ class SettlementEconomicBookAuthorityTests(unittest.TestCase):
                 calls.append(("cash", currency))
                 return Decimal("1100")
 
-        hostile = HostileScopedEconomicBook(
-            environment="PAPER",
-            account_id="acct-1",
-            transactions=(opening_cash(),),
-        )
+        # Construction already rejects subclasses; exercise this boundary with
+        # an unregistered object without relaxing the constructor's protection.
+        hostile = object.__new__(HostileScopedEconomicBook)
 
         with self.assertRaises(TypeError):
             SettlementBook.from_economic_book(
@@ -161,6 +162,9 @@ class SettlementEconomicBookAuthorityTests(unittest.TestCase):
             )
             or Decimal("1100")
         )
+        scoped.__dict__["settlement_projection"] = (
+            "PAPER", "foreign", (opening_cash("9999"),),
+        )
 
         rebuilt = SettlementBook.from_economic_book(
             economic_book=scoped,
@@ -184,6 +188,7 @@ class SettlementEconomicBookAuthorityTests(unittest.TestCase):
             account_id="acct-1",
             transactions=(opening_cash(),),
         )
+        original_book = scoped._book  # Keep original owner alive to isolate type tampering.
         scoped._book = HostileEconomicBook((opening_cash(),))
 
         with self.assertRaises(TypeError):
@@ -193,6 +198,30 @@ class SettlementEconomicBookAuthorityTests(unittest.TestCase):
             )
 
         self.assertEqual(calls, [])
+        self.assertEqual(original_book.cash("USD"), Decimal("1000"))
+
+    def test_scoped_projection_ignores_reintroduced_owner_lookup(self):
+        scoped = ScopedEconomicBook(
+            environment="PAPER", account_id="acct-a",
+            transactions=(opening_cash(),),
+        )
+        with patch.object(
+            accounting_module, "_require_scoped_economic_book_owner",
+            side_effect=AssertionError("untrusted lookup called"), create=True,
+        ):
+            rebuilt = SettlementBook.from_economic_book(
+                economic_book=scoped, obligations=(),
+            )
+        self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
+        self.assertFalse(hasattr(accounting_module, "_require_scoped_economic_book_owner"))
+
+    def test_unregistered_exact_scoped_book_cannot_project_cash(self):
+        scoped = object.__new__(ScopedEconomicBook)
+        scoped.environment = "PAPER"
+        scoped.account_id = "acct-a"
+        scoped._book = EconomicBook((opening_cash(),))
+        with self.assertRaisesRegex(SettlementConflict, "owner is unavailable"):
+            SettlementBook.from_economic_book(economic_book=scoped, obligations=())
 
     def test_scoped_book_cannot_splice_foreign_account_settlement_obligation(self):
         fill = equity_fill()

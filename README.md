@@ -29,14 +29,15 @@ bounded backpressure, heartbeat and reconnect handling, and emits the same
 standard library so it remains available in the isolated embedded runtime. It
 contains no private or order-writing route.
 
-The optional private bridge is limited in code to the documented main-account
-and trading-account balance reads. Install its isolated development dependency
-with `python -m pip install -r research/optional-whitebit-read-requirements.txt`
-and run `PYTHONPATH=research:. python -m unittest
-research.tests.test_whitebit_private_readonly`. API key and secret values must
-come from the protected `whitebit-primary` record at runtime. They must never be
-placed in Git, command-line arguments, diagnostics, model prompts or the Web UI.
-The bridge contains no BUY, SELL, transfer or withdrawal route.
+The dependency-free private bridge is limited in code to the documented
+main-account and trading-account balance reads. The `whitebit-primary` Windows
+Credential Manager profile was qualified live on 2026-10-20; run
+`python tools/configure_whitebit.py test --profile whitebit-primary` for a
+secret-redacted connection check and `PYTHONPATH=research:. python -m unittest
+research.tests.test_whitebit_private_readonly` for offline contract checks. API
+key and secret values must come from the protected record at runtime. They must
+never be placed in Git, command-line arguments, diagnostics, model prompts or
+the Web UI. The bridge contains no BUY, SELL, transfer or withdrawal route.
 
 
 ### Plan 10 Section 1: public archival ingestion (not a trading provider)

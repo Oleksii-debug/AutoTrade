@@ -439,6 +439,9 @@ class DurableReservationBookTests(unittest.TestCase):
                 cross_payload = dict(reconciliation["payload"])
                 cross_payload[field] = wrong_value
                 cross_event = dict(reconciliation)
+                # journal_sequence is local persistence metadata returned by
+                # JournalStore, not a canonical EventEnvelope wire field.
+                cross_event.pop("journal_sequence", None)
                 cross_event["event_id"] = event_id
                 cross_event["aggregate_id"] = "cross-scope-" + field
                 cross_event["aggregate_version"] = "1"

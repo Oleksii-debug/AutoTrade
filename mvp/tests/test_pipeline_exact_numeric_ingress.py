@@ -16,67 +16,46 @@ class HostileDecimal(Decimal):
     pass
 
 
-def _checkpoint(*, initial_cash="10000", postings=None, fills=None):
-    return {
-        "schema_version": 1,
-        "symbol": "SIM",
-        "initial_cash": initial_cash,
-        "postings": [] if postings is None else postings,
-        "fills": {} if fills is None else fills,
-        "evidence_ids": [],
-        "evidence_records": {},
-    }
+def _durable_bytes(root):
+    return {str(path.relative_to(root)): path.read_bytes()
+            for path in root.rglob("*") if path.is_file()}
 
 
 class PipelineExactNumericIngressTests(unittest.TestCase):
     def test_market_data_preserves_float_seam_but_rejects_decimal_subclasses(self):
         self.assertEqual(handle_market_data([100.125]), [Decimal("100.12500000")])
-        with self.assertRaisesRegex(ValueError, "Prices must be finite and positive"):
+        with self.assertRaisesRegex(ValueError, "Prices must be exact"):
             handle_market_data([HostileDecimal("100.125")])
 
     def test_checkpoint_initial_cash_resource_bomb_fails_before_mutation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
+            run_vertical_slice(["100", "101", "102"], root)
+            checkpoint = json.loads((root / "checkpoint.json").read_text(encoding="utf-8"))
+            checkpoint["initial_cash"] = "1e999999999999999999999999"
             (root / "checkpoint.json").write_text(
-                json.dumps(_checkpoint(initial_cash="1e999999999999999999999999")),
+                json.dumps(checkpoint),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "Corrupt checkpoint financial scalar"):
+            before = _durable_bytes(root)
+            with self.assertRaisesRegex(ValueError, "Checkpoint initial cash does not match financial configuration"):
                 run_vertical_slice(["100", "101", "102"], root)
-            self.assertFalse((root / "journal.sqlite3").exists())
-            self.assertFalse((root / "learning-evidence.jsonl").exists())
-            self.assertFalse((root / "order-intents").exists())
+            self.assertEqual(_durable_bytes(root), before)
 
     def test_checkpoint_posting_resource_bomb_fails_during_reconciliation(self):
-        fills = {
-            "intent-1": {
-                "fill_id": "fill-1",
-                "client_order_id": "intent-1",
-                "symbol": "SIM",
-                "side": "BUY",
-                "quantity": "1",
-                "price": "100",
-                "fee": "0.1",
-            }
-        }
-        postings = [
-            {
-                "fill_id": "fill-1",
-                "cash_delta": "-100.1",
-                "position_delta": "1e999999999999999999999999",
-                "fee": "0.1",
-            }
-        ]
         with TemporaryDirectory() as directory:
             root = Path(directory)
+            run_vertical_slice(["100", "101", "102"], root)
+            checkpoint = json.loads((root / "checkpoint.json").read_text(encoding="utf-8"))
+            checkpoint["postings"][0]["position_delta"] = "1e999999999999999999999999"
             (root / "checkpoint.json").write_text(
-                json.dumps(_checkpoint(postings=postings, fills=fills)),
+                json.dumps(checkpoint),
                 encoding="utf-8",
             )
-            with self.assertRaises(ValueError):
+            before = _durable_bytes(root)
+            with self.assertRaisesRegex(ValueError, "Corrupt checkpoint position_delta"):
                 run_vertical_slice(["100", "101", "102"], root)
-            self.assertFalse((root / "journal.sqlite3").exists())
-            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertEqual(_durable_bytes(root), before)
 
     def test_ledger_and_portfolio_ignore_ambient_decimal_context(self):
         ledger = EconomicLedger(

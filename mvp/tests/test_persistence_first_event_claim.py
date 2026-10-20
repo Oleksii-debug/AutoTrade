@@ -54,7 +54,7 @@ class FirstEventClaimTests(unittest.TestCase):
             self.assertTrue(result.inserted)
             self.assertEqual(result.aggregate_version, 1)
             self.assertEqual(store.current_journal_sequence(), 1)
-            persisted = store.get_event("owner-1")
+            persisted = store.get_event(event["event_id"])
             self.assertIsNotNone(persisted)
             self.assertEqual(persisted["aggregate_version"], 1)
             self.assertEqual(persisted["journal_sequence"], 1)

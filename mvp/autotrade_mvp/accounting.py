@@ -328,15 +328,18 @@ def _make_transaction_digest(
 ):
     """Bind digest primitives and fail closed if canonicalizer dependencies move."""
 
-    def digest(transaction: JournalTransaction) -> str:
+    def require_authority() -> None:
         for name, expected in critical_bindings:
             if _module_globals.get(name) is not expected:
                 raise _conflict_type(
                     "transaction digest authority dependency was rebound"
                 )
+
+    def digest(transaction: JournalTransaction) -> str:
+        require_authority()
         return _digest_payload(_canonicalize(transaction))
 
-    return digest
+    return digest, require_authority
 
 
 def _transaction_digest_fingerprint(
@@ -390,25 +393,37 @@ def _transaction_digest_fingerprint(
 
 def _make_cached_transaction_digest(
     digest_transaction,
+    require_authority,
     *,
     _fingerprint=_transaction_digest_fingerprint,
     _limit=_TRANSACTION_DIGEST_CACHE_LIMIT,
     _lock_factory=RLock,
     _conflict_type=AccountingConflict,
+    _identity=id,
 ):
     """Bind digest memoization state outside mutable module-global authority."""
 
-    cache: dict[tuple[object, ...], str] = {}
+    # Retain the exact object alongside the digest. This keeps a bounded cache
+    # from mistaking a later object that reuses the same CPython id for a hit.
+    cache: dict[
+        tuple[int, tuple[object, ...]],
+        tuple[JournalTransaction, str],
+    ] = {}
     lock = _lock_factory()
 
     def cached(transaction: JournalTransaction) -> str:
+        # A valid cache hit must not bypass the immutable canonicalization
+        # authority. The check itself is closure-bound and cannot be retargeted
+        # through module globals.
+        require_authority()
         fingerprint = _fingerprint(transaction)
         if fingerprint is None:
             return digest_transaction(transaction)
+        cache_key = (_identity(transaction), fingerprint)
         with lock:
-            value = cache.get(fingerprint)
-        if value is not None:
-            return value
+            cached_value = cache.get(cache_key)
+        if cached_value is not None and cached_value[0] is transaction:
+            return cached_value[1]
 
         digest = digest_transaction(transaction)
         # Direct frozen-dataclass tampering remains possible through
@@ -421,7 +436,10 @@ def _make_cached_transaction_digest(
         with lock:
             if len(cache) >= _limit:
                 cache.clear()
-            return cache.setdefault(fingerprint, digest)
+            incumbent = cache.setdefault(cache_key, (transaction, digest))
+            if incumbent[0] is not transaction:
+                raise _conflict_type("transaction digest cache identity collision")
+            return incumbent[1]
 
     return cached
 
@@ -504,8 +522,11 @@ def _initialize_transaction_digest_authority():
         ("_normalized_transaction", _normalized_transaction),
         ("validate_transaction", validate_transaction),
     )
-    digest = _make_transaction_digest(critical_bindings)
-    return digest, _make_cached_transaction_digest(digest)
+    digest, require_authority = _make_transaction_digest(critical_bindings)
+    return digest, _make_cached_transaction_digest(
+        digest,
+        require_authority,
+    )
 
 
 transaction_digest, _cached_transaction_digest = (
@@ -767,10 +788,12 @@ def _scoped_economic_owner_operations(
             book = book_ref()
         if _exact_type(value) is not owner_type:
             raise _type_error("scoped economic authority owner type changed")
-        if book is None:
-            raise _conflict_type("immutable scoped-book owner was lost")
         state = _getattribute(value, "__dict__")
         current_book = state.get("_book")
+        if book is None:
+            if current_book is not None:
+                raise _conflict_type("immutable scoped-book owner changed")
+            raise _conflict_type("immutable scoped-book owner was lost")
         if _exact_type(current_book) is not book_type:
             raise _type_error("ScopedEconomicBook canonical book type changed")
         if (
@@ -794,12 +817,18 @@ def _make_scoped_economic_facade(
     require_owner,
     *,
     _digest_payload=payload_digest,
+    _canonical_transactions=EconomicBook.transactions.fget,
 ):
     """Bind every scoped-book operation to the immutable owner selected at import."""
 
     def transactions(self):
         _environment, _account_id, book = require_owner(self)
         return book.transactions
+
+    def settlement_projection(self):
+        """Read an authenticated scope and canonical cut without exposing its book."""
+        environment, account_id, book = require_owner(self)
+        return environment, account_id, _canonical_transactions(book)
 
     def append(self, transaction: JournalTransaction) -> bool:
         _environment, _account_id, book = require_owner(self)
@@ -838,6 +867,7 @@ def _make_scoped_economic_facade(
 
     return (
         property(transactions),
+        property(settlement_projection),
         append,
         append_batch,
         balance,
@@ -850,6 +880,7 @@ def _make_scoped_economic_facade(
 
 (
     _scoped_transactions,
+    _scoped_settlement_projection,
     _scoped_append,
     _scoped_append_batch,
     _scoped_balance,
@@ -906,6 +937,7 @@ class ScopedEconomicBook:
     _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
     transactions = _scoped_transactions
+    settlement_projection = _scoped_settlement_projection
     append = _scoped_append
     append_batch = _scoped_append_batch
     balance = _scoped_balance
@@ -916,6 +948,7 @@ class ScopedEconomicBook:
 
 
 del _scoped_transactions
+del _scoped_settlement_projection
 del _scoped_append
 del _scoped_append_batch
 del _scoped_balance

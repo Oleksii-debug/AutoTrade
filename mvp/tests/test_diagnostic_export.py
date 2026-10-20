@@ -1,4 +1,6 @@
 """Shareable reports must remain faithful to durable evidence and inert."""
+from datetime import datetime, timezone
+from decimal import Decimal
 import json
 from hashlib import sha256
 from io import BytesIO
@@ -17,6 +19,45 @@ from mvp.autotrade_mvp.diagnostic_export import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 from mvp.autotrade_mvp.runtime_diagnostic_sampler import RuntimeDiagnosticSampler
+from mvp.autotrade_mvp.groq_advisory_research import (
+    ADVISORY_ROLES,
+    DurableGroqAdvisoryWave,
+)
+from mvp.autotrade_mvp.model_call import ModelCallObservation
+
+
+GROQ_NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def _groq_evidence(directory: Path) -> None:
+    calls = {}
+    for role in ADVISORY_ROLES:
+        def call(binding, _cancelled, selected=role):
+            return ModelCallObservation(
+                provider_id="groq",
+                model_id=binding.model_id,
+                revision=binding.revision,
+                observed_at="2026-10-20T12:00:00Z",
+                incurred_cost=Decimal(0),
+                estimated_unbilled=Decimal(0),
+                output={
+                    "text": (
+                        selected.role
+                        + ": reject unproven hypothesis; gsk_SECRET1234567890"
+                    ),
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                },
+                provider_response_id="response-" + selected.role,
+                usage_id="usage-" + selected.role,
+            )
+        calls[role.role] = call
+    DurableGroqAdvisoryWave(
+        directory, calls_by_role=calls, clock=lambda: GROQ_NOW
+    ).run(
+        wave_id="diagnostic-wave",
+        research_input={"evidence_class": "PUBLIC_MARKET_ZERO"},
+    )
 
 
 class DiagnosticExportTests(unittest.TestCase):
@@ -120,6 +161,105 @@ class DiagnosticExportTests(unittest.TestCase):
                     archive.read("technical-heartbeats.jsonl").splitlines()[0]
                 )
                 self.assertEqual(heartbeat["api_key"], "[REDACTED]")
+
+    def test_agent_zip_includes_sanitized_groq_events_summary_and_quota(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            groq = root / "groq-advisory"
+            run_vertical_slice([100, 101, 102, 103], state)
+            _groq_evidence(groq)
+
+            report = agent_report_zip(
+                JournalStore(state / "journal.sqlite3"),
+                state,
+                source_revision="c" * 40,
+                groq_advisory_state_dir=groq,
+            )
+
+            self.assertNotIn(b"gsk_", report.data)
+            with ZipFile(BytesIO(report.data)) as archive:
+                names = set(archive.namelist())
+                self.assertIn("groq-advisory/events.jsonl", names)
+                self.assertIn("groq-advisory/summary.json", names)
+                self.assertIn("groq-advisory/quota-snapshot.json", names)
+                self.assertNotIn("groq-advisory.sqlite3", names)
+                self.assertNotIn("groq-quota.sqlite3", names)
+                manifest = json.loads(archive.read("manifest.json"))
+                self.assertTrue(manifest["groq_advisory"]["included"])
+                self.assertEqual(manifest["groq_advisory"]["wave_count"], 1)
+                summary = json.loads(
+                    archive.read("groq-advisory/summary.json")
+                )
+                quota = json.loads(
+                    archive.read("groq-advisory/quota-snapshot.json")
+                )
+                self.assertEqual(summary["status"], "COMPLETED")
+                self.assertFalse(summary["financial_authority"])
+                self.assertEqual(quota["status"], "AVAILABLE")
+                self.assertEqual(len(quota["profiles"]), 12)
+                for name, evidence in manifest["members"].items():
+                    self.assertEqual(
+                        sha256(archive.read(name)).hexdigest(), evidence["sha256"]
+                    )
+
+    def test_groq_export_fails_closed_for_nonfile_and_oversized_mirror(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            groq = root / "groq-advisory"
+            run_vertical_slice([100, 101, 102, 103], state)
+            _groq_evidence(groq)
+            quota = groq / "groq-quota.sqlite3"
+            quota.unlink()
+            quota.mkdir()
+            with self.assertRaisesRegex(ValueError, "ordinary unaliased file"):
+                agent_report_zip(
+                    JournalStore(state / "journal.sqlite3"),
+                    state,
+                    source_revision="d" * 40,
+                    groq_advisory_state_dir=groq,
+                )
+            quota.rmdir()
+            # A missing quota journal is represented explicitly, but an
+            # oversized durable mirror is rejected before any export.
+            mirror = groq / "groq-advisory-events.jsonl"
+            with mirror.open("wb") as stream:
+                stream.seek(16 * 1024 * 1024)
+                stream.write(b"x")
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                agent_report_zip(
+                    JournalStore(state / "journal.sqlite3"),
+                    state,
+                    source_revision="e" * 40,
+                    groq_advisory_state_dir=groq,
+                )
+
+    def test_groq_export_rejects_symlink_evidence(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            groq = root / "groq-advisory"
+            run_vertical_slice([100, 101, 102, 103], state)
+            _groq_evidence(groq)
+            mirror = groq / "groq-advisory-events.jsonl"
+            outside = root / "outside.jsonl"
+            outside.write_text('{}\n', encoding="utf-8")
+            mirror.unlink()
+            try:
+                mirror.symlink_to(outside)
+            except OSError as error:
+                self.skipTest(
+                    "file symlinks unavailable on this host: "
+                    + str(getattr(error, "winerror", error))
+                )
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                agent_report_zip(
+                    JournalStore(state / "journal.sqlite3"),
+                    state,
+                    source_revision="f" * 40,
+                    groq_advisory_state_dir=groq,
+                )
 
 
 if __name__ == "__main__":

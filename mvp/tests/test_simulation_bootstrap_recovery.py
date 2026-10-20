@@ -1,5 +1,6 @@
 """Crash-boundary recovery tests for canonical simulation store ownership."""
 
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
@@ -25,7 +26,7 @@ def _foreign_event(store: JournalStore) -> None:
     payload = {"kind": "foreign"}
     store.append_event(
         {
-            "event_id": "foreign-event",
+            "event_id": "00000000-0000-4000-8000-000000000001",
             "event_type": "ForeignEvent",
             "schema_version": "1.0.0",
             "aggregate_type": "foreign",
@@ -37,7 +38,7 @@ def _foreign_event(store: JournalStore) -> None:
             "occurred_at": NOW,
             "observed_at": NOW,
             "committed_at": NOW,
-            "correlation_id": "foreign-correlation",
+            "correlation_id": "00000000-0000-4000-8000-000000000002",
             "causation_id": None,
             "payload": payload,
             "payload_hash": payload_digest(payload),
@@ -167,7 +168,7 @@ class SimulationBootstrapRecoveryTests(unittest.TestCase):
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
             before_sequence = store.current_journal_sequence()
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 deleted = connection.execute("DELETE FROM outbox")
                 self.assertEqual(deleted.rowcount, 1)
                 connection.commit()

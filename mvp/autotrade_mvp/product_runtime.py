@@ -150,6 +150,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         desktop_session_sink,
         diagnostic_sampler,
         whitebit_learning_state_dir,
+        groq_advisory_state_dir,
         **kwargs,
     ):
         self.state_dir = state_dir
@@ -160,6 +161,9 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         if type(whitebit_learning_state_dir) is not type(Path()):
             raise TypeError('whitebit learning state directory must be an exact path')
         self._whitebit_learning_state_dir = whitebit_learning_state_dir
+        if type(groq_advisory_state_dir) is not type(Path()):
+            raise TypeError('Groq advisory state directory must be an exact path')
+        self._groq_advisory_state_dir = groq_advisory_state_dir
         self._pairing_code = pairing_code
         self._pairing_lock = Lock()
         if not callable(desktop_session_sink):
@@ -191,6 +195,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                 live_learning_status=read_whitebit_live_learning_status(
                     self._whitebit_learning_state_dir
                 ),
+                groq_advisory_state_dir=self._groq_advisory_state_dir,
             ),
             '/api/v1/technical-diagnostics': lambda: technical_diagnostic_zip(
                 self._diagnostic_sampler,
@@ -322,6 +327,7 @@ def build_product(
     desktop_session_sink=None,
     whitebit_public_state_dir=None,
     whitebit_learning_state_dir=None,
+    groq_advisory_state_dir=None,
     public_learning=False,
 ):
     if type(public_learning) is not bool:
@@ -350,6 +356,14 @@ def build_product(
             str(data / 'whitebit-live-zero-learning'),
         )
     whitebit_learning_state = Path(whitebit_learning_state_dir).resolve(strict=False)
+    if groq_advisory_state_dir is None:
+        groq_advisory_state_dir = os.environ.get(
+            'AUTOTRADE_GROQ_ADVISORY_STATE_DIR',
+            str(data / 'groq-advisory'),
+        )
+    groq_advisory_state = Path(groq_advisory_state_dir)
+    if not groq_advisory_state.is_absolute():
+        raise ValueError('Groq advisory state directory must be absolute')
     if public_learning and (
         whitebit_public_state != data / 'whitebit-public-supervisor'
         or whitebit_learning_state != data / 'whitebit-live-zero-learning'
@@ -438,6 +452,7 @@ def build_product(
             desktop_session_sink=session_sink,
             diagnostic_sampler=diagnostic_sampler,
             whitebit_learning_state_dir=whitebit_learning_state,
+            groq_advisory_state_dir=groq_advisory_state,
         ))
     def finalize_owned_work():
         # A failed research drain must retain the Host fence and block a clean

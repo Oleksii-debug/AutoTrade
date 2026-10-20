@@ -224,11 +224,17 @@ class RuntimeLoadCampaignTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             injected = False
+            completed_runs = 0
 
             def run_with_unrelated_event(episode, state_dir):
-                nonlocal injected
+                nonlocal injected, completed_runs
                 result = real_run_vertical_slice(episode, state_dir)
-                if not injected:
+                completed_runs += 1
+                # This test owns the load collector's financial-event
+                # classification.  Add the diagnostic only after the final
+                # product run so the separate fail-closed replay contract is
+                # not bypassed or contradicted by the fixture.
+                if not injected and completed_runs == 3:
                     store = JournalStore(root / "journal.sqlite3")
                     payload = {"kind": "qualification-diagnostic"}
                     committed_at = datetime.now(timezone.utc).isoformat()

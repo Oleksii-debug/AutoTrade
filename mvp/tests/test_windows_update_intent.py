@@ -16,6 +16,7 @@ import mvp.autotrade_mvp.windows_update as update
 
 
 SOURCE_PLAN_DIGEST = "sha256:" + "a" * 64
+CANDIDATE_PACKAGE_DIGEST = "sha256:" + "c" * 64
 
 
 class WindowsUpdateIntentTests(unittest.TestCase):
@@ -32,6 +33,9 @@ class WindowsUpdateIntentTests(unittest.TestCase):
         self.fixture = {
             "install_steps": list(update._INSTALL_STEPS),
             "rollback": {"steps": list(update._ROLLBACK_STEPS)},
+            "candidate_release": {
+                "windows_package_sha256": CANDIDATE_PACKAGE_DIGEST,
+            },
         }
         p = patch.object(update, "_plan_document", return_value=self.fixture)
         p.start()
@@ -61,6 +65,7 @@ class WindowsUpdateIntentTests(unittest.TestCase):
         cp = update.WindowsUpdateCheckpoint(
             plan_sha256=SOURCE_PLAN_DIGEST,
             update_completed_steps=(update._INSTALL_STEPS[0],),
+            verified_candidate_package_sha256=CANDIDATE_PACKAGE_DIGEST,
         )
         intent = update.prepare_windows_update_step_intent(
             self.plan, cp, trust=self.trust,
@@ -211,6 +216,7 @@ class WindowsUpdateIntentTests(unittest.TestCase):
         cp = update.WindowsUpdateCheckpoint(
             plan_sha256=SOURCE_PLAN_DIGEST,
             update_completed_steps=(update._INSTALL_STEPS[0],),
+            verified_candidate_package_sha256=CANDIDATE_PACKAGE_DIGEST,
         )
         doc["checkpoint_json"] = update.serialize_update_checkpoint(cp)
         import hashlib
@@ -253,6 +259,7 @@ class WindowsUpdateIntentTests(unittest.TestCase):
         progressed = update.WindowsUpdateCheckpoint(
             plan_sha256=SOURCE_PLAN_DIGEST,
             update_completed_steps=(update._INSTALL_STEPS[0],),
+            verified_candidate_package_sha256=CANDIDATE_PACKAGE_DIGEST,
         )
         with self.assertRaisesRegex(update.WindowsUpdateError, "differs from restart"):
             update.assess_windows_update_restart(
@@ -271,6 +278,7 @@ class WindowsUpdateIntentTests(unittest.TestCase):
         cp = update.WindowsUpdateCheckpoint(
             plan_sha256=SOURCE_PLAN_DIGEST,
             update_completed_steps=update._INSTALL_STEPS[:transition],
+            verified_candidate_package_sha256=CANDIDATE_PACKAGE_DIGEST,
         )
         intent = update.prepare_windows_update_step_intent(
             self.plan, cp, trust=self.trust,
@@ -290,6 +298,7 @@ class WindowsUpdateIntentTests(unittest.TestCase):
         cp = update.WindowsUpdateCheckpoint(
             plan_sha256=SOURCE_PLAN_DIGEST,
             update_completed_steps=update._INSTALL_STEPS[:index],
+            verified_candidate_package_sha256=CANDIDATE_PACKAGE_DIGEST,
         )
         intent = update.prepare_windows_update_step_intent(
             self.plan, cp, trust=self.trust,

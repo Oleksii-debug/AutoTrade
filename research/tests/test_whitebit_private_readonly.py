@@ -36,7 +36,8 @@ class RecordingTransport:
         self.calls.append(kwargs)
         if self.responder is not None:
             return self.responder(kwargs)
-        return PrivateHttpResponse(200, "application/json", b"{}")
+        body = b"[]" if kwargs["path"] == MAIN_BALANCE_PATH else b"{}"
+        return PrivateHttpResponse(200, "application/json", body)
 
     def close(self):
         self.closed += 1
@@ -210,7 +211,7 @@ class WhitebitPrivateReadTests(unittest.TestCase):
                 "TOO_LARGE",
             ),
             (PrivateHttpResponse(200, "application/json", b"not-json"), "JSON_INVALID"),
-            (PrivateHttpResponse(200, "application/json", b"[]"), "JSON_INVALID"),
+            (PrivateHttpResponse(200, "application/json", b"{}"), "JSON_INVALID"),
             (
                 PrivateHttpResponse(200, "application/json", b'{"USDT":{},"USDT":{}}'),
                 "JSON_INVALID",
@@ -235,6 +236,36 @@ class WhitebitPrivateReadTests(unittest.TestCase):
             ) as reader:
                 with self.assertRaisesRegex(PrivateReadError, message):
                     reader.main_balance()
+
+    def test_main_balance_accepts_empty_and_object_arrays(self):
+        for body in (b"[]", b'[{"ticker":"USDT","balance":"0"}]'):
+            with self.subTest(body=body), WhitebitPrivateReader(
+                "key",
+                "secret",
+                transport=RecordingTransport(
+                    lambda _, response_body=body: PrivateHttpResponse(
+                        200, "application/json", response_body
+                    )
+                ),
+            ) as reader:
+                observation = reader.main_balance()
+            self.assertEqual(observation.body, body)
+
+    def test_main_balance_rejects_non_object_array_entries(self):
+        transport = RecordingTransport(
+            lambda _: PrivateHttpResponse(200, "application/json", b'["USDT"]')
+        )
+        with WhitebitPrivateReader("key", "secret", transport=transport) as reader:
+            with self.assertRaisesRegex(PrivateReadError, "JSON_INVALID"):
+                reader.main_balance()
+
+    def test_trading_balance_still_requires_an_object(self):
+        transport = RecordingTransport(
+            lambda _: PrivateHttpResponse(200, "application/json", b"[]")
+        )
+        with WhitebitPrivateReader("key", "secret", transport=transport) as reader:
+            with self.assertRaisesRegex(PrivateReadError, "JSON_INVALID"):
+                reader.trading_balance()
 
     def test_closed_session_and_transport_cleanup(self):
         transport = RecordingTransport()
@@ -265,7 +296,7 @@ class WhitebitPrivateReadTests(unittest.TestCase):
             @staticmethod
             def read(limit):
                 events.append(("read", limit))
-                return b"{}"
+                return b"[]"
 
         class Connection:
             def __init__(self, host, port, *, timeout, context):
@@ -300,7 +331,7 @@ class WhitebitPrivateReadTests(unittest.TestCase):
             ),
         ):
             response = transport.post(**call)
-        self.assertEqual(response.body, b"{}")
+        self.assertEqual(response.body, b"[]")
         self.assertEqual(
             events[0],
             ("connect", WHITEBIT_PRIVATE_HOST, WHITEBIT_PRIVATE_PORT, 10.0, context),

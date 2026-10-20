@@ -203,9 +203,17 @@ Migration note: old parked/partial PRs may have stale bases after the control-pl
 
 Update this file in the same closure/reopen run whenever a new-plan Section status changes.
 
-## Current provider-input rule — 2026-10-08
+## Current provider-input rule — 2026-10-20
 
-Missing real provider/account/credential data is a normal expected state, not a development blocker. Plan 6 closes offline against fixtures. Plan 8 is provider-free. Plan 9 Sections 2–6 stay parked until external activation is actually desired; workers must not ask the owner for provider data merely to keep working.
+WhiteBIT `AutoTrade_Primary_Read` is now present in the protected
+`whitebit-primary` Windows Credential Manager profile and passed live signed
+main-account plus trading-balance reads. The bridge remains structurally limited
+to those reads and the key has no order-management, deposit, withdrawal,
+transfer, leverage, convert, or sub-account authority. This closes the previously
+unverified private **READ binding** fact only. It does not activate or claim Plan
+9 PAPER/LIVE trading, does not change the terminal 30/30 PRIVATE/ZERO status, and
+does not alter the provider-independent closure of Plans 6 and 8. Evidence and
+the stale-state correction are converged through PR #2414.
 
 ## Canonical UI rule — 2026-10-08
 

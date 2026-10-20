@@ -51,6 +51,7 @@ def candidate_report(candidate_id: str, *, pnl: str = "300", dataset: str = EVAL
     return {
         "dataset_identity_sha256": dataset.removeprefix("sha256:"),
         "historical_start_utc": BASE.isoformat().replace("+00:00", "Z"),
+        "adverse_half_spread_bps": "5",
         "registered_strategy_candidate": {"candidate_id": candidate_id},
         "simulation": {
             "status": "PAUSED",
@@ -61,6 +62,26 @@ def candidate_report(candidate_id: str, *, pnl: str = "300", dataset: str = EVAL
             "starting_cash_usd": "1000",
             "agent_mark_pnl_usd": pnl,
             "agent_max_mark_drawdown_fraction": "0.02",
+            "agent_gross_mark_turnover_proxy_fraction": "1.25",
+            "scenario_fee_rate": "0.001",
+            "adverse_slippage_bps": "10",
+            "missed_fill_metrics": {
+                "execution_intents": 8,
+                "missed_fills": 0,
+                "non_order_decisions": 16,
+                "reconciled_fills": 8,
+            },
+            "causal_regime_analysis": {
+                "status": "CAUSAL_TIME_SLICE_NOT_CAUSAL_EFFECT_OR_PROFIT_CLAIM",
+                "summary": {
+                    "RANGE_QUIET": {
+                        "cost_adjusted_mark_pnl_usd": pnl,
+                        "episodes": 24,
+                        "nonpositive_episode_returns": 10,
+                        "positive_episode_returns": 14,
+                    },
+                },
+            },
             "asof_execution_open_utc": (
                 BASE + timedelta(days=1)
             ).isoformat().replace("+00:00", "Z"),
@@ -207,9 +228,93 @@ class CandidateMatrixTests(unittest.TestCase):
         self.assertFalse(objectives["TARGET_50"]["qualification_passed"])
         self.assertFalse(objectives["OPPORTUNITY_RESEARCH"]["candidate_allowed"])
         self.assertIn("return-3-002", matrix["qualified_candidate_ids"])
+        self.assertEqual(
+            momentum["post_experiment_analysis"]["starting_capital"]["amount"],
+            "1000",
+        )
+        self.assertEqual(
+            momentum["post_experiment_analysis"]["reconciled_trade_count"]
+            ["reconciled_trade_decisions"],
+            8,
+        )
+        self.assertEqual(
+            momentum["post_experiment_analysis"]["turnover"]
+            ["reference_open_proxy_notional_usd"],
+            "1250.00",
+        )
+        self.assertEqual(
+            momentum["post_experiment_analysis"]["modeled_cost_attribution"]
+            ["fees"]["status"],
+            "UNAVAILABLE_EVIDENCE_GAP",
+        )
+        self.assertIsNone(
+            momentum["post_experiment_analysis"]["gross_pnl_before_modeled_costs"]
+            ["amount_usd"]
+        )
+        self.assertEqual(
+            momentum["post_experiment_analysis"]["causal_regime_summary"]
+            ["regimes"]["RANGE_QUIET"]["episodes"],
+            24,
+        )
+        self.assertEqual(
+            momentum["post_experiment_analysis"]["versus_no_trade"]
+            ["candidate_minus_no_trade_net_pnl_after_costs_usd"],
+            "0",
+        )
         self.assertFalse(matrix["automatic_champion_promotion"])
         self.assertFalse(matrix["promotion_authority_invoked"])
         self.assertFalse(matrix["network_orders"])
+
+    def test_absent_cost_detail_is_explicit_and_malformed_counts_fail_closed(self):
+        candidates = default_candidates(proposal_quantity="1")
+        reports = {
+            item.candidate_id: candidate_report(item.candidate_id)
+            for item in candidates
+        }
+        for report in reports.values():
+            comparative = report["comparative_report"]
+            comparative.pop("missed_fill_metrics")
+            comparative.pop("agent_gross_mark_turnover_proxy_fraction")
+            comparative.pop("causal_regime_analysis")
+        common = dict(
+            workstreams=streams(),
+            manifest_sha256=organism_manifest(streams())["manifest_sha256"],
+            training_dataset_sha256=TRAIN,
+            evaluation_dataset_sha256=EVAL,
+            candidates=candidates,
+            evaluation_reports=reports,
+            evaluation_report_sha256={key: self.digest(value)
+                                      for key, value in reports.items()},
+            evaluation_started_at=BASE,
+            evaluation_ended_at=BASE + timedelta(days=1),
+            evaluation_window_seconds=86400,
+            minimum_evaluation_episodes=24,
+            incumbent_candidate_id="no-trade-control",
+            selected_candidate_id="return-3-002",
+        )
+        matrix = evaluate_candidate_matrix(**common)
+        analysis = matrix["candidates"][0]["post_experiment_analysis"]
+        self.assertEqual(
+            analysis["reconciled_trade_count"]["status"],
+            "UNAVAILABLE_EVIDENCE_GAP",
+        )
+        self.assertEqual(
+            analysis["turnover"]["status"], "UNAVAILABLE_EVIDENCE_GAP"
+        )
+        self.assertEqual(
+            analysis["causal_regime_summary"]["status"],
+            "UNAVAILABLE_EVIDENCE_GAP",
+        )
+
+        broken = candidate_report("no-trade-control")
+        broken["comparative_report"]["missed_fill_metrics"]["reconciled_fills"] = 7
+        reports["no-trade-control"] = broken
+        common["evaluation_reports"] = reports
+        common["evaluation_report_sha256"] = {
+            key: self.digest(value) for key, value in reports.items()
+        }
+        with self.assertRaisesRegex(ValueError, "do not reconcile"):
+            evaluate_candidate_matrix(**common)
 
     def test_same_train_eval_cut_and_report_tamper_are_rejected(self):
         candidates = default_candidates(proposal_quantity="1")

@@ -946,12 +946,17 @@ class SettlementBook:
         """
 
         owner_scope = None
+        transactions = None
         if type(economic_book) is EconomicBook:
             canonical_book = economic_book
         elif type(economic_book) is ScopedEconomicBook:
-            from .accounting import _require_scoped_economic_book_owner, AccountingConflict
+            from .accounting import AccountingConflict
             try:
-                environment, account_id, canonical_book = _require_scoped_economic_book_owner(economic_book)
+                environment, account_id, transactions = (
+                    ScopedEconomicBook.settlement_projection.__get__(
+                        economic_book, ScopedEconomicBook,
+                    )
+                )
             except AccountingConflict as error:
                 raise SettlementConflict(str(error)) from error
             owner_scope = (None, account_id, environment, None)
@@ -977,10 +982,11 @@ class SettlementBook:
         # Take one canonical class-owned transaction cut and use it throughout
         # the projection.  This keeps caller-polymorphic properties/methods and
         # per-instance method shadows outside financial authority.
-        transactions = EconomicBook.transactions.__get__(
-            canonical_book,
-            EconomicBook,
-        )
+        if transactions is None:
+            transactions = EconomicBook.transactions.__get__(
+                canonical_book,
+                EconomicBook,
+            )
         if any(type(transaction) is not JournalTransaction for transaction in transactions):
             raise TypeError(
                 "economic projection requires exact JournalTransaction values"

@@ -141,7 +141,7 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
             ambiguity_reason="provider_http_5xx_execution_unknown",
         )
         self.assertEqual(len(exact.response_bytes), HARD_MAX_PROVIDER_RESPONSE_BYTES)
-        with self.assertRaisesRegex(ValueError, "shared byte budget"):
+        with self.assertRaisesRegex(ValueError, "provider response exceeds byte budget"):
             ExactJsonTransportResponse(
                 at_limit + b"x",
                 http_status=503,

@@ -80,8 +80,41 @@ class OpenAICompatibleSettings:
         ) / Decimal(1_000_000)
 
 
+@dataclass(frozen=True, slots=True)
+class OpenAICompatibleTransportResponse:
+    """Optional transport envelope for bounded non-authoritative diagnostics."""
+
+    payload: dict
+    rate_limit_headers: dict[str, str]
+
+    def __post_init__(self) -> None:
+        if type(self.payload) is not dict or type(self.rate_limit_headers) is not dict:
+            raise TypeError("AI provider transport response is invalid")
+        allowed = {
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-limit-tokens",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-reset-tokens",
+        }
+        sanitized: dict[str, str] = {}
+        for name, value in self.rate_limit_headers.items():
+            if type(name) is not str or type(value) is not str:
+                raise TypeError("AI provider rate-limit header is invalid")
+            canonical = name.lower()
+            if canonical not in allowed or len(value) > 64 or not value.isascii():
+                raise ValueError("AI provider rate-limit header is invalid")
+            if canonical in sanitized:
+                raise ValueError("AI provider rate-limit header is duplicated")
+            sanitized[canonical] = value
+        object.__setattr__(self, "payload", dict(self.payload))
+        object.__setattr__(self, "rate_limit_headers", sanitized)
+
+
 Transport = Callable[
-    [ModelProviderEndpoint, str, str, bytes | None, str, int, int], dict,
+    [ModelProviderEndpoint, str, str, bytes | None, str, int, int],
+    dict | OpenAICompatibleTransportResponse,
 ]
 
 
@@ -93,7 +126,7 @@ def _transport(
     key: str,
     timeout: int,
     maximum_response_bytes: int,
-) -> dict:
+) -> dict | OpenAICompatibleTransportResponse:
     if type(endpoint) is not ModelProviderEndpoint:
         raise OpenAICompatibleAdapterError("AI provider endpoint is invalid")
     allowed_paths = (endpoint.chat_path, endpoint.models_path)
@@ -126,6 +159,27 @@ def _transport(
         value = json.loads(raw)
         if type(value) is not dict:
             raise OpenAICompatibleAdapterError("AI provider response shape is invalid")
+        rate_limit_headers: dict[str, str] = {}
+        if endpoint.provider_id == "groq":
+            allowed = {
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-reset-requests",
+                "x-ratelimit-limit-tokens",
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-reset-tokens",
+            }
+            for name, header_value in response.getheaders():
+                canonical = name.lower()
+                if (
+                    canonical in allowed
+                    and canonical not in rate_limit_headers
+                    and len(header_value) <= 64
+                    and header_value.isascii()
+                ):
+                    rate_limit_headers[canonical] = header_value
+        if rate_limit_headers:
+            return OpenAICompatibleTransportResponse(value, rate_limit_headers)
         return value
     except OpenAICompatibleAdapterError:
         raise
@@ -187,7 +241,7 @@ class OpenAICompatibleInferenceAdapter:
         """Read-only catalog probe; never sends a prompt or trading decision."""
 
         settings = self.settings
-        response = self._transport(
+        transported = self._transport(
             self.endpoint,
             "GET",
             self.endpoint.models_path,
@@ -196,6 +250,13 @@ class OpenAICompatibleInferenceAdapter:
             settings.timeout_seconds,
             settings.maximum_response_bytes,
         )
+        response = (
+            transported.payload
+            if type(transported) is OpenAICompatibleTransportResponse
+            else transported
+        )
+        if type(response) is not dict:
+            raise OpenAICompatibleAdapterError("AI provider response shape is invalid")
         data = response.get("data")
         if type(data) is not list:
             raise OpenAICompatibleAdapterError("AI provider model catalog is invalid")
@@ -248,7 +309,7 @@ class OpenAICompatibleInferenceAdapter:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        response = self._transport(
+        transported = self._transport(
             self.endpoint,
             "POST",
             self.endpoint.chat_path,
@@ -257,6 +318,14 @@ class OpenAICompatibleInferenceAdapter:
             settings.timeout_seconds,
             settings.maximum_response_bytes,
         )
+        if type(transported) is OpenAICompatibleTransportResponse:
+            response = transported.payload
+            rate_limit_headers = transported.rate_limit_headers
+        else:
+            response = transported
+            rate_limit_headers = {}
+        if type(response) is not dict:
+            raise OpenAICompatibleAdapterError("AI provider response shape is invalid")
         if self._cancelled(cancelled):
             raise OpenAICompatibleAdapterError("model call cancelled")
 
@@ -315,6 +384,13 @@ class OpenAICompatibleInferenceAdapter:
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest()
+        output = {
+            "text": message["content"],
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+        }
+        if settings.provider_id == "groq" and rate_limit_headers:
+            output["provider_rate_limit_headers"] = dict(rate_limit_headers)
         return ModelCallObservation(
             provider_id=settings.provider_id,
             model_id=settings.model_id,
@@ -322,11 +398,7 @@ class OpenAICompatibleInferenceAdapter:
             observed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             incurred_cost=Decimal(0),
             estimated_unbilled=cost,
-            output={
-                "text": message["content"],
-                "prompt_tokens": input_tokens,
-                "completion_tokens": output_tokens,
-            },
+            output=output,
             provider_response_id=response_id,
             usage_id=f"{settings.provider_id}-usage-sha256:{usage_identity}",
         )

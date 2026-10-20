@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime as real_datetime, timezone
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from hashlib import sha256
@@ -13,6 +14,43 @@ from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 class VerticalSliceTests(unittest.TestCase):
+    def test_interrupted_first_intent_cannot_be_adopted_by_another_episode(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(SimulatedProvider, "execute", side_effect=RuntimeError("crash")):
+                with self.assertRaises(RuntimeError):
+                    run_vertical_slice([100, 101, 102, 103], root)
+            before = {str(path.relative_to(root)): path.read_bytes()
+                      for path in root.rglob("*") if path.is_file()}
+            with self.assertRaisesRegex(ValueError, "Durable order intents do not match checkpoint fills"):
+                run_vertical_slice([110, 111, 112, 113], root)
+            self.assertEqual(
+                {str(path.relative_to(root)): path.read_bytes()
+                 for path in root.rglob("*") if path.is_file()}, before,
+            )
+            recovered = run_vertical_slice([100, 101, 102, 103], root)
+            self.assertEqual(recovered.position, 1)
+            self.assertTrue(verify_replay(root))
+
+    def test_legacy_recovery_required_preserves_every_saved_file(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_vertical_slice([100, 101, 102, 103], root)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["schema_version"] = 1
+            checkpoint.pop("financial_configuration")
+            checkpoint.pop("financial_configuration_hash")
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            before = {str(path.relative_to(root)): path.read_bytes()
+                      for path in root.rglob("*") if path.is_file()}
+            with self.assertRaisesRegex(ValueError, "recovery required: saved data is preserved"):
+                run_vertical_slice([100, 101, 102, 103], root)
+            self.assertEqual(
+                {str(path.relative_to(root)): path.read_bytes()
+                 for path in root.rglob("*") if path.is_file()}, before,
+            )
+
     def test_full_path_and_restart_are_idempotent(self):
         with TemporaryDirectory() as directory:
             first = run_vertical_slice([100, 101, 102, 103], directory)
@@ -198,9 +236,11 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual([item.status for item in results], ["filled", "hold", "filled"])
             self.assertEqual(results[-1].position, 0)
             self.assertEqual(results[-1].evidence_count, 3)
-            with patch.object(SimulatedProvider, "execute", side_effect=RuntimeError("simulated crash")):
-                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
-                    run_multi_episode(episodes, directory)
+            # Already committed episodes are observational replay, not a new
+            # execution attempt against a portfolio that has moved forward.
+            with patch.object(SimulatedProvider, "execute", side_effect=RuntimeError("simulated crash")) as execute:
+                run_multi_episode(episodes, directory)
+                execute.assert_not_called()
             restarted = run_multi_episode(episodes, directory)
             self.assertEqual([item.decision for item in restarted], ["BUY", "HOLD", "SELL"])
             self.assertEqual([item.status for item in restarted], ["filled", "hold", "filled"])
@@ -602,7 +642,7 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "Corrupt simulation journal replay event",
+                "Checkpoint replay evidence equity does not match valuation",
             ):
                 run_vertical_slice(
                     [103, 102, 101, 100],
@@ -648,7 +688,7 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "Learning evidence conflicts with checkpoint before replay repair",
+                "Corrupt learning evidence before replay repair",
             ):
                 run_vertical_slice(
                     [103, 102, 101, 100],
@@ -866,7 +906,7 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "does not match final financial state",
+                "Checkpoint replay evidence equity does not match valuation",
             ):
                 run_vertical_slice(
                     [103, 102, 101, 100],
@@ -1598,7 +1638,7 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "Checkpoint replay fill violates bound risk admission",
+                "Corrupt checkpoint replay evidence semantics",
             ):
                 run_vertical_slice([103, 102, 101, 100], directory)
 
@@ -1949,7 +1989,7 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertFalse(verify_replay(directory))
             with self.assertRaisesRegex(
                 ValueError,
-                "Learning evidence conflicts with checkpoint",
+                "Corrupt learning evidence before replay repair",
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
@@ -2053,7 +2093,7 @@ class VerticalSliceTests(unittest.TestCase):
             root = Path(directory)
             database = root / "journal.sqlite3"
 
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection, connection:
                 connection.execute(
                     "UPDATE outbox SET payload_json = ?",
                     ("{}",),
@@ -2077,7 +2117,7 @@ class VerticalSliceTests(unittest.TestCase):
             ):
                 run_vertical_slice([103, 102, 101, 100], directory)
 
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection, connection:
                 self.assertEqual(
                     connection.execute(
                         "SELECT payload_json FROM outbox"
@@ -2201,7 +2241,8 @@ class VerticalSliceTests(unittest.TestCase):
             store = JournalStore(Path(directory) / "journal.sqlite3")
             original = store.load_events("simulation_portfolio", checkpoint["symbol"])[0]
             forged = dict(original)
-            forged["event_id"] = "simulation-forged-evidence-identity"
+            forged.pop("journal_sequence", None)
+            forged["event_id"] = "2949a895-b78f-4aaf-824e-6c22ca624fe1"
             forged["aggregate_version"] = str(
                 store.next_aggregate_version("simulation_portfolio", checkpoint["symbol"])
             )
@@ -2249,7 +2290,7 @@ class VerticalSliceTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "Checkpoint replay fill violates bound risk admission",
+                    "Corrupt checkpoint replay evidence semantics",
                 ):
                     run_vertical_slice([100, 101, 102, 103], directory)
 

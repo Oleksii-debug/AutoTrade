@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.instruments import (
     DeliverableLeg,
     InstrumentRegistry,
+    InstrumentRegistryError,
     InstrumentVersion,
 )
 import mvp.autotrade_mvp.option_lifecycle as option_lifecycle_module
@@ -72,7 +73,7 @@ def option_version(
     return InstrumentVersion(
         instrument_id=OPTION_ID,
         version=version,
-        provider_id="TEST_PROVIDER",
+        provider_id="BINANCE",
         venue_id="OPTIONS",
         provider_symbol=(
             "ABC-202612-C50" if option_right == "CALL" else "ABC-202612-P50"
@@ -114,7 +115,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.registry = InstrumentRegistry(versions=(option_version(),))
         self.book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -250,7 +251,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         cash_settlement_amount: str | None = None,
         corrects_external_event_id: str | None = None,
         instrument_version: str = f"{OPTION_ID}@1",
-        provider_id: str = "TEST_PROVIDER",
+        provider_id: str = "BINANCE",
         venue_id: str = "OPTIONS",
         endpoint: str = LIFECYCLE_ENDPOINT,
         permission_scope: str = LIFECYCLE_SCOPE,
@@ -309,7 +310,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "provider_environment must be canonical exact text",
         ):
             OptionLifecycleObservation(
-                provider_id="TEST_PROVIDER",
+                provider_id="BINANCE",
                 account_id="paper-1",
                 environment="SIMULATION",
                 venue_id="OPTIONS",
@@ -342,7 +343,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 raise AssertionError("hostile Decimal subclass must not dispatch")
 
         base = {
-            "provider_id": "TEST_PROVIDER",
+            "provider_id": "BINANCE",
             "account_id": "paper-1",
             "environment": "SIMULATION",
             "venue_id": "OPTIONS",
@@ -393,7 +394,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             TypeError, "economic_book must be exact DurableProviderEconomicBook",
         ):
             HostileEconomicBook(
-                self.store, provider_id="TEST_PROVIDER", account_id="paper-1", environment="SIMULATION",
+                self.store, provider_id="BINANCE", account_id="paper-1", environment="SIMULATION",
             )
 
     def test_lifecycle_rejects_post_construction_economic_method_shadow(self):
@@ -455,7 +456,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             price=Decimal("1"),
         )
         cut = EconomicBookCut(
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
             transactions=(current,),
@@ -567,7 +568,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             with self.subTest(environment=environment):
                 book = DurableProviderEconomicBook(
                     self.store,
-                    provider_id="TEST_PROVIDER",
+                    provider_id="BINANCE",
                     account_id="paper-1",
                     environment=environment,
                 )
@@ -621,7 +622,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             with self.subTest(environment=environment):
                 book = DurableProviderEconomicBook(
                     self.store,
-                    provider_id="TEST_PROVIDER",
+                    provider_id="BINANCE",
                     account_id="paper-1",
                     environment=environment,
                 )
@@ -704,7 +705,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             legacy.aggregate_id,
             option_lifecycle_module._identity(
                 "option-lifecycle-book",
-                "TEST_PROVIDER",
+                "BINANCE",
                 "paper-1",
                 "SIMULATION",
             ),
@@ -736,7 +737,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             result.lifecycle_event_id,
             option_lifecycle_module._identity(
                 "option-lifecycle-event",
-                "TEST_PROVIDER",
+                "BINANCE",
                 "paper-1",
                 "SIMULATION",
                 "legacy-provider-free-domain",
@@ -747,7 +748,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             (
                 option_lifecycle_module._identity(
                     "option-lifecycle-economic",
-                    "TEST_PROVIDER",
+                    "BINANCE",
                     "paper-1",
                     "SIMULATION",
                     "legacy-provider-free-domain",
@@ -1523,7 +1524,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         replacement_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -1640,7 +1641,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         provider_environment=None,
     ) -> OptionLifecycleObservation:
         return OptionLifecycleObservation(
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
             venue_id="OPTIONS",
@@ -1856,7 +1857,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_lifecycle_observation_decimal_identity_ignores_ambient_context(self):
         observation = OptionLifecycleObservation(
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
             venue_id="OPTIONS",
@@ -1968,7 +1969,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2024,7 +2025,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2070,7 +2071,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         competing_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2110,7 +2111,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.seed_option_position("1")
         competing_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2154,7 +2155,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         current = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2173,7 +2174,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2470,7 +2471,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         restarted = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2481,32 +2482,18 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_adjusted_deliverable_without_explicit_exercise_cash_fails_closed(self):
         self.seed_option_position("1")
-        registry = InstrumentRegistry(
-            versions=(option_version(deliverable_quantity="150"),)
-        )
-        book = DurableProviderEconomicBook(
-            self.store,
-            provider_id="TEST_PROVIDER",
-            account_id="paper-1",
-            environment="SIMULATION",
-        )
-        authority = self._authority(
-            registry=registry,
-            economic_book=book,
-        )
-
         with self.assertRaisesRegex(
-            OptionLifecycleError,
-            "explicit canonical exercise cash evidence",
+            InstrumentRegistryError,
+            "adjusted physical option requires explicit exercise_cash_per_contract",
         ):
-            authority.apply(self.evidence())
+            option_version(deliverable_quantity="150")
 
         self.assertEqual(
-            self.store.load_events("option_lifecycle", authority.aggregate_id),
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
             [],
         )
         self.assertEqual(
-            len(self.store.load_events("economic_book", book.book_id)),
+            len(self.store.load_events("economic_book", self.book.book_id)),
             1,
         )
 
@@ -2517,7 +2504,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2549,7 +2536,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2584,7 +2571,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )
@@ -2640,7 +2627,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="TEST_PROVIDER",
+            provider_id="BINANCE",
             account_id="paper-1",
             environment="SIMULATION",
         )

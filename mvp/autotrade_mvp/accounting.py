@@ -794,12 +794,18 @@ def _make_scoped_economic_facade(
     require_owner,
     *,
     _digest_payload=payload_digest,
+    _canonical_transactions=EconomicBook.transactions.fget,
 ):
     """Bind every scoped-book operation to the immutable owner selected at import."""
 
     def transactions(self):
         _environment, _account_id, book = require_owner(self)
         return book.transactions
+
+    def settlement_projection(self):
+        """Read an authenticated scope and canonical cut without exposing its book."""
+        environment, account_id, book = require_owner(self)
+        return environment, account_id, _canonical_transactions(book)
 
     def append(self, transaction: JournalTransaction) -> bool:
         _environment, _account_id, book = require_owner(self)
@@ -838,6 +844,7 @@ def _make_scoped_economic_facade(
 
     return (
         property(transactions),
+        property(settlement_projection),
         append,
         append_batch,
         balance,
@@ -850,6 +857,7 @@ def _make_scoped_economic_facade(
 
 (
     _scoped_transactions,
+    _scoped_settlement_projection,
     _scoped_append,
     _scoped_append_batch,
     _scoped_balance,
@@ -906,6 +914,7 @@ class ScopedEconomicBook:
     _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
     transactions = _scoped_transactions
+    settlement_projection = _scoped_settlement_projection
     append = _scoped_append
     append_batch = _scoped_append_batch
     balance = _scoped_balance
@@ -916,6 +925,7 @@ class ScopedEconomicBook:
 
 
 del _scoped_transactions
+del _scoped_settlement_projection
 del _scoped_append
 del _scoped_append_batch
 del _scoped_balance

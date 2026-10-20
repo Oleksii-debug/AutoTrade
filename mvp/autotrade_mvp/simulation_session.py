@@ -2135,6 +2135,8 @@ def run_autonomous_simulation(
     model_sha256: str | None = None,
     validation_sha256: str | None = None,
     historical_execution_plan: list[dict[str, object]] | None = None,
+    strategy_side_plan: list[str] | None = None,
+    strategy_plan_sha256: str | None = None,
     _lifecycle_action: str | None = None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
@@ -2183,6 +2185,26 @@ def run_autonomous_simulation(
         or any(c not in "0123456789abcdef" for c in validation_sha256)
     ):
         raise ValueError("validation evidence requires an exact trained model identity")
+    if (strategy_side_plan is None) != (strategy_plan_sha256 is None):
+        raise ValueError("registered strategy side plan and identity are required together")
+    canonical_strategy_side_plan = None
+    if strategy_side_plan is not None:
+        if (
+            type(strategy_side_plan) is not list
+            or len(strategy_side_plan) != len(values)
+            or any(type(side) is not str or side not in {"BUY", "SELL", "HOLD"}
+                   for side in strategy_side_plan)
+        ):
+            raise ValueError("registered strategy side plan must match the price stream")
+        if signal_prices is None:
+            raise ValueError("registered strategy side plan requires a separated causal signal stream")
+        if model_sha256 is not None or validation_sha256 is not None:
+            raise ValueError("registered strategy side plan cannot be relabelled as a trained model")
+        if (type(strategy_plan_sha256) is not str
+                or len(strategy_plan_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in strategy_plan_sha256)):
+            raise ValueError("registered strategy side plan requires an exact sha256 identity")
+        canonical_strategy_side_plan = list(strategy_side_plan)
     timestamp = _now(now)
     if virtual_cash is not None and (type(virtual_cash) is not str or virtual_cash not in {"200", "1000"}):
         raise ValueError("virtual_cash must be exactly 200 or 1000 USD")
@@ -2247,8 +2269,12 @@ def run_autonomous_simulation(
         "instrument_profile": instrument_profile,
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
-        "strategy": (f"moving-average-{strategy_fast}-{strategy_slow}-long-only-target-"
-                     + canonical_decimal_text(target)),
+        "strategy": (
+            "registered-causal-side-plan-" + strategy_plan_sha256
+            if canonical_strategy_side_plan is not None
+            else f"moving-average-{strategy_fast}-{strategy_slow}-long-only-target-"
+                 + canonical_decimal_text(target)
+        ),
         "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(initial_cash),
         "settlement_policy": {
             "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
@@ -2270,6 +2296,13 @@ def run_autonomous_simulation(
             "PRIOR_CLOSED_BAR_TO_NEXT_COMPLETED_AVAILABLE_BAR"
         )
         protocol["historical_execution_plan"] = canonical_execution_plan
+    if canonical_strategy_side_plan is not None:
+        # The complete deterministic plan is restart identity only.  The ZERO
+        # specialist below receives a bounded prefix and therefore cannot read
+        # future candidate decisions.
+        protocol["strategy_side_plan"] = canonical_strategy_side_plan
+        protocol["strategy_plan_sha256"] = strategy_plan_sha256
+        protocol["strategy_mode"] = "REGISTERED_CAUSAL_DETERMINISTIC_PLAN"
     if model_sha256 is not None:
         protocol["trained_model_sha256"] = model_sha256
     if validation_sha256 is not None:
@@ -3265,8 +3298,13 @@ def _run_autonomous_locked(
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
         signal_cut = protocol.get("signal_prices", protocol["prices"])
-        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(
-            [parse_bounded_exact_decimal(v) for v in signal_cut[:episode]], frozen_target
+        proposal_side = (
+            protocol["strategy_side_plan"][index]
+            if "strategy_side_plan" in protocol
+            else MovingAverageStrategy(**protocol["strategy_parameters"]).decide(
+                [parse_bounded_exact_decimal(v) for v in signal_cut[:episode]],
+                frozen_target,
+            ).side
         )
         # The specialist is durable diagnostics only.  It must agree with the
         # frozen strategy, but it never selects allocation, risk, reservation,
@@ -3279,22 +3317,24 @@ def _run_autonomous_locked(
             # in the object the agent or its research diagnostic receives.
             agent_protocol = {
                 k: v for k, v in protocol.items()
-                if k not in {"prices", "signal_prices"}
+                if k not in {"prices", "signal_prices", "strategy_side_plan"}
             }
             agent_protocol["source_protocol_digest"] = protocol_digest
             agent_protocol["signal_prices"] = protocol["signal_prices"][:episode]
+            if "strategy_side_plan" in protocol:
+                agent_protocol["strategy_side_plan"] = protocol["strategy_side_plan"][:episode]
         agent_side = decide_zero_agent(
             store,
             agent_protocol,
             episode=episode,
-            strategy_side=proposal.side,
+            strategy_side=proposal_side,
             position=position,
             timestamp=timestamp,
         )
-        if agent_side != proposal.side:
+        if agent_side != proposal_side:
             raise ValueError("ZERO agent proposal differs from the frozen strategy")
-        target_quantity = frozen_target if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
-        decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
+        target_quantity = frozen_target if proposal_side == "BUY" else Decimal("0") if proposal_side == "SELL" else position
+        decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal_side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
         if emergency:
             decision = "NO_TRADE"

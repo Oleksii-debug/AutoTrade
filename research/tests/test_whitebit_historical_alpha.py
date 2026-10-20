@@ -176,7 +176,8 @@ class WhiteBitHistoricalAlphaTests(unittest.TestCase):
             ]
             environment = dict(os.environ)
             environment["PYTHONPATH"] = os.pathsep.join(
-                (str(Path.cwd()), str(Path.cwd() / "research"), str(Path.cwd() / "mvp")))
+                tuple(filter(None, (environment.get("PYTHONPATH"), str(Path.cwd()),
+                                    str(Path.cwd() / "research"), str(Path.cwd() / "mvp")))))
             first = subprocess.run(command, cwd=Path.cwd(), env=environment,
                                    capture_output=True, text=True, timeout=30)
             second = subprocess.run(command, cwd=Path.cwd(), env=environment,

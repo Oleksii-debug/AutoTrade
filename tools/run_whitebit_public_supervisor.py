@@ -623,7 +623,6 @@ async def supervise(
     max_segments: int = 8,
     checkpoint_seconds: float = 30.0,
     max_artifacts: int = 4096,
-    publish_interval_seconds: float = 0.0,
     clock=lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
     """Collect until stopped and leave a durable terminal checkpoint."""
@@ -647,12 +646,6 @@ async def supervise(
         raise ValueError("checkpoint interval must be between 0.1 and 3600 seconds")
     if type(max_artifacts) is not int or not 1 <= max_artifacts <= 1_000_000:
         raise ValueError("artifact quota must be between 1 and 1000000")
-    if (
-        isinstance(publish_interval_seconds, bool)
-        or not isinstance(publish_interval_seconds, (int, float))
-        or not 0.0 <= float(publish_interval_seconds) <= 60.0
-    ):
-        raise ValueError("publish interval must be between 0 and 60 seconds")
 
     loop = asyncio.get_running_loop()
     previous_handlers: dict[signal.Signals, Any] = {}
@@ -747,51 +740,8 @@ async def supervise(
                         )
 
             async def collect_sequentially() -> None:
-                interval = float(publish_interval_seconds)
-                if interval == 0:
-                    async for observation in transport.observations(stop_event):
-                        publish(feed._commit(observation))
-                    return
-
-                # Parse the live stream continuously, but persist only the
-                # newest observation in each bounded interval.  This avoids
-                # turning a high-rate public bookTicker into continuous disk
-                # checkpoint churn while keeping the published cut current.
-                pending = None
-                producer_done = False
-                available = asyncio.Event()
-                last_published = 0.0
-
-                async def produce_latest() -> None:
-                    nonlocal pending, producer_done
-                    try:
-                        async for observation in transport.observations(stop_event):
-                            pending = observation
-                            available.set()
-                    finally:
-                        producer_done = True
-                        available.set()
-
-                async def persist_latest() -> None:
-                    nonlocal pending, last_published
-                    while True:
-                        await available.wait()
-                        available.clear()
-                        if pending is None:
-                            if producer_done:
-                                return
-                            continue
-                        remaining = interval - (loop.time() - last_published)
-                        if last_published and remaining > 0:
-                            await asyncio.sleep(remaining)
-                        observation = pending
-                        pending = None
-                        publish(feed._commit(observation))
-                        last_published = loop.time()
-                        if producer_done and pending is None:
-                            return
-
-                await asyncio.gather(produce_latest(), persist_latest())
+                async for observation in transport.observations(stop_event):
+                    publish(feed._commit(observation))
 
             checkpoint_task = asyncio.create_task(periodic_checkpoint())
             try:
@@ -843,12 +793,6 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", required=True, help="Persistent local collector state directory")
     parser.add_argument("--checkpoint-seconds", type=float, default=30.0)
     parser.add_argument("--max-artifacts", type=int, default=4096)
-    parser.add_argument(
-        "--publish-interval-seconds",
-        type=float,
-        default=0.0,
-        help="Persist at most one newest public observation per interval; 0 keeps every update",
-    )
     args = parser.parse_args(argv)
     try:
         outcome = asyncio.run(
@@ -857,7 +801,6 @@ def main(argv=None) -> int:
                 state_dir=Path(args.state_dir),
                 checkpoint_seconds=args.checkpoint_seconds,
                 max_artifacts=args.max_artifacts,
-                publish_interval_seconds=args.publish_interval_seconds,
             )
         )
         print(json.dumps(outcome, sort_keys=True), flush=True)

@@ -368,6 +368,55 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                  (latest["raw_evidence_ref"]["artifact_id"] + ".json")).is_file()
             )
 
+    async def test_publish_interval_coalesces_to_newest_observation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            stop = asyncio.Event()
+            task = asyncio.create_task(supervise(
+                market="BTC_USDT",
+                state_dir=root,
+                connector=Connector([FakeSocket([
+                    _subscription(), _ticker(1), _ticker(2), _ticker(3),
+                ])]),
+                stop=stop,
+                install_signals=False,
+                heartbeat_seconds=0.1,
+                checkpoint_seconds=0.1,
+                publish_interval_seconds=0.1,
+            ))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                path = root / "supervisor-state.json"
+                if path.is_file():
+                    state = json.loads(path.read_text(encoding="utf-8"))
+                    if state["observation_count"] >= 2:
+                        latest = json.loads(
+                            (root / "latest-market.json").read_text(encoding="utf-8")
+                        )
+                        stop.set()
+                        await asyncio.wait_for(task, timeout=2)
+                        self.assertEqual(latest["update_id"], 3)
+                        self.assertEqual(state["observation_count"], 2)
+                        return
+                await asyncio.sleep(0.01)
+            stop.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self.fail("coalesced supervisor did not publish the newest observation")
+
+    async def test_publish_interval_is_bounded(self):
+        with TemporaryDirectory() as directory:
+            for value in (-0.1, 60.1, True):
+                with self.assertRaisesRegex(ValueError, "publish interval"):
+                    await supervise(
+                        market="BTC_USDT",
+                        state_dir=Path(directory),
+                        connector=Connector([]),
+                        stop=asyncio.Event(),
+                        install_signals=False,
+                        publish_interval_seconds=value,
+                    )
+
     async def test_restart_rejects_checkpoint_latest_mismatch(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "state"

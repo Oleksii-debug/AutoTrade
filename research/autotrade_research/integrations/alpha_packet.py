@@ -14,14 +14,16 @@ from .alpha_models import BACKENDS, PriceSeries, forecast_suite
 
 
 def build_alpha_packet(series: PriceSeries, costs: CostBudget, *, lookback=24,
-                       horizon=1, steps=32, backends=BACKENDS, seed=7) -> dict:
+                       horizon=1, steps=32, backends=BACKENDS, seed=7,
+                       model_artifacts=None) -> dict:
     if type(costs) is not CostBudget or type(series) is not PriceSeries:
         raise AlphaInputError('canonical research records required')
     costs.validate(series.asof_ms)
     if series.market.split('_')[-1] != costs.quote_currency:
         raise AlphaInputError('model-cost conversion to quote currency required')
     forecast = forecast_suite(series, lookback=lookback, horizon=horizon,
-                              steps=steps, backends=backends, seed=seed)
+                              steps=steps, backends=backends, seed=seed,
+                              model_artifacts=model_artifacts)
     opportunities = {}
     for name, model in forecast['models'].items():
         opportunities[name] = opportunity(model['gross_midpoint_return_ratio'],

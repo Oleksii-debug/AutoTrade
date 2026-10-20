@@ -109,7 +109,7 @@ def _digest(*arrays) -> str:
     return h.hexdigest()
 
 
-def _predict_backend(name: str, split: dict, *, steps: int, seed: int):
+def _predict_backend(name: str, split: dict, *, steps: int, seed: int, artifact_sink=None):
     tr = split['train']
     x, y = split['x'][tr], split['y'][tr]
     inference = np.vstack((split['x'], split['current']))
@@ -128,6 +128,9 @@ def _predict_backend(name: str, split: dict, *, steps: int, seed: int):
             if (not np.isfinite(contributions).all() or not np.isfinite(base) or
                     not np.isclose(base + float(contributions.sum()), current_prediction, atol=1e-7, rtol=1e-5)):
                 raise AlphaInputError('SHAP additivity check failed')
+            if artifact_sink is not None:
+                from .alpha_model_checkpoint import native_payload
+                artifact_sink[name] = native_payload(name, model)
             return np.asarray(model.predict(inference), dtype=float), {
                 'fit_implementation': 'xgboost.XGBRegressor',
                 'model_sha256': sha256(bytes(model.get_booster().save_raw(raw_format='json'))).hexdigest(),
@@ -144,6 +147,9 @@ def _predict_backend(name: str, split: dict, *, steps: int, seed: int):
                                       random_seed=seed, verbose=False, allow_writing_files=False)
             model.fit(x, y)
             pred = np.asarray(model.predict(inference), dtype=float)
+            if artifact_sink is not None:
+                from .alpha_model_checkpoint import native_payload
+                artifact_sink[name] = native_payload(name, model)
             # Numeric signature only, not serialization or proof of model file persistence.
             return pred, {'fit_implementation': 'catboost.CatBoostRegressor',
                           'prediction_sha256': _digest(pred),
@@ -181,6 +187,10 @@ def _predict_backend(name: str, split: dict, *, steps: int, seed: int):
                 with torch.no_grad():
                     pred = model(torch.tensor(inference/scale, dtype=torch.float32).unsqueeze(-1))
                 after = _digest(*(v.detach().numpy() for v in model.state_dict().values()))
+                if artifact_sink is not None:
+                    from .alpha_model_checkpoint import native_payload
+                    artifact_sink[name] = native_payload(name, model, normalizers={
+                        'scale': scale, 'yscale': yscale, 'ymean': ymean})
                 return pred.numpy().reshape(-1)*yscale+ymean, {
                     'fit_implementation': 'cure-lab/LTSF-Linear DLinear',
                     'weights_before_sha256': before, 'weights_after_sha256': after,
@@ -193,7 +203,8 @@ def _predict_backend(name: str, split: dict, *, steps: int, seed: int):
 
 def forecast_suite(series: PriceSeries, *, lookback: int = 24, horizon: int = 1,
                    steps: int = 32, seed: int = 7,
-                   backends: tuple[str, ...] = BACKENDS, alpha: float = 0.1) -> dict:
+                   backends: tuple[str, ...] = BACKENDS, alpha: float = 0.1,
+                   model_artifacts: dict[str, bytes] | None = None) -> dict:
     """Fit three explicit candidates and a fixed equal-weight ensemble.
 
     Fit on early 60%; calibrate absolute residual radius on next 20%; report
@@ -201,6 +212,8 @@ def forecast_suite(series: PriceSeries, *, lookback: int = 24, horizon: int = 1,
     Latest forecast still uses that frozen model, never a silent holdout refit.
     Temporal dependence may invalidate nominal conformal coverage.
     """
+    if model_artifacts is not None and (type(model_artifacts) is not dict or model_artifacts):
+        raise AlphaInputError('model_artifacts must be an empty exact dictionary')
     if type(steps) is not int or not 1 <= steps <= 128:
         raise AlphaInputError('steps must be 1..128')
     if type(seed) is not int or not 0 <= seed <= 2147483647:
@@ -213,10 +226,11 @@ def forecast_suite(series: PriceSeries, *, lookback: int = 24, horizon: int = 1,
         raise AlphaInputError('select distinct supported predictors')
     split = make_split(series, lookback=lookback, horizon=horizon)
     tr, cal, ho = (split[k] for k in ('train', 'calibration', 'holdout'))
-    predictions, metadata = {}, {}
+    predictions, metadata, native = {}, {}, {}
     with _TRAINING_LOCK:
         for name in backends:
-            prediction, meta = _predict_backend(name, split, steps=steps, seed=seed)
+            prediction, meta = _predict_backend(name, split, steps=steps, seed=seed,
+                                               artifact_sink=native if model_artifacts is not None else None)
             if prediction.shape != (len(split['y'])+1,) or not np.isfinite(prediction).all():
                 raise AlphaInputError('invalid backend forecast')
             predictions[name], metadata[name] = prediction, meta
@@ -243,6 +257,13 @@ def forecast_suite(series: PriceSeries, *, lookback: int = 24, horizon: int = 1,
             'coverage_guaranteed': False, 'holdout_used_for_model_selection': False}
     payload_hash = sha256(json.dumps({'prices': series.closes, 'times': series.closed_at_ms,
                                      'availability': series.available_at_ms}, separators=(',', ':')).encode()).hexdigest()
+    if model_artifacts is not None:
+        from .alpha_model_checkpoint import make_model_artifact
+        completed = {name: make_model_artifact(name, native[name], series=series,
+                     split=split, steps=steps, seed=seed) for name in backends}
+        for name, data in completed.items():
+            reports[name]['model_artifact_sha256'] = sha256(data).hexdigest()
+        model_artifacts.update(completed)
     return {'schema_version': '1.0', 'provider': 'WHITEBIT', 'market': series.market,
             'snapshot_id': series.snapshot_id, 'source_ref': series.source_ref,
             'evidence_class': series.evidence_class, 'input_sha256': payload_hash,
@@ -258,3 +279,8 @@ def forecast_suite(series: PriceSeries, *, lookback: int = 24, horizon: int = 1,
             'models': reports, 'mode': 'SHADOW_RESEARCH_ONLY', 'live_authority': False,
             'automatic_promotion': False, 'whitebit_profitability_proven': False,
             'integration_state': 'CALLABLE_RESEARCH_COMPONENT_NOT_HOST_BOUND'}
+
+
+def predict_model_artifact(data: bytes, *, expected_sha256: str, features):
+    from .alpha_model_checkpoint import predict_model_artifact as predict
+    return predict(data, expected_sha256=expected_sha256, features=features)

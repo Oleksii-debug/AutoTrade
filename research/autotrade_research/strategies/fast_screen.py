@@ -13,10 +13,12 @@ from .deterministic import (
 
 EVIDENCE = "ZERO_RESEARCH_SCREENING_ONLY_APPROXIMATE_EXECUTION"
 VERSION = "fast-historical-screen-v3-cost-hurdle-three-way"
+ADAPTIVE_VERSION = "adaptive-exit-screen-v1-three-way"
 CANDIDATES = (
     "CASH", "MOMENTUM", "MEAN_REVERSION", "MOMENTUM_QUICK_REJECT",
     "MOMENTUM_COST_HURDLE",
 )
+ADAPTIVE_CANDIDATES = ("CASH", "HOLD", "MOMENTUM", "MOMENTUM_ADAPTIVE_EXIT")
 
 
 def digest(value):
@@ -103,6 +105,27 @@ class CostHurdle:
         cushion = decimal(self.cushion_bps)
         if not 0 <= cushion <= 1000:
             raise ValueError("cost-hurdle cushion outside [0,1000] bps")
+
+
+@dataclass(frozen=True)
+class AdaptiveExit:
+    """One bounded exit hypothesis driven only by completed-bar volatility."""
+
+    lookback: int = 24
+    exit_volatility_fraction: str = "0.01"
+    min_hold_bars: int = 3
+    max_hold_bars: int = 48
+
+    def validate(self):
+        if type(self.lookback) is not int or not 3 <= self.lookback <= 1000:
+            raise ValueError("adaptive-exit lookback outside 3..1000")
+        threshold = decimal(self.exit_volatility_fraction)
+        if not 0 <= threshold <= 1:
+            raise ValueError("adaptive-exit volatility threshold outside [0,1]")
+        if (type(self.min_hold_bars) is not int
+                or type(self.max_hold_bars) is not int
+                or not 1 <= self.min_hold_bars <= self.max_hold_bars <= 10000):
+            raise ValueError("adaptive-exit holding bounds must satisfy 1 <= min <= max <= 10000")
 
 
 def validate_bars(bars, *, require_ohlcv=False):
@@ -295,6 +318,269 @@ def simulate(bars, *, candidate, costs, quick_reject=QuickReject(),
         if trace:
             result["trace"] = fills
         return result
+
+
+def _completed_close_volatility(window):
+    """Population volatility of completed close-to-close returns."""
+    closes = [decimal(bar["close"]) for bar in window]
+    returns = [(current - previous) / previous
+               for previous, current in zip(closes, closes[1:])]
+    if not returns:
+        return Decimal(0)
+    mean = sum(returns, Decimal(0)) / len(returns)
+    variance = sum(((value - mean) ** 2 for value in returns), Decimal(0)) / len(returns)
+    return variance.sqrt()
+
+
+def simulate_adaptive_exit(bars, *, candidate, costs=Costs(),
+                           adaptive_exit=AdaptiveExit(), trace=False):
+    """Run one predeclared holding/exit experiment without network orders.
+
+    Decisions are made after a bar closes and execute only at the next open.
+    HOLD is a buy-first-open/sell-final-close control.  The adaptive candidate
+    uses the existing momentum entry and replaces only its exit rule with one
+    completed-close volatility threshold plus a bounded maximum holding time.
+    """
+    costs.validate()
+    adaptive_exit.validate()
+    if candidate not in ADAPTIVE_CANDIDATES:
+        raise ValueError("unknown adaptive-exit candidate")
+    validate_bars(bars, require_ohlcv=True)
+    with localcontext() as context:
+        context.prec = 50
+        cash = decimal(costs.initial_cash)
+        initial = peak = cash
+        quantity = fees = drawdown = Decimal(0)
+        fraction = decimal(costs.capital_fraction)
+        fee = decimal(costs.fee_bps) / 10000
+        adverse = (decimal(costs.spread_bps) / 2 + decimal(costs.slippage_bps)) / 10000
+        pending = "BUY" if candidate == "HOLD" else "HOLD"
+        pending_reason = "PRECOMMITTED_PARTITION_START" if candidate == "HOLD" else None
+        signal_window = deque(maxlen=costs.lookback)
+        exit_window = deque(maxlen=adaptive_exit.lookback)
+        fills = []
+        count = cycles = entry_signals = exit_signals = holding_bars = 0
+        exit_reasons = {}
+        evidence = sha256()
+
+        def mark(price):
+            nonlocal peak, drawdown
+            equity = cash + quantity * price * (1-adverse) * (1-fee)
+            peak = max(peak, equity)
+            drawdown = max(drawdown, (peak-equity)/peak)
+
+        def execute(action, reference, at, signal_at, reason=None):
+            nonlocal cash, quantity, fees, count, cycles
+            if action == "BUY" and quantity == 0:
+                price = reference * (1+adverse)
+                budget = cash * fraction
+                quantity = (budget / (price * (1+fee))).quantize(
+                    Decimal("1e-18"), rounding=ROUND_DOWN)
+                if quantity == 0:
+                    return None
+                value = quantity * price
+                charge = value * fee
+                cash -= value + charge
+            elif action == "SELL" and quantity > 0:
+                price = reference * (1-adverse)
+                value = quantity * price
+                charge = value * fee
+                cash += value - charge
+                quantity = Decimal(0)
+                cycles += 1
+            else:
+                return None
+            if cash < 0 or quantity < 0:
+                raise ArithmeticError("adaptive screening capital conservation failed")
+            fees += charge
+            count += 1
+            row = dict(action=action, at=at.isoformat(), signal_at=signal_at,
+                       reason=reason, price=str(price), fee=str(charge),
+                       cash=str(cash), quantity=str(quantity))
+            evidence.update(json.dumps(row, sort_keys=True).encode())
+            if trace:
+                fills.append(row)
+            return action
+
+        for index, bar in enumerate(bars):
+            action = execute(
+                pending, decimal(bar["open"]), bar["opened_at"],
+                (bars[index-1]["closed_at"].isoformat() if index else None),
+                pending_reason,
+            )
+            if action == "BUY":
+                holding_bars = 0
+            elif action == "SELL":
+                holding_bars = 0
+            pending = "HOLD"
+            pending_reason = None
+            mark(decimal(bar["open"]))
+            close = decimal(bar["close"])
+            mark(close)
+            if quantity > 0:
+                holding_bars += 1
+
+            signal_window.append(CausalObservation.create(
+                event_id=str(index), symbol="SCREEN",
+                available_at=bar["closed_at"], price=close))
+            exit_window.append(bar)
+            if candidate in ("CASH", "HOLD") or len(signal_window) < costs.lookback:
+                continue
+            momentum = _threshold_signal(
+                ReturnThresholdBaseline, list(signal_window), decimal(costs.threshold))[0]
+            if quantity == 0:
+                if momentum == "BUY":
+                    entry_signals += 1
+                    pending = "BUY"
+                    pending_reason = "MOMENTUM_ENTRY"
+                continue
+            if candidate == "MOMENTUM":
+                if momentum == "SELL":
+                    exit_signals += 1
+                    exit_reasons["MOMENTUM_EXIT"] = exit_reasons.get("MOMENTUM_EXIT", 0) + 1
+                    pending = "SELL"
+                    pending_reason = "MOMENTUM_EXIT"
+                continue
+            reason = None
+            if holding_bars >= adaptive_exit.max_hold_bars:
+                reason = "MAX_HOLD_EXIT"
+            elif (holding_bars >= adaptive_exit.min_hold_bars
+                  and len(exit_window) == adaptive_exit.lookback
+                  and _completed_close_volatility(exit_window)
+                      >= decimal(adaptive_exit.exit_volatility_fraction)):
+                reason = "VOLATILITY_EXIT"
+            if reason:
+                exit_signals += 1
+                exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+                pending = "SELL"
+                pending_reason = reason
+
+        if quantity > 0:
+            exit_reasons["PARTITION_END_EXIT"] = exit_reasons.get("PARTITION_END_EXIT", 0) + 1
+        execute("SELL", decimal(bars[-1]["close"]), bars[-1]["closed_at"],
+                "PRECOMMITTED_PARTITION_END", "PARTITION_END_EXIT")
+        mark(decimal(bars[-1]["close"]))
+        result = dict(candidate=candidate, observations=len(bars), final_cash=str(cash),
+            net_pnl=str(cash-initial), return_fraction=str((cash-initial)/initial),
+            max_drawdown_fraction=str(drawdown), fees=str(fees), fills=count,
+            closed_cycles=cycles, execution_digest=evidence.hexdigest(),
+            entry_signals=entry_signals, exit_signals=exit_signals,
+            exit_reasons=dict(sorted(exit_reasons.items())),
+            first_open=bars[0]["opened_at"].isoformat(),
+            last_close=bars[-1]["closed_at"].isoformat())
+        if trace:
+            result["trace"] = fills
+        return result
+
+
+def adaptive_exit_screen(bars, *, train_count, development_count,
+                         dataset_sha256, costs=Costs(),
+                         adaptive_exit=AdaptiveExit(), min_cycles=5,
+                         max_drawdown_fraction="0.10", checkpoint=None):
+    """Gate one adaptive-exit hypothesis before a one-time FINAL read."""
+    costs.validate()
+    adaptive_exit.validate()
+    if (type(train_count) is not int or type(development_count) is not int
+            or train_count < 4 or development_count < 4
+            or train_count + development_count > len(bars)-4):
+        raise ValueError("TRAIN, DEVELOPMENT and FINAL must each contain four bars")
+    if type(min_cycles) is not int or not 1 <= min_cycles <= 10000:
+        raise ValueError("minimum cycles outside 1..10000")
+    maximum_drawdown = decimal(max_drawdown_fraction)
+    if not 0 <= maximum_drawdown <= 1:
+        raise ValueError("maximum drawdown outside [0,1]")
+    if (type(dataset_sha256) is not str or len(dataset_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in dataset_sha256)):
+        raise ValueError("dataset identity must be a SHA-256")
+    # Read/validate TRAIN only.  The caller supplies the verified archive SHA
+    # as the restart identity, so inspecting FINAL values is not necessary to
+    # establish stage keys before selection.
+    training_bars = bars[:train_count]
+    validate_bars(training_bars, require_ohlcv=True)
+    config = dict(version=ADAPTIVE_VERSION, costs=asdict(costs),
+        adaptive_exit=asdict(adaptive_exit), candidates=ADAPTIVE_CANDIDATES,
+        train_count=train_count, development_count=development_count,
+        final_count=len(bars)-train_count-development_count,
+        min_cycles=min_cycles, max_drawdown_fraction=str(maximum_drawdown),
+        observations=len(bars), dataset_sha256=dataset_sha256,
+        restart_identity="VERIFIED_DATASET_SHA256_PLUS_BOUNDED_CONFIGURATION",
+        end_policy="FORCED_CLOSE_EACH_CONSUMED_PARTITION",
+        evaluation_policy="TRAIN_THEN_DEVELOPMENT_GATES_FINAL_UNTOUCHED_UNTIL_PASS")
+    config_sha = digest(config)
+    run = checkpoint or (lambda key, producer: producer())
+
+    def evaluate(partition, stage, names):
+        return [run(f"{config_sha}-{stage}-{name}", lambda name=name:
+                    simulate_adaptive_exit(partition, candidate=name, costs=costs,
+                                           adaptive_exit=adaptive_exit))
+                for name in names]
+
+    training = evaluate(training_bars, "train", ADAPTIVE_CANDIDATES)
+    active = ("MOMENTUM", "MOMENTUM_ADAPTIVE_EXIT")
+    selected = max((row for row in training if row["candidate"] in active),
+                   key=lambda row: (Decimal(row["net_pnl"]),
+                                    -Decimal(row["max_drawdown_fraction"]),
+                                    -active.index(row["candidate"])))
+    controls = [row for row in training if row["candidate"] in ("CASH", "HOLD")]
+    train_rejections = []
+    if selected["candidate"] != "MOMENTUM_ADAPTIVE_EXIT":
+        train_rejections.append("ADAPTIVE_EXIT_DID_NOT_BEAT_MOMENTUM")
+    if selected["closed_cycles"] < min_cycles:
+        train_rejections.append("MINIMUM_TRAIN_CYCLES_NOT_MET")
+    if Decimal(selected["net_pnl"]) <= max(Decimal(row["net_pnl"]) for row in controls):
+        train_rejections.append("TRAIN_DID_NOT_BEAT_CASH_AND_HOLD")
+    if Decimal(selected["max_drawdown_fraction"]) > maximum_drawdown:
+        train_rejections.append("TRAIN_DRAWDOWN_LIMIT_EXCEEDED")
+    development = []
+    development_rejections = []
+    evaluation_matrix = []
+    evaluation = None
+    holdout_consumed = False
+    if not train_rejections:
+        development_bars = bars[train_count:train_count+development_count]
+        validate_bars(development_bars, require_ohlcv=True)
+        if development_bars[0]["opened_at"] != training_bars[-1]["closed_at"]:
+            raise ValueError("TRAIN and DEVELOPMENT must be continuous")
+        development = evaluate(
+            development_bars, "development",
+            ("CASH", "HOLD", "MOMENTUM_ADAPTIVE_EXIT"))
+        candidate_row = next(row for row in development
+                             if row["candidate"] == "MOMENTUM_ADAPTIVE_EXIT")
+        control_rows = [row for row in development if row["candidate"] in ("CASH", "HOLD")]
+        if candidate_row["closed_cycles"] < min_cycles:
+            development_rejections.append("MINIMUM_DEVELOPMENT_CYCLES_NOT_MET")
+        if Decimal(candidate_row["net_pnl"]) <= max(
+                Decimal(row["net_pnl"]) for row in control_rows):
+            development_rejections.append("DEVELOPMENT_DID_NOT_BEAT_CASH_AND_HOLD")
+        if Decimal(candidate_row["max_drawdown_fraction"]) > maximum_drawdown:
+            development_rejections.append("DEVELOPMENT_DRAWDOWN_LIMIT_EXCEEDED")
+        if not development_rejections:
+            final_bars = bars[train_count+development_count:]
+            validate_bars(final_bars, require_ohlcv=True)
+            if final_bars[0]["opened_at"] != development_bars[-1]["closed_at"]:
+                raise ValueError("DEVELOPMENT and FINAL must be continuous")
+            evaluation_matrix = evaluate(
+                final_bars, "final",
+                ("CASH", "HOLD", "MOMENTUM_ADAPTIVE_EXIT"))
+            evaluation = next(row for row in evaluation_matrix
+                              if row["candidate"] == "MOMENTUM_ADAPTIVE_EXIT")
+            holdout_consumed = True
+    result = dict(schema=ADAPTIVE_VERSION, evidence_class=EVIDENCE,
+        config=config, config_sha256=config_sha, training=training,
+        training_selected_candidate=selected["candidate"],
+        training_rejection_reasons=train_rejections, development=development,
+        development_rejection_reasons=development_rejections,
+        selected_candidate=("MOMENTUM_ADAPTIVE_EXIT"
+                            if holdout_consumed else "CASH"),
+        evaluation=evaluation, evaluation_matrix=evaluation_matrix,
+        holdout_consumed=holdout_consumed, network_orders=False,
+        paid_model_calls=0, canonical_qualification=False,
+        limitations=["NO_INTRABAR_DRAWDOWN", "NO_CAPACITY_OR_QUEUE_MODEL",
+                     "NO_EXCHANGE_LOT_RULES", "FIXED_SLIPPAGE_DURING_HIGH_VOLATILITY",
+                     "RETROSPECTIVE_BAR_AVAILABILITY",
+                     "CACHED_PERIODS_USED_BY_PRIOR_UNRELATED_RESEARCH",
+                     "NO_DEPLOYMENT_OR_PROFIT_CLAIM"])
+    return {**result, "result_sha256": digest(result)}
 
 
 def screen(bars, *, train_count, dataset_sha256, costs=Costs(),

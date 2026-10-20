@@ -174,6 +174,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
         self.assertTrue(candidate._source_path_selected('tools/run_goal_directed_attention.py'))
         self.assertTrue(candidate._source_path_selected('tools/evaluate_historical_objectives.py'))
         self.assertTrue(candidate._source_path_selected('tools/run_target_strategy_lifecycle.py'))
+        self.assertTrue(candidate._source_path_selected('tools/screen_historical_candidates.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_mistral.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_model_provider.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_whitebit.py'))

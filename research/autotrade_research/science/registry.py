@@ -356,6 +356,19 @@ class ScientificRegistry:
         with self._connect() as con:
             con.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS research_model_candidates(
+                    candidate_ref TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS research_model_candidates_no_update
+                BEFORE UPDATE ON research_model_candidates BEGIN
+                    SELECT RAISE(ABORT, 'research model candidates are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS research_model_candidates_no_delete
+                BEFORE DELETE ON research_model_candidates BEGIN
+                    SELECT RAISE(ABORT, 'research model candidates are append-only');
+                END;
                 CREATE TABLE IF NOT EXISTS protocols(
                     protocol_id TEXT PRIMARY KEY,
                     protocol_hash TEXT NOT NULL,
@@ -463,6 +476,97 @@ class ScientificRegistry:
                 con.execute(
                     "ALTER TABLE evaluations ADD COLUMN holdout_identity_hash TEXT"
                 )
+
+    def register_research_model_candidate(
+        self, candidate_ref: str, *, authoritative_artifact_root: str | Path,
+    ) -> dict[str, Any]:
+        """Index authenticated offline models without granting qualification.
+
+        Candidate indexing is separate from preregistered scientific protocols,
+        evaluations and champion selection. It cannot turn a synthetic or
+        retrospective forecast into untouched live or promotion evidence.
+        """
+        from autotrade_runtime.artifacts import trusted_authenticated_reader
+        if type(self) is not ScientificRegistry:
+            raise TypeError("candidate indexing requires exact ScientificRegistry")
+        reference = _immutable_artifact_ref(candidate_ref, "candidate_ref")
+        reader = trusted_authenticated_reader(authoritative_artifact_root)
+
+        def read(ref: str, kind: str, limit: int = 1_000_000):
+            ref = _immutable_artifact_ref(ref, "candidate source")
+            identifier, digest = ref[9:].split("@sha256:", 1)
+            manifest, data = reader(identifier)
+            if (type(data) is not bytes or not 1 <= len(data) <= limit or
+                    manifest.get("sha256") != "sha256:" + digest or
+                    sha256(data).hexdigest() != digest or
+                    manifest.get("metadata", {}).get("artifact_kind") != kind):
+                raise ProtocolViolation("candidate artifact identity or kind differs")
+            return manifest, data
+
+        manifest, raw = read(reference, "ALPHA_MODEL_CANDIDATE")
+        try:
+            document = json.loads(raw)
+            if (type(document) is not dict or
+                    set(document) != {"schema", "request_ref", "model_refs", "dag", "evidence_class",
+                                      "live_authority", "automatic_promotion"} or
+                    document.get("schema") != "autotrade.alpha-candidate.v1" or
+                    document.get("live_authority") is not False or
+                    document.get("automatic_promotion") is not False or
+                    document.get("evidence_class") not in ("SYNTHETIC_FIXTURE", "RECORDED_PUBLIC")):
+                raise ProtocolViolation("candidate is not bounded research evidence")
+            canonical = _canonical(document)
+            if json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() != raw:
+                raise ProtocolViolation("candidate payload is not canonical evidence")
+            _request_manifest, request_raw = read(document["request_ref"], "ALPHA_RESEARCH_REQUEST")
+            request = json.loads(request_raw)
+            backends = request["training"]["backends"]
+            if (request.get("schema") != "autotrade.alpha-request.v1" or
+                    type(backends) is not list or not 1 <= len(backends) <= 3 or
+                    len(set(backends)) != len(backends) or
+                    any(name not in ("DLINEAR", "XGBOOST", "CATBOOST") for name in backends) or
+                    type(document["model_refs"]) is not dict or set(document["model_refs"]) != set(backends) or
+                    document["evidence_class"] != request["payload"]["series"]["evidence_class"]):
+                raise ProtocolViolation("candidate model set does not match its request")
+            sources = [document["request_ref"]]
+            for name in backends:
+                model_ref = document["model_refs"][name]
+                model_manifest, model_raw = read(model_ref, "ALPHA_NATIVE_MODEL", 4_000_000)
+                model = json.loads(model_raw)
+                if (model_manifest.get("source_refs") != [document["request_ref"]] or
+                        model.get("backend") != name or
+                        model.get("series") != request["payload"]["series"] or
+                        model.get("live_authority") is not False or
+                        model.get("automatic_promotion") is not False):
+                    raise ProtocolViolation("candidate native model provenance differs")
+                sources.append(model_ref)
+            dag = document["dag"]
+            if type(dag) is not dict:
+                raise ProtocolViolation("candidate DAG receipt is absent")
+            read(dag["packet_ref"], "ALPHA_RESEARCH_PACKET")
+            read(dag["result_ref"], "ALPHA_SPECIALIST_DAG_RESULT")
+            sources.extend((dag["packet_ref"], dag["result_ref"]))
+            if manifest.get("source_refs") != sources:
+                raise ProtocolViolation("candidate manifest provenance differs")
+        except (KeyError, TypeError, UnicodeError, json.JSONDecodeError, RecursionError) as error:
+            raise ProtocolViolation("invalid candidate evidence") from error
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT payload_json,created_at FROM research_model_candidates WHERE candidate_ref=?",
+                (reference,),
+            ).fetchone()
+            if row is not None:
+                if row["payload_json"] != canonical:
+                    raise ProtocolConflict("registered research candidate is immutable")
+                created = row["created_at"]
+            else:
+                created = _now()
+                con.execute(
+                    "INSERT INTO research_model_candidates(candidate_ref,payload_json,created_at) VALUES(?,?,?)",
+                    (reference, canonical, created),
+                )
+        return {"candidate_ref": reference, "created_at": created, "kind": "RESEARCH_ONLY",
+                "live_authority": False, "automatic_promotion": False}
 
     def register_protocol(self, payload: dict[str, Any], *, protocol_id: str | None = None) -> ProtocolRegistration:
         if not isinstance(payload, dict):

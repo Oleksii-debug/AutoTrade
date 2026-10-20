@@ -728,4 +728,3 @@ def historical_diagnostic_export(workspace: Path) -> PreparedExport:
         "coverage": "allowlisted JSON artifacts and all events in account journals at read time",
         "notes": ["Historical retrospective outcomes are simulated and do not establish a profitable strategy."],
     }, "autotrade-historical-diagnostics.json")
-

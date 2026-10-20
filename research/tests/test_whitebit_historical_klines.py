@@ -1,6 +1,9 @@
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -54,6 +57,27 @@ class Client:
 
 
 class WhiteBitHistoricalTests(unittest.TestCase):
+    def test_direct_checkout_help_needs_no_external_pythonpath(self):
+        root = Path(__file__).resolve().parents[2]
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key.upper() != "PYTHONPATH"
+        }
+        environment["PYTHONNOUSERSITE"] = "1"
+        with TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, str(root / "tools" / "whitebit_historical_klines.py"),
+                 "--help"],
+                cwd=tmp,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("completed WhiteBIT public candles", result.stdout)
+
     def test_writes_canonical_csv_and_hashed_public_provenance(self):
         with TemporaryDirectory() as tmp:
             client = Client()

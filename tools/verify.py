@@ -37,6 +37,8 @@ def verification_commands(*, platform: str | None = None) -> tuple[tuple[str, ..
         (sys.executable, "tools/baseline.py", "check"),
         (sys.executable, "tools/build_provenance_manifest.py", "--check"),
         (sys.executable, "tools/check_nvda_qualification.py", "--check-status"),
+        (sys.executable, "tools/generate_common_scalar_bindings.py", "--check"),
+        (sys.executable, "tools/generate_common_scalar_corpus.py", "--check"),
         *tuple(
             (
                 sys.executable,
@@ -61,6 +63,7 @@ def verification_commands(*, platform: str | None = None) -> tuple[tuple[str, ..
             "contracts/fixtures/dataset-manifest.semantic.corpus.json",
             "contracts/fixtures/contract-shapes.corpus.json",
         ),
+        ("node", "tests/Contracts.TypeScript/common-scalars.test.cjs"),
     )
     if platform == "win32":
         commands += (
@@ -84,9 +87,10 @@ def main() -> int:
         if result.returncode:
             return result.returncode
     print(
-        "Repository Python, .NET contracts, simulated MVP, observability and baseline "
-        "checks passed. The desktop authenticated-host executable is additionally run "
-        "on Windows. LEAN, provider and real NVDA qualification remain separate."
+        "Repository Python, generated cross-language contracts, .NET/TypeScript contracts, "
+        "simulated MVP, observability and baseline checks passed. The desktop "
+        "authenticated-host executable is additionally run on Windows. LEAN, provider "
+        "and real NVDA qualification remain separate."
     )
     return 0
 

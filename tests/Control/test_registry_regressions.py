@@ -3,7 +3,7 @@ import unittest
 
 from control.tools.branch_lease_guard import evaluate_guard
 from control.tools.registry_state import RegistryCollisionError, RegistryProtocolError
-from test_registry_state import NOW, claim, empty_registry, release, renew, request
+from test_registry_state import NOW, claim, empty_registry, guard_fence, release, renew, request
 
 
 class RegistryRegressionTests(unittest.TestCase):
@@ -57,5 +57,5 @@ class RegistryRegressionTests(unittest.TestCase):
 
     def test_guard_requires_coverage_of_all_changed_paths(self):
         state, _ = claim(empty_registry(), request(), expected_generation=0, now=NOW)
-        mutation = dict(authority_family="CONTRACT", semantic_key="core-schemas", mutation_scope=["contracts/jsonschema", "src/unowned"], branch="wp/a", prior_head="a", current_head="b", mutations=[dict(head="b", run_id="run-a", parent_heads=["a"])])
+        mutation = dict(authority_family="CONTRACT", semantic_key="core-schemas", mutation_scope=["contracts/jsonschema", "src/unowned"], branch="wp/a", prior_head="a", current_head="b", **guard_fence(state), mutations=[dict(head="b", run_id="run-a", **guard_fence(state), parent_heads=["a"])])
         self.assertEqual(evaluate_guard(state, mutation, now=NOW)["status"], "AMBIGUOUS")

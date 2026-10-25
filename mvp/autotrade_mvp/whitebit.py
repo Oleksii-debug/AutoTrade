@@ -24,6 +24,7 @@ from autotrade_numeric import (
     ExactDecimalError,
     as_fraction,
     exact_multiply,
+    is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
     parse_bounded_json_number_token,
@@ -124,9 +125,12 @@ def decode_whitebit_json(raw: str | bytes):
         raise WhiteBitAdapterError("provider JSON is invalid") from error
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise WhiteBitAdapterError(f"{name} must use exact text")
+    normalized = str.strip(value)
+    if not normalized:
         raise WhiteBitAdapterError(f"{name} is required")
-    return value.strip()
+    return normalized
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
@@ -395,10 +399,55 @@ class WhiteBitMarketRules:
     max_total: Decimal | None
     delisted_at: int | None
 
+    def __post_init__(self) -> None:
+        market = _text(self.market, name="market").upper()
+        market_type = _text(self.market_type, name="market_type").upper()
+        if market_type not in {"SPOT", "FUTURES", "TRADFIFUTURES"}:
+            raise WhiteBitAdapterError("unsupported WhiteBIT market type")
+        for field in ("is_tradfi_futures", "is_collateral", "trades_enabled"):
+            if type(getattr(self, field)) is not bool:
+                raise WhiteBitAdapterError(f"{field} must be boolean")
+        if (market_type == "TRADFIFUTURES") != self.is_tradfi_futures:
+            raise WhiteBitAdapterError(
+                "is_tradfi_futures must be true exactly for TRADFIFUTURES"
+            )
+        step = _decimal(self.step_size, name="step_size", positive=True)
+        tick = _decimal(self.tick_size, name="tick_size", positive=True)
+        min_amount = _decimal(self.min_amount, name="min_amount", positive=True)
+        min_total = _decimal(self.min_total, name="min_total", positive=True)
+        if self.max_total is None:
+            max_total = None
+        else:
+            max_value = _decimal(self.max_total, name="max_total")
+            max_total = None if max_value == 0 else max_value
+            if max_total is not None and max_total <= 0:
+                raise WhiteBitAdapterError(
+                    "max_total must be positive, zero, or null"
+                )
+        if max_total is not None and max_total < min_total:
+            raise WhiteBitAdapterError("max_total cannot be below min_total")
+        delisted = self.delisted_at
+        if delisted is not None and (
+            type(delisted) is not int or delisted < 0
+        ):
+            raise WhiteBitAdapterError(
+                "delisted_at must be a non-negative integer or null"
+            )
+
+        object.__setattr__(self, "market", market)
+        object.__setattr__(self, "market_type", market_type)
+        object.__setattr__(self, "step_size", step)
+        object.__setattr__(self, "tick_size", tick)
+        object.__setattr__(self, "min_amount", min_amount)
+        object.__setattr__(self, "min_total", min_total)
+        object.__setattr__(self, "max_total", max_total)
+
     @classmethod
     def from_provider(cls, payload: Mapping[str, object]) -> "WhiteBitMarketRules":
-        if not isinstance(payload, Mapping):
-            raise TypeError("payload must be a mapping")
+        if type(payload) is not dict:
+            raise TypeError(
+                "payload must be an exact dict from bounded provider JSON"
+            )
         required = {
             "name",
             "type",
@@ -423,10 +472,8 @@ class WhiteBitMarketRules:
             raise WhiteBitAdapterError("isCollateral must be boolean")
         if type(payload["tradesEnabled"]) is not bool:
             raise WhiteBitAdapterError("tradesEnabled must be boolean")
-        step_raw = _text(str(payload["stepSize"]), name="stepSize")
-        tick_raw = _text(str(payload["tickSize"]), name="tickSize")
-        step = _decimal(step_raw, name="stepSize", positive=True)
-        tick = _decimal(tick_raw, name="tickSize", positive=True)
+        step = _decimal(payload["stepSize"], name="stepSize", positive=True)
+        tick = _decimal(payload["tickSize"], name="tickSize", positive=True)
         min_amount = _decimal(payload["minAmount"], name="minAmount", positive=True)
         min_total = _decimal(payload["minTotal"], name="minTotal", positive=True)
         max_raw = _decimal(payload["maxTotal"], name="maxTotal")
@@ -437,7 +484,7 @@ class WhiteBitMarketRules:
         if delisted is not None:
             if not isinstance(delisted, int) or isinstance(delisted, bool) or delisted < 0:
                 raise WhiteBitAdapterError("delistedAt must be a non-negative integer or null")
-        market_type = _text(str(payload["type"]), name="type").upper()
+        market_type = _text(payload["type"], name="type").upper()
         if market_type not in {"SPOT", "FUTURES", "TRADFIFUTURES"}:
             raise WhiteBitAdapterError("unsupported WhiteBIT market type")
         is_tradfi_futures = payload["isTradFiFutures"]
@@ -446,7 +493,7 @@ class WhiteBitMarketRules:
                 "isTradFiFutures must be true exactly for type=tradfiFutures"
             )
         return cls(
-            market=_text(str(payload["name"]), name="name").upper(),
+            market=_text(payload["name"], name="name").upper(),
             market_type=market_type,
             is_tradfi_futures=is_tradfi_futures,
             is_collateral=payload["isCollateral"],
@@ -461,7 +508,13 @@ class WhiteBitMarketRules:
 
 
 def _require_multiple(value: Decimal, step: Decimal, *, field: str) -> None:
-    if value % step != 0:
+    try:
+        aligned = is_exact_decimal_multiple(value, step)
+    except ExactDecimalError as error:
+        raise WhiteBitAdapterError(
+            f"{field} grid check exceeds the shared exact resource envelope"
+        ) from error
+    if not aligned:
         raise WhiteBitAdapterError(
             f"{field} must be an exact multiple of provider {field} step"
         )
@@ -473,10 +526,10 @@ def validate_intent_market_rules(
     *,
     at: datetime,
 ) -> None:
-    if not isinstance(intent, WhiteBitOrderIntent):
-        raise TypeError("intent must be WhiteBitOrderIntent")
-    if not isinstance(rules, WhiteBitMarketRules):
-        raise TypeError("rules must be WhiteBitMarketRules")
+    if type(intent) is not WhiteBitOrderIntent:
+        raise TypeError("intent must be exact WhiteBitOrderIntent")
+    if type(rules) is not WhiteBitMarketRules:
+        raise TypeError("rules must be exact WhiteBitMarketRules")
     point = _instant(at, name="at")
     if rules.market != intent.market:
         raise WhiteBitAdapterError("market metadata does not match intent market")
@@ -501,7 +554,12 @@ def validate_intent_market_rules(
     _require_multiple(intent.amount, rules.step_size, field="amount")
     if intent.price is not None:
         _require_multiple(intent.price, rules.tick_size, field="price")
-        total = intent.amount * intent.price
+        try:
+            total = exact_multiply(intent.amount, intent.price)
+        except ExactDecimalError as error:
+            raise WhiteBitAdapterError(
+                "order total exceeds the shared exact resource envelope"
+            ) from error
         if total < rules.min_total:
             raise WhiteBitAdapterError("order total is below provider minTotal")
         if rules.max_total is not None and total > rules.max_total:
@@ -546,10 +604,12 @@ def prepare_order_request(
     Signed payload bytes are never a reusable or durable send authority.
     """
 
-    if not isinstance(intent, WhiteBitOrderIntent):
-        raise TypeError("intent must be WhiteBitOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(intent) is not WhiteBitOrderIntent:
+        raise TypeError("intent must be exact WhiteBitOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(market_rules) is not WhiteBitMarketRules:
+        raise TypeError("market_rules must be exact WhiteBitMarketRules")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     account = _text(account_id, name="account_id")
@@ -562,7 +622,8 @@ def prepare_order_request(
         raise WhiteBitAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise WhiteBitAdapterError("capability instrument version does not match intent")
-    if not capability.admits(
+    if not CapabilitySnapshot.admits(
+        capability,
         at=point,
         order_type=intent.order_type,
         time_in_force=intent.time_in_force,

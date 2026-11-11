@@ -116,6 +116,69 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertIsNone(result["new_decision"])
             self.assertIn("LEARNING_WAVE.TIME_THRESHOLD", learner.status()["learning_cycle"]["pause_reasons"])
 
+    def test_bounded_outcome_horizon_survives_restart_without_overlapping_decisions(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(
+                root,
+                cycle_episodes=100,
+                outcome_horizon_seconds=180,
+            )
+            self.tick(learner, 1, 100)
+            first = self.tick(learner, 2, 101)
+            self.assertIsNotNone(first["new_decision"])
+            waiting = self.tick(learner, 3, 102)
+            self.assertIsNone(waiting["matured_episode"])
+            self.assertIsNone(waiting["new_decision"])
+
+            learner = self.learner(
+                root,
+                cycle_episodes=100,
+                outcome_horizon_seconds=180,
+            )
+            still_waiting = self.tick(learner, 4, 103)
+            self.assertIsNone(still_waiting["matured_episode"])
+            self.assertIsNone(still_waiting["new_decision"])
+            matured = self.tick(learner, 5, 104)
+            self.assertIsNotNone(matured["matured_episode"])
+            self.assertEqual(
+                matured["matured_episode"]["outcome_available_at"],
+                snapshot(5, bid="104", ask="104.01")["available_at"],
+            )
+            self.assertIsNotNone(matured["new_decision"])
+            with closing(sqlite3.connect(learner.database)) as con:
+                self.assertEqual(
+                    con.execute(
+                        "SELECT COUNT(*) FROM decisions "
+                        "WHERE outcome_observation_key IS NULL"
+                    ).fetchone()[0],
+                    1,
+                )
+
+    def test_shadow_evaluation_waits_for_same_bounded_horizon_across_restart(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            options = dict(outcome_horizon_seconds=180)
+            learner = self.learner(root, **options)
+            for index in range(1, 13):
+                self.tick(learner, index, 100 + index)
+            cycle = learner.status()["learning_cycle"]
+            self.assertEqual(cycle["phase"], "EVALUATING")
+            self.assertIsNotNone(cycle["evaluation"]["pending"])
+            self.assertEqual(cycle["evaluation"]["count"], 0)
+
+            learner = self.learner(root, **options)
+            self.tick(learner, 13, 113)
+            self.tick(learner, 14, 114)
+            self.assertEqual(
+                learner.status()["learning_cycle"]["evaluation"]["count"],
+                0,
+            )
+            self.tick(learner, 15, 115)
+            evaluation = learner.status()["learning_cycle"]["evaluation"]
+            self.assertEqual(evaluation["count"], 1)
+            self.assertIsNotNone(evaluation["pending"])
+
     def test_market_mismatch_is_rejected_without_mutation(self):
         with TemporaryDirectory() as tmp:
             learner = self.learner(Path(tmp))

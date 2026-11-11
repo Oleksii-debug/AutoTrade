@@ -18,7 +18,10 @@ def digest(value):
 
 class LiveCycle:
     def _configure_cycle(self, episodes, seconds, evaluation, drawdown, cooldown, trials,
-                         max_gap, min_trades):
+                         max_gap, min_trades, outcome_horizon):
+        if (type(outcome_horizon) is not int or isinstance(outcome_horizon, bool)
+                or not 0 <= outcome_horizon <= 86_400):
+            raise ValueError("outcome horizon must be 0..86400 seconds")
         for value in (episodes, seconds, evaluation, cooldown, trials, max_gap, min_trades):
             if type(value) is not int or value < 1:
                 raise ValueError("cycle bounds must be positive integers")
@@ -30,7 +33,8 @@ class LiveCycle:
             notional=str(self.notional), fee_bps=str(self.fee_bps),
             slippage_bps=str(self.slippage_bps), evaluation_every=self.evaluation_every)
         self.cycle_config.update(max_observation_gap_seconds=max_gap,
-                                 min_evaluation_trades=min_trades)
+                                 min_evaluation_trades=min_trades,
+                                 outcome_horizon_seconds=outcome_horizon)
 
     def _initialize_cycle(self, con):
         con.executescript("""
@@ -192,11 +196,17 @@ class LiveCycle:
         evaluation = state["evaluation"]
         pending = evaluation["pending"]
         if pending and (datetime.fromisoformat(current["available_at"]) -
-                        datetime.fromisoformat(pending["available_at"])).total_seconds() > self.cycle_config["max_observation_gap_seconds"]:
+                        datetime.fromisoformat(pending.get(
+                            "last_available_at", pending["available_at"]
+                        ))).total_seconds() > self.cycle_config["max_observation_gap_seconds"]:
             con.execute("INSERT INTO live_shadow_episodes(cycle,evidence) VALUES(?,?)",
                 (state["cycle"], json.dumps(dict(entry=pending, outcome_key=key,
                     status="INVALID_OBSERVATION_GAP", training_eligible=False), sort_keys=True)))
             evaluation.update(pending=None, invalid_gap_count=evaluation["invalid_gap_count"]+1)
+            return
+        if pending and (datetime.fromisoformat(current["available_at"]) -
+                        datetime.fromisoformat(pending["available_at"])).total_seconds() < self.cycle_config["outcome_horizon_seconds"]:
+            pending["last_available_at"] = current["available_at"]
             return
         if pending:
             outcome = self._buy_outcome(pending["ask"], current["bid_price"])[3]
@@ -246,7 +256,8 @@ class LiveCycle:
                          datetime.fromisoformat(previous["available_at"])).total_seconds() <= self.cycle_config["max_observation_gap_seconds"]:
             feature = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"])) - Decimal(previous[0])
             pending = dict(ask=current["ask_price"], observation_key=key,
-                           available_at=current["available_at"])
+                           available_at=current["available_at"],
+                           last_available_at=current["available_at"])
             for name in ("candidate", "incumbent"):
                 parameter = con.execute("SELECT parameter FROM models WHERE version=?",
                     (state[name+"_version"],)).fetchone()[0]

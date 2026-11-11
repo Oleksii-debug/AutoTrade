@@ -208,6 +208,66 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             self.assertEqual(report["shared_snapshot_reuse_count"], 6)
             self.assertEqual(report["paid_model_calls"], 0)
             self.assertFalse(report["network_orders"])
+            self.assertEqual(
+                report["organism_evidence"]["learning_fleet"]["status"],
+                "NOT_AVAILABLE",
+            )
+
+            fleet = root / "fleet.json"
+            fleet.write_text(json.dumps({
+                "schema": "autotrade-learning-fleet-diagnostics-v1",
+                "status": "RUNNING",
+                "updated_at": NOW.isoformat(),
+                "snapshot_sha256": "sha256:" + "2" * 64,
+                "learners": [{
+                    "id": "btc",
+                    "episode_count": 12,
+                    "model_version_count": 2,
+                    "network_orders": False,
+                    "trading_authority": False,
+                    "learning_cycle": {
+                        "phase": "EVALUATING",
+                        "candidate_version": 1,
+                        "champion_promotion": False,
+                        "network_orders": False,
+                        "trading_authority": False,
+                    },
+                }],
+                "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
+            shadow = root / "shadow.json"
+            shadow.write_text(json.dumps({
+                "schema": "autotrade-whitebit-trend-forward-shadow-v1",
+                "status": "RUNNING",
+                "updated_at": NOW.isoformat(),
+                "market": "SOL_USDT",
+                "completed_live_bars": 2,
+                "current_equity": "1001.2",
+                "net_pnl": "1.2",
+                "return_fraction": "0.0012",
+                "max_drawdown_fraction": "0.01",
+                "quantity": "-12",
+                "holding_bars": 2,
+                "closed_cycles": 0,
+                "last_action": "HOLD_SHORT",
+                "qualification_file_sha256": "sha256:" + "3" * 64,
+                "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
+            enriched = run_cycle(
+                organism_root=organism,
+                market_snapshot=market,
+                now=NOW + timedelta(milliseconds=30),
+                learning_fleet_checkpoint=fleet,
+                forward_shadow_checkpoint=shadow,
+            )
+            evidence = enriched["organism_evidence"]
+            self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
+            self.assertEqual(evidence["learning_fleet"]["phase_counts"], {"EVALUATING": 1})
+            self.assertEqual(evidence["forward_shadow"]["net_pnl"], "1.2")
+            self.assertEqual(evidence["forward_shadow"]["quantity"], "-12")
+            self.assertFalse(evidence["forward_shadow"]["trading_authority"])
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:

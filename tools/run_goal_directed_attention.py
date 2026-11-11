@@ -56,8 +56,84 @@ def _instant(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _learning_fleet_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != "autotrade-learning-fleet-diagnostics-v1"
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or type(document.get("learners")) is not list):
+        raise ValueError("learning fleet checkpoint authority or schema differs")
+    learners = document["learners"]
+    phases: dict[str, int] = {}
+    active = []
+    for learner in learners:
+        if type(learner) is not dict or type(learner.get("learning_cycle")) is not dict:
+            raise ValueError("learning fleet learner is malformed")
+        cycle = learner["learning_cycle"]
+        if (learner.get("network_orders") is not False
+                or learner.get("trading_authority") is not False
+                or cycle.get("network_orders") is not False
+                or cycle.get("trading_authority") is not False):
+            raise ValueError("learning fleet learner authority differs")
+        phase = str(cycle.get("phase", "UNKNOWN"))
+        phases[phase] = phases.get(phase, 0) + 1
+        active.append({
+            "id": str(learner.get("id", "unknown")),
+            "phase": phase,
+            "episodes": int(learner.get("episode_count", 0)),
+            "model_versions": int(learner.get("model_version_count", 0)),
+            "candidate_version": cycle.get("candidate_version"),
+            "champion_promotion": cycle.get("champion_promotion") is True,
+        })
+    return {
+        "status": str(document.get("status", "UNKNOWN")),
+        "updated_at": document.get("updated_at"),
+        "learner_count": len(learners),
+        "phase_counts": dict(sorted(phases.items())),
+        "completed_episodes": sum(row["episodes"] for row in active),
+        "model_versions": sum(row["model_versions"] for row in active),
+        "learners": active,
+        "snapshot_sha256": document.get("snapshot_sha256"),
+        "network_orders": False,
+        "trading_authority": False,
+    }
+
+
+def _forward_shadow_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != "autotrade-whitebit-trend-forward-shadow-v1"
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False):
+        raise ValueError("forward shadow checkpoint authority or schema differs")
+    return {
+        "status": str(document.get("status", "UNKNOWN")),
+        "updated_at": document.get("updated_at"),
+        "market": document.get("market"),
+        "completed_live_bars": int(document.get("completed_live_bars", 0)),
+        "current_equity": document.get("current_equity"),
+        "net_pnl": document.get("net_pnl"),
+        "return_fraction": document.get("return_fraction"),
+        "max_drawdown_fraction": document.get("max_drawdown_fraction"),
+        "quantity": document.get("quantity"),
+        "holding_bars": int(document.get("holding_bars", 0)),
+        "closed_cycles": int(document.get("closed_cycles", 0)),
+        "last_action": document.get("last_action"),
+        "qualification_file_sha256": document.get("qualification_file_sha256"),
+        "network_orders": False,
+        "trading_authority": False,
+    }
+
+
 def run_cycle(*, organism_root: Path, market_snapshot: Path,
-              now: datetime | None = None) -> dict[str, object]:
+              now: datetime | None = None,
+              learning_fleet_checkpoint: Path | None = None,
+              forward_shadow_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -144,6 +220,13 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
         }
         _atomic(state_path, state)
         workstreams.append(state)
+    runtime_root = organism_root.parent
+    fleet_path = learning_fleet_checkpoint or (
+        runtime_root / "learning-fleet-diagnostics-v1-20261112" / "checkpoint.json"
+    )
+    shadow_path = forward_shadow_checkpoint or (
+        runtime_root / "whitebit-sol-trend-shadow-v1-20261111" / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -153,6 +236,10 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
         "shared_snapshot_reuse_count": len(workstreams),
         "workstreams": workstreams,
         "paid_model_calls": 0,
+        "organism_evidence": {
+            "learning_fleet": _learning_fleet_summary(fleet_path),
+            "forward_shadow": _forward_shadow_summary(shadow_path),
+        },
         "network_orders": False,
         "trading_authority": False,
     }

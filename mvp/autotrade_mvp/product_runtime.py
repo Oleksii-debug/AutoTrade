@@ -10,6 +10,7 @@ from hashlib import sha256
 from http.cookies import SimpleCookie
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import subprocess
@@ -64,6 +65,19 @@ from .whitebit_live_composition import default_whitebit_live_gateway_factory
 ROOT = Path(__file__).resolve().parents[2]
 PRICES = ['100', '101', '103', '102', '100', '100', '101', '103']
 START_TIME = '2026-10-04T00:00:00Z'
+
+
+def _strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if type(key) is not str or key in result:
+            raise ValueError('duplicate or non-text learning worker configuration key')
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_worker_configuration(value):
+    raise ValueError('nonfinite learning worker configuration: ' + value)
 
 
 class _NoProviderSecrets:
@@ -169,6 +183,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         diagnostic_sampler,
         whitebit_public_state_dir,
         whitebit_learning_state_dir,
+        whitebit_learning_state_dirs,
         groq_advisory_state_dir,
         credential_vault,
         whitebit_live_gateway_factory,
@@ -185,6 +200,14 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         if type(whitebit_learning_state_dir) is not type(Path()):
             raise TypeError('whitebit learning state directory must be an exact path')
         self._whitebit_learning_state_dir = whitebit_learning_state_dir
+        if (
+            type(whitebit_learning_state_dirs) is not dict
+            or not 1 <= len(whitebit_learning_state_dirs) <= 16
+            or any(type(name) is not str for name in whitebit_learning_state_dirs)
+            or any(type(path) is not type(Path()) for path in whitebit_learning_state_dirs.values())
+        ):
+            raise TypeError('WhiteBIT learning worker directories must be an exact bounded dictionary')
+        self._whitebit_learning_state_dirs = dict(whitebit_learning_state_dirs)
         if type(groq_advisory_state_dir) is not type(Path()):
             raise TypeError('Groq advisory state directory must be an exact path')
         self._groq_advisory_state_dir = groq_advisory_state_dir
@@ -376,6 +399,10 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                 live_learning_status=read_whitebit_live_learning_status(
                     self._whitebit_learning_state_dir
                 ),
+                live_learning_statuses={
+                    name: read_whitebit_live_learning_status(path)
+                    for name, path in self._whitebit_learning_state_dirs.items()
+                },
                 groq_advisory_state_dir=self._groq_advisory_state_dir,
             ),
             '/api/v1/technical-diagnostics': lambda: technical_diagnostic_zip(
@@ -508,6 +535,7 @@ def build_product(
     desktop_session_sink=None,
     whitebit_public_state_dir=None,
     whitebit_learning_state_dir=None,
+    whitebit_learning_state_dirs=None,
     groq_advisory_state_dir=None,
     public_learning=False,
     whitebit_live_gateway_factory=None,
@@ -542,6 +570,38 @@ def build_product(
             str(data / 'whitebit-live-zero-learning'),
         )
     whitebit_learning_state = Path(whitebit_learning_state_dir).resolve(strict=False)
+    if whitebit_learning_state_dirs is None:
+        configured_workers = os.environ.get(
+            'AUTOTRADE_WHITEBIT_LEARNING_STATE_DIRS_JSON'
+        )
+        if configured_workers:
+            try:
+                whitebit_learning_state_dirs = json.loads(
+                    configured_workers,
+                    object_pairs_hook=_strict_object,
+                    parse_constant=_reject_nonfinite_worker_configuration,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    'WhiteBIT learning worker configuration must be strict JSON'
+                ) from error
+        else:
+            whitebit_learning_state_dirs = {}
+    if type(whitebit_learning_state_dirs) is not dict:
+        raise TypeError('WhiteBIT learning worker directories must be an exact dictionary')
+    resolved_learning_workers = {'primary': whitebit_learning_state}
+    for worker, worker_path in whitebit_learning_state_dirs.items():
+        if (
+            type(worker) is not str
+            or re.fullmatch(r'[a-z][a-z0-9_-]{0,31}', worker) is None
+        ):
+            raise ValueError('WhiteBIT learning worker name is invalid')
+        resolved = Path(worker_path).resolve(strict=False)
+        if worker == 'primary' and resolved != whitebit_learning_state:
+            raise ValueError('primary WhiteBIT learning worker path differs')
+        resolved_learning_workers[worker] = resolved
+    if not 1 <= len(resolved_learning_workers) <= 16:
+        raise ValueError('WhiteBIT learning worker count is outside the product bound')
     if groq_advisory_state_dir is None:
         groq_advisory_state_dir = os.environ.get(
             'AUTOTRADE_GROQ_ADVISORY_STATE_DIR',
@@ -640,6 +700,7 @@ def build_product(
             diagnostic_sampler=diagnostic_sampler,
             whitebit_public_state_dir=whitebit_public_state,
             whitebit_learning_state_dir=whitebit_learning_state,
+            whitebit_learning_state_dirs=resolved_learning_workers,
             groq_advisory_state_dir=groq_advisory_state,
             credential_vault=vault,
             whitebit_live_gateway_factory=whitebit_live_gateway_factory,

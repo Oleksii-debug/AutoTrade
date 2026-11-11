@@ -240,7 +240,6 @@ class WhitebitPrivateReadTests(unittest.TestCase):
                 "TOO_LARGE",
             ),
             (PrivateHttpResponse(200, "application/json", b"not-json"), "JSON_INVALID"),
-            (PrivateHttpResponse(200, "application/json", b"{}"), "JSON_INVALID"),
             (
                 PrivateHttpResponse(200, "application/json", b'{"USDT":{},"USDT":{}}'),
                 "JSON_INVALID",
@@ -266,8 +265,13 @@ class WhitebitPrivateReadTests(unittest.TestCase):
                 with self.assertRaisesRegex(PrivateReadError, message):
                     reader.main_balance()
 
-    def test_main_balance_accepts_empty_and_object_arrays(self):
-        for body in (b"[]", b'[{"ticker":"USDT","balance":"0"}]'):
+    def test_main_balance_accepts_current_object_and_legacy_object_arrays(self):
+        for body in (
+            b"{}",
+            b'{"USDT":{"main_balance":"0"}}',
+            b"[]",
+            b'[{"ticker":"USDT","balance":"0"}]',
+        ):
             with self.subTest(body=body), WhitebitPrivateReader(
                 "key",
                 "secret",
@@ -281,12 +285,18 @@ class WhitebitPrivateReadTests(unittest.TestCase):
             self.assertEqual(observation.body, body)
 
     def test_main_balance_rejects_non_object_array_entries(self):
-        transport = RecordingTransport(
-            lambda _: PrivateHttpResponse(200, "application/json", b'["USDT"]')
-        )
-        with WhitebitPrivateReader("key", "secret", transport=transport) as reader:
-            with self.assertRaisesRegex(PrivateReadError, "JSON_INVALID"):
-                reader.main_balance()
+        for body in (b'["USDT"]', b'{"USDT":"0"}', b'{"":{}}'):
+            with self.subTest(body=body):
+                transport = RecordingTransport(
+                    lambda _, response_body=body: PrivateHttpResponse(
+                        200, "application/json", response_body
+                    )
+                )
+                with WhitebitPrivateReader(
+                    "key", "secret", transport=transport
+                ) as reader:
+                    with self.assertRaisesRegex(PrivateReadError, "JSON_INVALID"):
+                        reader.main_balance()
 
     def test_trading_balance_still_requires_an_object(self):
         transport = RecordingTransport(

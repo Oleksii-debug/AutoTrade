@@ -1,6 +1,8 @@
 """Product lifecycle wiring without external network or model calls."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -57,6 +59,30 @@ class OwnedNumericalProductTests(unittest.TestCase):
                               whitebit_learning_state_dir=Path(root) / 'other')
         with self.assertRaises(TypeError):
             build_product('unused', public_learning=1)
+
+    def test_external_learning_workers_are_bounded_strict_configuration(self):
+        with TemporaryDirectory() as root:
+            fast = str(Path(root) / 'fast-learning')
+            with patch.dict(
+                os.environ,
+                {'AUTOTRADE_WHITEBIT_LEARNING_STATE_DIRS_JSON': json.dumps({'fast': fast})},
+                clear=False,
+            ):
+                runtime, _ = build_product(root, desktop_session_sink=lambda *_: None)
+            try:
+                workers = runtime.application._whitebit_learning_state_dirs
+                self.assertEqual(set(workers), {'primary', 'fast'})
+                self.assertEqual(workers['fast'], Path(fast).resolve())
+            finally:
+                runtime.close()
+
+        with TemporaryDirectory() as root, patch.dict(
+            os.environ,
+            {'AUTOTRADE_WHITEBIT_LEARNING_STATE_DIRS_JSON': '{"fast":"a","fast":"b"}'},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, 'strict JSON'):
+                build_product(root, desktop_session_sink=lambda *_: None)
 
 
 if __name__ == '__main__':

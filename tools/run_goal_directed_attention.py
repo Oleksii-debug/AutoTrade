@@ -7,7 +7,9 @@ from decimal import Decimal
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
+from threading import Event
 import time
 
 from research.autotrade_research.agents.goal_directed import (
@@ -168,6 +170,7 @@ def main(argv=None) -> int:
         "--poll-seconds", type=int, default=0,
         help="0 runs one cycle; >=5 keeps the zero-model monitor active",
     )
+    parser.add_argument("--stop-file")
     args = parser.parse_args(argv)
     if args.poll_seconds != 0 and args.poll_seconds < 5:
         print(json.dumps({
@@ -175,23 +178,41 @@ def main(argv=None) -> int:
             "reason": "poll-seconds must be 0 or at least 5",
         }, sort_keys=True))
         return 2
+    stop = Event()
+    previous = {}
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, lambda *_args: stop.set())
+    stop_file = None if args.stop_file is None else Path(args.stop_file)
+    report = None
     try:
-        while True:
+        while not stop.is_set():
+            if stop_file is not None and stop_file.is_file():
+                break
             report = run_cycle(
                 organism_root=Path(args.organism_root),
                 market_snapshot=Path(args.market_snapshot),
             )
             if args.poll_seconds == 0:
                 break
-            time.sleep(args.poll_seconds)
+            stop.wait(args.poll_seconds)
     except (OSError, TypeError, ValueError) as exc:
         print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, sort_keys=True))
         return 2
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
     print(json.dumps({
-        "status": report["status"],
-        "market": report["market"],
-        "shared_snapshot_reuse_count": report["shared_snapshot_reuse_count"],
-        "paid_model_calls": report["paid_model_calls"],
+        "status": "STOPPED_WITH_CHECKPOINT" if stop.is_set() or (
+            stop_file is not None and stop_file.is_file()
+        ) else report["status"],
+        "market": None if report is None else report["market"],
+        "shared_snapshot_reuse_count": (
+            0 if report is None else report["shared_snapshot_reuse_count"]
+        ),
+        "paid_model_calls": 0 if report is None else report["paid_model_calls"],
         "network_orders": False,
         "trading_authority": False,
         "continuous": args.poll_seconds > 0,

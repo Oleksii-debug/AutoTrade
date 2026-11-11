@@ -661,6 +661,7 @@ async def supervise(
     max_segments: int = 8,
     checkpoint_seconds: float = 30.0,
     max_artifacts: int = 4096,
+    stop_file: Path | None = None,
     clock=lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
     """Collect until stopped and leave a durable terminal checkpoint."""
@@ -676,6 +677,10 @@ async def supervise(
     stop_event = stop or asyncio.Event()
     if type(stop_event) is not asyncio.Event:
         raise TypeError("stop must be an exact asyncio.Event")
+    if stop_file is not None:
+        if type(stop_file) is not type(Path()):
+            raise TypeError("stop_file must be an exact Path")
+        stop_file = stop_file.resolve(strict=False)
     if (
         isinstance(checkpoint_seconds, bool)
         or not isinstance(checkpoint_seconds, (int, float))
@@ -781,12 +786,25 @@ async def supervise(
                 async for observation in transport.observations(stop_event):
                     publish(feed._commit(observation))
 
+            async def watch_stop_file() -> None:
+                if stop_file is None:
+                    return
+                while not stop_event.is_set():
+                    if stop_file.is_file():
+                        stop_event.set()
+                        return
+                    await asyncio.sleep(0.25)
+
             checkpoint_task = asyncio.create_task(periodic_checkpoint())
+            stop_file_task = asyncio.create_task(watch_stop_file())
             try:
                 await collect_sequentially()
             finally:
                 checkpoint_task.cancel()
-                await asyncio.gather(checkpoint_task, return_exceptions=True)
+                stop_file_task.cancel()
+                await asyncio.gather(
+                    checkpoint_task, stop_file_task, return_exceptions=True
+                )
             phase = "STOPPED"
             journal.checkpoint("STOPPING")
             _checkpoint(
@@ -831,6 +849,7 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", required=True, help="Persistent local collector state directory")
     parser.add_argument("--checkpoint-seconds", type=float, default=30.0)
     parser.add_argument("--max-artifacts", type=int, default=4096)
+    parser.add_argument("--stop-file")
     args = parser.parse_args(argv)
     try:
         outcome = asyncio.run(
@@ -839,6 +858,7 @@ def main(argv=None) -> int:
                 state_dir=Path(args.state_dir),
                 checkpoint_seconds=args.checkpoint_seconds,
                 max_artifacts=args.max_artifacts,
+                stop_file=None if args.stop_file is None else Path(args.stop_file),
             )
         )
         print(json.dumps(outcome, sort_keys=True), flush=True)

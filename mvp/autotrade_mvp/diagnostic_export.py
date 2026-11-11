@@ -180,6 +180,7 @@ def agent_report_zip(
     *,
     source_revision: str,
     live_learning_status: dict[str, object] | None = None,
+    live_learning_statuses: dict[str, dict[str, object]] | None = None,
     groq_advisory_state_dir: Path | None = None,
 ) -> DiagnosticZipExport:
     """Export durable agent decisions, learning evidence and outcomes only."""
@@ -198,10 +199,27 @@ def agent_report_zip(
         report_kind="AGENT_REPORT",
         include_legacy_telemetry=False,
     )
-    if live_learning_status is None and groq_advisory_state_dir is None:
+    if (
+        live_learning_status is None
+        and live_learning_statuses is None
+        and groq_advisory_state_dir is None
+    ):
         return report
     if live_learning_status is not None and type(live_learning_status) is not dict:
         raise TypeError("live learning status must be an exact dictionary")
+    if live_learning_statuses is not None:
+        if type(live_learning_statuses) is not dict:
+            raise TypeError("live learning statuses must be an exact dictionary")
+        if not 1 <= len(live_learning_statuses) <= 16:
+            raise ValueError("live learning worker count is outside the export bound")
+        for worker, status in live_learning_statuses.items():
+            if (
+                type(worker) is not str
+                or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", worker) is None
+            ):
+                raise ValueError("live learning worker name is invalid")
+            if type(status) is not dict:
+                raise TypeError("live learning worker status must be an exact dictionary")
     with ZipFile(BytesIO(report.data), "r") as source:
         members = {name: source.read(name) for name in source.namelist()}
     manifest = json.loads(members["manifest.json"])
@@ -209,6 +227,28 @@ def agent_report_zip(
         status = redact_diagnostic_value(live_learning_status)
         members["live-learning/status.json"] = _json_line(status)
         manifest["live_learning_status_included"] = True
+    if live_learning_statuses is not None:
+        workers = []
+        for worker in sorted(live_learning_statuses):
+            status = redact_diagnostic_value(live_learning_statuses[worker])
+            member = f"live-learning/workers/{worker}/status.json"
+            members[member] = _json_line(status)
+            workers.append(
+                {
+                    "worker": worker,
+                    "member": member,
+                    "status": status.get("status") if type(status) is dict else None,
+                    "phase": status.get("phase") if type(status) is dict else None,
+                }
+            )
+        members["live-learning/workers.json"] = _json_line(
+            {"schema": "autotrade-live-learning-workers-v1", "workers": workers}
+        )
+        manifest["live_learning_workers"] = {
+            "included": True,
+            "count": len(workers),
+            "names": [item["worker"] for item in workers],
+        }
     if groq_advisory_state_dir is not None:
         groq_members, groq_summary = _groq_advisory_export_members(
             groq_advisory_state_dir

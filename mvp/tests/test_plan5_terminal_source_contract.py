@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web" / "src"
 DESKTOP = ROOT / "src" / "AutoTrade.Desktop"
 ROUTES = (
-    "overview", "accounts", "opportunities", "portfolio", "risk",
+    "overview", "accounts", "opportunities", "manual-trading", "portfolio", "risk",
     "research", "learning", "models", "history", "settings",
 )
 

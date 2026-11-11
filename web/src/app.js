@@ -544,8 +544,24 @@
     const whitebitLearning = learningValue === undefined
       ? {}
       : requiredObject(learningValue, "strategy.whitebit_learning");
+    const workerValue = strategy.whitebit_learning_workers;
+    const whitebitLearningWorkers = workerValue === undefined
+      ? {primary: whitebitLearning}
+      : requiredObject(workerValue, "strategy.whitebit_learning_workers");
+    const workerNames = Object.keys(whitebitLearningWorkers);
+    if (workerNames.length < 1 || workerNames.length > 16 ||
+        workerNames.some((name) => !/^[a-z][a-z0-9_-]{0,31}$/.test(name)) ||
+        !Object.prototype.hasOwnProperty.call(whitebitLearningWorkers, "primary")) {
+      throw new Error("strategy.whitebit_learning_workers is not canonical");
+    }
+    for (const name of workerNames) {
+      requiredObject(
+        whitebitLearningWorkers[name],
+        "strategy.whitebit_learning_workers." + name);
+    }
     const strategyProjection = Object.fromEntries(
-      Object.entries(strategy).filter(([key]) => key !== "whitebit_learning"));
+      Object.entries(strategy).filter(([key]) =>
+        key !== "whitebit_learning" && key !== "whitebit_learning_workers"));
 
     return {
       version: exactCounter(snapshot.state_version, "state_version"),
@@ -562,6 +578,7 @@
       risk: requiredObject(snapshot.risk, "risk"),
       strategy: strategyProjection,
       whitebitLearning,
+      whitebitLearningWorkers,
       jobs: snapshot.jobs,
       reasonCodes: requiredStringArray(snapshot.reason_codes, "reason_codes"),
       sessionIdentity: readSessionIdentity(permissionSummary)
@@ -1196,15 +1213,19 @@ function appendProjectionRow(body, label, value) {
     });
   }
 
-  function renderWhitebitLearning(learning, {preserveSelection = true} = {}) {
+  function renderWhitebitLearning(
+      learning, workers = {primary: learning}, {preserveSelection = true} = {}) {
     const overview = {};
     const modelsAndEvidence = {};
     const modelKeys = new Set([
       "model_version_count", "incumbent_model", "candidate_model",
       "analysis", "evaluation"
     ]);
-    for (const [key, value] of Object.entries(learning)) {
-      (modelKeys.has(key) ? modelsAndEvidence : overview)[key] = value;
+    for (const worker of Object.keys(workers).sort()) {
+      for (const [key, value] of Object.entries(workers[worker])) {
+        const field = worker + "." + key;
+        (modelKeys.has(key) ? modelsAndEvidence : overview)[field] = value;
+      }
     }
     renderProjection(
       "learning-body", overview,
@@ -1899,6 +1920,7 @@ function renderOperation(operation) {
       {preserveSelection: !displayContextChanged});
     renderWhitebitLearning(
       parsed.whitebitLearning,
+      parsed.whitebitLearningWorkers,
       {preserveSelection: !displayContextChanged});
     renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged});
     state.renderedHostId = parsed.hostId;

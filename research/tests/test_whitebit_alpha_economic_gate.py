@@ -9,20 +9,25 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError:  # Optional native-alpha qualification owns this dependency.
+    np = None
 
-from mvp.autotrade_mvp.alpha_research_worker import _source
-from research.autotrade_research.integrations.alpha_economics import (
-    AlphaInputError,
-    CostBudget,
-)
-from tools.run_whitebit_alpha_economic_gate import _simulate, evaluate
-from tools.run_whitebit_alpha_research import _durable_worker
-from tools.run_whitebit_historical_alpha import build_alpha_input
-from tools.historical_public_klines import HistoricalArchiveError
-from research.tests.test_whitebit_historical_alpha import fixture
+if np is not None:
+    from mvp.autotrade_mvp.alpha_research_worker import _source
+    from research.autotrade_research.integrations.alpha_economics import (
+        AlphaInputError,
+        CostBudget,
+    )
+    from tools.run_whitebit_alpha_economic_gate import _simulate, evaluate
+    from tools.run_whitebit_alpha_research import _durable_worker
+    from tools.run_whitebit_historical_alpha import build_alpha_input
+    from tools.historical_public_klines import HistoricalArchiveError
+    from research.tests.test_whitebit_historical_alpha import fixture
 
 
+@unittest.skipUnless(np is not None, "optional native-alpha dependencies not installed")
 class AlphaEconomicPureTests(unittest.TestCase):
     def test_simulation_executes_only_after_decision_and_charges_every_cost(self):
         source = SimpleNamespace(available_at_ms=tuple(1001 + 1000 * i for i in range(10)))
@@ -76,6 +81,7 @@ class AlphaEconomicPureTests(unittest.TestCase):
 
 @unittest.skipUnless(find_spec("threadpoolctl") is not None,
                      "Alpha native dependencies are not installed")
+@unittest.skipUnless(np is not None, "optional native-alpha dependencies not installed")
 class AlphaEconomicDurableTests(unittest.TestCase):
     def test_verified_job_evaluates_once_replays_and_detects_tamper(self):
         with TemporaryDirectory() as tmp:

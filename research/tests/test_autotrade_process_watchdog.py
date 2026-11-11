@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 from pathlib import Path
-
-import pytest
+from contextlib import redirect_stdout
+from tempfile import TemporaryDirectory
+import unittest
 
 from tools.run_autotrade_process_watchdog import (
+    DiagnosticLog,
     MANIFEST_SCHEMA,
     ProcessWatchdog,
     load_manifest,
+    main,
 )
+from research.autotrade_research.artifacts.resource_lock import ResourceLock
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -87,11 +92,13 @@ def test_manifest_expands_only_bounded_paths_and_rejects_secrets(tmp_path):
         tmp_path, _row(args=["--poll-seconds", "15"])
     )
     assert len(digest) == 64
-    assert Path(manifest["processes"][0]["stop_file"]).is_relative_to(runtime)
+    assert Path(manifest["processes"][0]["stop_file"]).is_relative_to(
+        runtime.resolve(strict=False)
+    )
 
     bad = tmp_path / "bad.json"
     _write_manifest(bad, _row(args=["--api-key", "must-not-appear"]))
-    with pytest.raises(ValueError, match="secrets are forbidden"):
+    with unittest.TestCase().assertRaisesRegex(ValueError, "secrets are forbidden"):
         load_manifest(bad, repo_root=REPO, runtime_root=runtime,
                       state_dir=tmp_path / "watchdog")
 
@@ -156,3 +163,75 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert "api-key" not in serialized
     assert "password" not in serialized
     assert "secret" not in serialized
+
+
+def test_duplicate_watchdog_does_not_start_or_consume_owner_stop(tmp_path):
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    stop_file = state / "watchdog.stop.json"
+    stop_file.write_text("owner stop request", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _row())
+
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        with ResourceLock(state / "watchdog.lock"):
+            result = main([
+                "--manifest", str(manifest_path),
+                "--runtime-root", str(runtime),
+                "--state-dir", str(state),
+            ])
+
+    assert result == 0
+    assert stop_file.read_text(encoding="utf-8") == "owner stop request"
+    output = json.loads(captured.getvalue())
+    assert output["phase"] == "ALREADY_RUNNING"
+    assert output["network_orders"] is False
+
+
+def test_watchdog_diagnostic_log_rotation_is_bounded_and_readable(tmp_path):
+    path = tmp_path / "watchdog-diagnostics.jsonl"
+    diagnostic = DiagnosticLog(path, maximum_bytes=128, archives=2)
+
+    for sequence in range(10):
+        diagnostic.write("VALIDATION_HEARTBEAT", sequence=sequence,
+                         payload="x" * 80)
+
+    segments = sorted(tmp_path.glob("watchdog-diagnostics.jsonl*"))
+    assert {item.name for item in segments} == {
+        "watchdog-diagnostics.jsonl",
+        "watchdog-diagnostics.jsonl.1",
+        "watchdog-diagnostics.jsonl.2",
+    }
+    for segment in segments:
+        for line in segment.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            assert record["event"] == "VALIDATION_HEARTBEAT"
+
+
+class ProcessWatchdogUnittestTests(unittest.TestCase):
+    """Run the watchdog regressions under the repository's unittest CI runner."""
+
+    def _run_with_temp(self, test):
+        with TemporaryDirectory() as raw:
+            test(Path(raw))
+
+    def test_manifest_contract(self):
+        self._run_with_temp(test_manifest_expands_only_bounded_paths_and_rejects_secrets)
+
+    def test_bounded_crash_circuit(self):
+        self._run_with_temp(test_watchdog_restarts_then_opens_bounded_crash_circuit)
+
+    def test_stop_marker_order(self):
+        self._run_with_temp(test_watchdog_stop_marker_precedes_forced_termination)
+
+    def test_checked_in_manifest(self):
+        self._run_with_temp(test_checked_in_manifest_is_secret_free_and_admitted)
+
+    def test_duplicate_owner_lock(self):
+        self._run_with_temp(test_duplicate_watchdog_does_not_start_or_consume_owner_stop)
+
+    def test_diagnostic_rotation(self):
+        self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)

@@ -62,6 +62,11 @@ class HostApiRouteCodegenTests(unittest.TestCase):
                 Operation("post", "/api/v1/historical/stop", "stopHistorical", ()),
                 Operation("post", "/api/v1/historical/resume", "resumeHistorical", ()),
                 Operation("post", "/api/v1/historical/export", "exportHistorical", ()),
+                Operation("get", "/api/v1/manual/market", "getManualMarket", ()),
+                Operation("get", "/api/v1/manual/status", "getManualStatus", ()),
+                Operation("post", "/api/v1/manual/prepare", "prepareManualAction", ()),
+                Operation("post", "/api/v1/manual/confirm", "confirmManualAction", ()),
+                Operation("post", "/api/v1/assistant/query", "queryManualAssistant", ()),
                 Operation(
                     "get",
                     "/api/v1/local-diagnostics",

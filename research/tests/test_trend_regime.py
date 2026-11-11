@@ -57,6 +57,22 @@ class TrendRegimeTests(unittest.TestCase):
         self.assertGreater(Decimal(result["fees"]), 0)
         self.assertIn("TRAILING_STOP_EXIT", result["exit_reasons"])
 
+    def test_short_path_is_explicit_and_charges_carry(self):
+        data = bars([110, 109, 108, 107, 106, 105, 104, 103, 102])
+        config = TrendRegime(fast_lookback=2, slow_lookback=3,
+            entry_threshold="0", slow_threshold="0", exit_threshold="0.5",
+            trailing_stop_fraction="0.5", min_hold_bars=1, max_hold_bars=20,
+            allow_short=True, short_entry_threshold="0", short_slow_threshold="0",
+            short_carry_bps_per_day="10")
+        result = simulate(data, candidate="TREND_REGIME_TRAILING",
+            costs=Costs(fee_bps="0", spread_bps="0", slippage_bps="0",
+                        capital_fraction="1"), configuration=config, trace=True)
+        self.assertEqual(result["trace"][0]["action"], "SHORT")
+        self.assertEqual(result["trace"][-1]["action"], "COVER")
+        self.assertEqual(result["short_cycles"], 1)
+        self.assertGreater(Decimal(result["financing_costs"]), 0)
+        self.assertGreater(Decimal(result["net_pnl"]), 0)
+
     def test_train_rejection_does_not_read_later_partitions(self):
         data = bars(range(100, 118))
         data[12]["close"] = "NaN"
@@ -89,6 +105,8 @@ class TrendRegimeTests(unittest.TestCase):
         for config in (TrendRegime(fast_lookback=1),
                        TrendRegime(fast_lookback=10, slow_lookback=5),
                        TrendRegime(trailing_stop_fraction="0"),
+                       TrendRegime(allow_short=1),
+                       TrendRegime(short_carry_bps_per_day="1001"),
                        TrendRegime(min_hold_bars=4, max_hold_bars=3)):
             with self.assertRaises(ValueError):
                 simulate(bars(range(100, 120)), candidate="CASH", configuration=config)

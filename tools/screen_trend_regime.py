@@ -33,6 +33,11 @@ def main(argv=None):
         parser.add_argument("--" + field.replace("_", "-"), default=getattr(TrendRegime(), field))
     parser.add_argument("--min-hold-bars", type=int, default=TrendRegime().min_hold_bars)
     parser.add_argument("--max-hold-bars", type=int, default=TrendRegime().max_hold_bars)
+    parser.add_argument("--allow-short", action="store_true")
+    parser.add_argument("--short-entry-threshold", default=TrendRegime().short_entry_threshold)
+    parser.add_argument("--short-slow-threshold", default=TrendRegime().short_slow_threshold)
+    parser.add_argument("--short-carry-bps-per-day",
+                        default=TrendRegime().short_carry_bps_per_day)
     args = parser.parse_args(argv)
     started = perf_counter()
     dataset = load_causal_archive(Path(args.data_root), symbol=args.symbol,

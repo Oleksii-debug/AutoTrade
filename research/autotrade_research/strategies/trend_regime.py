@@ -16,7 +16,7 @@ import json
 from research.autotrade_research.strategies.fast_screen import Costs, decimal, digest, validate_bars
 
 
-VERSION = "trend-regime-trailing-screen-v1-three-way"
+VERSION = "trend-regime-trailing-screen-v2-three-way"
 EVIDENCE = "ZERO_RESEARCH_SCREENING_ONLY_APPROXIMATE_EXECUTION"
 CANDIDATES = ("CASH", "HOLD", "TREND_REGIME_TRAILING")
 
@@ -31,12 +31,17 @@ class TrendRegime:
     trailing_stop_fraction: str = "0.03"
     min_hold_bars: int = 6
     max_hold_bars: int = 336
+    allow_short: bool = False
+    short_entry_threshold: str = "0.03"
+    short_slow_threshold: str = "0.08"
+    short_carry_bps_per_day: str = "2"
 
     def validate(self):
         if (type(self.fast_lookback) is not int or type(self.slow_lookback) is not int
                 or not 2 <= self.fast_lookback <= self.slow_lookback <= 2000):
             raise ValueError("trend lookbacks outside 2..2000 or not ordered")
-        for name in ("entry_threshold", "slow_threshold", "exit_threshold"):
+        for name in ("entry_threshold", "slow_threshold", "exit_threshold",
+                     "short_entry_threshold", "short_slow_threshold"):
             value = decimal(getattr(self, name))
             if not 0 <= value <= Decimal("0.5"):
                 raise ValueError(f"{name} outside [0,0.5]")
@@ -46,6 +51,11 @@ class TrendRegime:
         if (type(self.min_hold_bars) is not int or type(self.max_hold_bars) is not int
                 or not 1 <= self.min_hold_bars <= self.max_hold_bars <= 10000):
             raise ValueError("holding bounds invalid")
+        if type(self.allow_short) is not bool:
+            raise ValueError("allow_short must be boolean")
+        carry = decimal(self.short_carry_bps_per_day)
+        if not 0 <= carry <= Decimal(1000):
+            raise ValueError("short carry must be in [0,1000] bps per day")
 
 
 def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), trace=False):
@@ -59,7 +69,7 @@ def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), tra
         context.prec = 50
         cash = decimal(costs.initial_cash)
         initial = peak = cash
-        quantity = fees = drawdown = Decimal(0)
+        quantity = fees = financing = drawdown = Decimal(0)
         fraction = decimal(costs.capital_fraction)
         fee = decimal(costs.fee_bps) / 10000
         adverse = (decimal(costs.spread_bps) / 2 + decimal(costs.slippage_bps)) / 10000
@@ -69,17 +79,22 @@ def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), tra
         fills = []
         evidence = sha256()
         count = cycles = entry_signals = exit_signals = holding_bars = 0
-        high_water = None
+        favorable_water = None
+        long_cycles = short_cycles = 0
         exit_reasons = {}
 
         def mark(price):
             nonlocal peak, drawdown
-            equity = cash + quantity * price * (1-adverse) * (1-fee)
+            if quantity >= 0:
+                equity = cash + quantity * price * (1-adverse) * (1-fee)
+            else:
+                equity = cash + quantity * price * (1+adverse) * (1+fee)
             peak = max(peak, equity)
             drawdown = max(drawdown, (peak-equity)/peak)
 
         def execute(action, reference, at, signal_at, reason=None):
-            nonlocal cash, quantity, fees, count, cycles, high_water
+            nonlocal cash, quantity, fees, count, cycles, favorable_water
+            nonlocal long_cycles, short_cycles
             if action == "BUY" and quantity == 0:
                 price = reference * (1+adverse)
                 budget = cash * fraction
@@ -90,7 +105,7 @@ def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), tra
                 value = quantity * price
                 charge = value * fee
                 cash -= value + charge
-                high_water = price
+                favorable_water = price
             elif action == "SELL" and quantity > 0:
                 price = reference * (1-adverse)
                 value = quantity * price
@@ -98,10 +113,31 @@ def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), tra
                 cash += value - charge
                 quantity = Decimal(0)
                 cycles += 1
-                high_water = None
+                long_cycles += 1
+                favorable_water = None
+            elif action == "SHORT" and quantity == 0:
+                price = reference * (1-adverse)
+                budget = cash * fraction
+                opened = (budget / price).quantize(Decimal("1e-18"), rounding=ROUND_DOWN)
+                if opened == 0:
+                    return None
+                value = opened * price
+                charge = value * fee
+                cash += value - charge
+                quantity = -opened
+                favorable_water = price
+            elif action == "COVER" and quantity < 0:
+                price = reference * (1+adverse)
+                value = -quantity * price
+                charge = value * fee
+                cash -= value + charge
+                quantity = Decimal(0)
+                cycles += 1
+                short_cycles += 1
+                favorable_water = None
             else:
                 return None
-            if cash < 0 or quantity < 0:
+            if cash < 0:
                 raise ArithmeticError("trend-regime capital conservation failed")
             fees += charge
             count += 1
@@ -121,14 +157,26 @@ def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), tra
             )
             if action in ("BUY", "SELL"):
                 holding_bars = 0
+            elif action in ("SHORT", "COVER"):
+                holding_bars = 0
             pending = "HOLD"
             pending_reason = None
             mark(decimal(bar["open"]))
             close = decimal(bar["close"])
             mark(close)
-            if quantity > 0:
+            if quantity != 0:
                 holding_bars += 1
-                high_water = max(high_water, close)
+                favorable_water = (max(favorable_water, close) if quantity > 0
+                                   else min(favorable_water, close))
+            if quantity < 0:
+                carrying = (-quantity * close
+                            * decimal(configuration.short_carry_bps_per_day)
+                            / Decimal(10000) / Decimal(24))
+                cash -= carrying
+                financing += carrying
+                if cash < 0:
+                    raise ArithmeticError("short carrying cost exhausted capital")
+                mark(close)
             closes.append(close)
             if candidate in ("CASH", "HOLD") or len(closes) < closes.maxlen:
                 continue
@@ -141,30 +189,45 @@ def simulate(bars, *, candidate, costs=Costs(), configuration=TrendRegime(), tra
                     entry_signals += 1
                     pending = "BUY"
                     pending_reason = "FAST_AND_SLOW_TREND_ENTRY"
+                elif (configuration.allow_short
+                      and fast_return <= -decimal(configuration.short_entry_threshold)
+                      and slow_return <= -decimal(configuration.short_slow_threshold)):
+                    entry_signals += 1
+                    pending = "SHORT"
+                    pending_reason = "FAST_AND_SLOW_DOWNTREND_ENTRY"
                 continue
             reason = None
             if holding_bars >= configuration.max_hold_bars:
                 reason = "MAX_HOLD_EXIT"
             elif holding_bars >= configuration.min_hold_bars:
-                if close <= high_water * (1-decimal(configuration.trailing_stop_fraction)):
-                    reason = "TRAILING_STOP_EXIT"
-                elif fast_return <= -decimal(configuration.exit_threshold):
-                    reason = "FAST_TREND_EXIT"
+                if quantity > 0:
+                    if close <= favorable_water * (1-decimal(configuration.trailing_stop_fraction)):
+                        reason = "TRAILING_STOP_EXIT"
+                    elif fast_return <= -decimal(configuration.exit_threshold):
+                        reason = "FAST_TREND_EXIT"
+                else:
+                    if close >= favorable_water * (1+decimal(configuration.trailing_stop_fraction)):
+                        reason = "SHORT_TRAILING_STOP_EXIT"
+                    elif fast_return >= decimal(configuration.exit_threshold):
+                        reason = "FAST_DOWNTREND_EXIT"
             if reason:
                 exit_signals += 1
                 exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
-                pending = "SELL"
+                pending = "SELL" if quantity > 0 else "COVER"
                 pending_reason = reason
 
-        if quantity > 0:
+        if quantity != 0:
             exit_reasons["PARTITION_END_EXIT"] = exit_reasons.get("PARTITION_END_EXIT", 0) + 1
-        execute("SELL", decimal(bars[-1]["close"]), bars[-1]["closed_at"],
+        execute(("SELL" if quantity > 0 else "COVER"),
+                decimal(bars[-1]["close"]), bars[-1]["closed_at"],
                 "PRECOMMITTED_PARTITION_END", "PARTITION_END_EXIT")
         mark(decimal(bars[-1]["close"]))
         result = dict(candidate=candidate, observations=len(bars), final_cash=str(cash),
             net_pnl=str(cash-initial), return_fraction=str((cash-initial)/initial),
-            max_drawdown_fraction=str(drawdown), fees=str(fees), fills=count,
+            max_drawdown_fraction=str(drawdown), fees=str(fees),
+            financing_costs=str(financing), fills=count,
             closed_cycles=cycles, execution_digest=evidence.hexdigest(),
+            long_cycles=long_cycles, short_cycles=short_cycles,
             entry_signals=entry_signals, exit_signals=exit_signals,
             exit_reasons=dict(sorted(exit_reasons.items())),
             first_open=bars[0]["opened_at"].isoformat(),
@@ -256,5 +319,7 @@ def screen(bars, *, train_count, development_count, dataset_sha256,
         canonical_qualification=False,
         limitations=["NO_INTRABAR_DRAWDOWN", "NO_CAPACITY_OR_QUEUE_MODEL",
                      "NO_EXCHANGE_LOT_RULES", "FIXED_SLIPPAGE_DURING_HIGH_VOLATILITY",
+                     "SPOT_PRICE_PROXY_FOR_SHORT_WITH_FIXED_CARRY_NOT_PERPETUAL_FUNDING",
+                     "NO_LIQUIDATION_OR_MARGIN_CALL_MODEL",
                      "RETROSPECTIVE_BAR_AVAILABILITY", "NO_DEPLOYMENT_OR_PROFIT_CLAIM"])
     return {**result, "result_sha256": digest(result)}

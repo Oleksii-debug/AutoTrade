@@ -32,7 +32,8 @@
     SET_AUTHORITY: new Set(["OWNER"]),
     START_SIMULATION: new Set(["OWNER", "OPERATOR"]),
     RECOVER_SIMULATION: new Set(["OWNER", "OPERATOR"]),
-    BACKUP_SIMULATION: new Set(["OWNER"])
+    BACKUP_SIMULATION: new Set(["OWNER"]),
+    SET_RUNTIME_MODE: new Set(["OWNER", "OPERATOR"])
   });
 
   const TABLE_TOOLS = Object.freeze([
@@ -69,7 +70,11 @@
     pendingCommand: null,
     pendingCommandHostId: null,
     historicalStatus: null,
-    historicalBusy: false
+    historicalBusy: false,
+    manualDraft: null,
+    manualBusy: false,
+    manualLastQuote: null,
+    manualOrderEntryEnabled: false
   };
 
   const byId = (id) => document.getElementById(id);
@@ -93,6 +98,19 @@
     "historical-stop",
     "historical-resume",
     "historical-export",
+    "manual-trading-heading",
+    "manual-market",
+    "manual-refresh",
+    "manual-action",
+    "manual-order-type",
+    "manual-quantity",
+    "manual-limit-price",
+    "manual-cancel-order-id",
+    "manual-prepare",
+    "manual-confirm-check",
+    "manual-confirm",
+    "manual-assistant-message",
+    "manual-assistant-send",
     "event-history-region",
     "strategy-filter",
     "strategy-copy",
@@ -128,6 +146,7 @@
     "event-history-previous",
     "event-history-next",
     "host-action",
+    "runtime-mode",
     "authority-policy-id",
     "authority-instrument-id",
     "authority-instrument-version",
@@ -411,6 +430,25 @@
     text("authority-policy-environment", active ? state.environment : null);
   }
 
+  function syncRuntimeModeFields(action) {
+    const container = byId("runtime-mode-fields");
+    const select = byId("runtime-mode");
+    if (!container || !select) return;
+    const active = action === "SET_RUNTIME_MODE";
+    const lockedForRetry = active && state.pendingCommand !== null &&
+      state.pendingCommand.action === "SET_RUNTIME_MODE";
+    container.hidden = !active;
+    select.required = active;
+    select.disabled = !active || lockedForRetry;
+    if (lockedForRetry) {
+      const mode = state.pendingCommand.payload.mode;
+      if (!["RUNNING", "PAUSED", "RESEARCH_ONLY", "RECOVERY", "STOPPED"].includes(mode)) {
+        throw new Error("pending runtime mode is not canonical");
+      }
+      select.value = mode;
+    }
+  }
+
   function syncHostActionOptions(role) {
     const select = byId("host-action");
     if (!select) return false;
@@ -430,6 +468,7 @@
       }
     }
     syncAuthorityPolicyFields(select.value);
+    syncRuntimeModeFields(select.value);
     return firstAllowed !== null;
   }
 
@@ -1482,9 +1521,12 @@ function appendProjectionRow(body, label, value) {
     state.accountId = null;
     state.environment = null;
     state.historicalStatus = null;
+    state.manualDraft = null;
+    state.manualOrderEntryEnabled = false;
     renderWhitebitPublicStatus(null);
     setCommandAvailability(false);
     syncHistoricalControls(null);
+    syncManualAvailability(false);
   }
 
   function isSnapshotBusy(error) {
@@ -1876,6 +1918,7 @@ function renderOperation(operation) {
     renderPendingAuthorityPolicyForRetry();
     const canSubmit = parsed.sessionIdentity !== null && hasAllowedAction;
     setCommandAvailability(canSubmit);
+    syncManualAvailability(canSubmit && parsed.sessionIdentity.role === "OWNER");
     if (!canSubmit) {
       text(
         "command-result",
@@ -2176,6 +2219,13 @@ function renderOperation(operation) {
 
   function commandActionPayload(action) {
     if (action === "SET_AUTHORITY") return authorityPolicyPayload();
+    if (action === "SET_RUNTIME_MODE") {
+      const mode = byId("runtime-mode").value;
+      if (!["RUNNING", "PAUSED", "RESEARCH_ONLY", "RECOVERY", "STOPPED"].includes(mode)) {
+        throw new Error("runtime mode is not canonical");
+      }
+      return Object.freeze({mode});
+    }
     return Object.freeze({});
   }
 
@@ -2455,10 +2505,10 @@ function renderOperation(operation) {
       }
     }
   }
-  // The ten canonical page locations are projections of this document, never
+  // The canonical page locations are projections of this document, never
   // browser-held financial, provider or account authority.
   const PAGE_ROUTES = Object.freeze([
-    "overview", "accounts", "opportunities", "portfolio", "risk",
+    "overview", "accounts", "opportunities", "manual-trading", "portfolio", "risk",
     "research", "learning", "models", "history", "settings"
   ]);
 
@@ -2562,6 +2612,303 @@ function renderOperation(operation) {
       text("freshness", message);
       announce(message, true);
       return false;
+    }
+  }
+
+  function manualOwnerReady() {
+    return state.snapshotReady && state.sessionIdentity !== null &&
+      state.sessionIdentity.role === "OWNER";
+  }
+
+  function syncManualActionFields() {
+    const action = byId("manual-action").value;
+    const enabled = manualOwnerReady() && !state.manualBusy;
+    byId("manual-order-type").disabled = !enabled || !["BUY", "SELL"].includes(action);
+    byId("manual-quantity").disabled = !enabled || !["BUY", "SELL"].includes(action);
+    byId("manual-limit-price").disabled = !enabled ||
+      !["BUY", "SELL"].includes(action) || byId("manual-order-type").value !== "LIMIT";
+    byId("manual-cancel-order-id").disabled = !enabled || action !== "CANCEL";
+  }
+
+  function syncManualAvailability(enabled = manualOwnerReady()) {
+    const ready = enabled && !state.manualBusy;
+    for (const id of [
+      "manual-market", "manual-refresh", "manual-action", "manual-prepare",
+      "manual-assistant-message", "manual-assistant-send"
+    ]) byId(id).disabled = !ready;
+    syncManualActionFields();
+    const hasDraft = state.manualDraft !== null;
+    const confirmation = byId("manual-confirm-check");
+    confirmation.disabled = !ready || !hasDraft ||
+      (state.manualDraft.action !== "HOLD" && !state.manualOrderEntryEnabled);
+    byId("manual-confirm").disabled =
+      confirmation.disabled || !confirmation.checked;
+  }
+
+  function renderManualOrders(orders) {
+    if (!Array.isArray(orders)) throw new Error("manual open_orders must be an array");
+    const body = byId("manual-orders-body");
+    body.replaceChildren();
+    if (orders.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.textContent = "No WhiteBIT account orders are available.";
+      row.appendChild(cell);
+      body.appendChild(row);
+      return;
+    }
+    for (const raw of orders) {
+      const order = requiredObject(raw, "manual open order");
+      const row = document.createElement("tr");
+      for (const value of [
+        requiredText(order.client_order_id || order.order_id, "manual order ID"),
+        requiredText(order.side, "manual order side"),
+        requiredText(order.status, "manual order status"),
+        requiredText(order.price, "manual order price")
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      }
+      body.appendChild(row);
+    }
+  }
+
+  function renderManualQuote(raw, {announceChange = false} = {}) {
+    const quote = requiredObject(raw, "manual public quote");
+    if (
+      quote.schema !== "autotrade-whitebit-public-quote-v1" ||
+      quote.status !== "READY" || quote.market !== byId("manual-market").value ||
+      quote.public_data_only !== true || quote.trading_authority !== false
+    ) throw new Error("manual public quote boundary differs");
+    const instrument = requiredObject(quote.instrument, "manual instrument");
+    if (
+      instrument.schema !== "autotrade-whitebit-spot-instrument-v1" ||
+      instrument.market !== quote.market || instrument.trades_enabled !== true ||
+      instrument.delisted_at !== null
+    ) throw new Error("manual instrument boundary differs");
+    const bid = requiredText(quote.bid_price, "manual bid");
+    const ask = requiredText(quote.ask_price, "manual ask");
+    const baseAsset = requiredText(instrument.base_asset, "manual base asset");
+    const quoteAsset = requiredText(instrument.quote_asset, "manual quote asset");
+    const availableAt = utcInstant(quote.available_at, "manual quote available_at");
+    text("manual-bid", bid + " " + quoteAsset);
+    text("manual-ask", ask + " " + quoteAsset);
+    text("manual-base-asset", baseAsset);
+    text("manual-quote-asset", quoteAsset);
+    text("manual-instrument",
+      "Minimum quantity " + requiredText(instrument.minimum_quantity, "minimum quantity") +
+      " " + baseAsset + "; minimum notional " +
+      requiredText(instrument.minimum_notional, "minimum notional") + " " + quoteAsset +
+      "; quantity precision " + instrument.quantity_precision +
+      "; quote precision " + instrument.quote_precision + ".");
+    text("manual-market-status",
+      "WhiteBIT public " + quote.market + " bid " + bid + ", ask " + ask +
+      ", observed " + availableAt + ". Trading authority: none.");
+    const identity = bid + "\n" + ask + "\n" + availableAt;
+    if (announceChange && state.manualLastQuote !== null &&
+        identity !== state.manualLastQuote) {
+      queuePoliteAnnouncement(quote.market + " public bid " + bid +
+        ", ask " + ask + " " + quoteAsset + ".");
+    }
+    state.manualLastQuote = identity;
+  }
+
+  function renderManualStatus(raw) {
+    const status = requiredObject(raw, "manual WhiteBIT status");
+    if (
+      status.schema !== "autotrade-manual-whitebit-v1" ||
+      status.mode !== "MANUAL_WHITEBIT" || status.provider !== "WHITEBIT" ||
+      status.environment !== "LIVE" || status.assistant_execution_authority !== false ||
+      typeof status.order_entry_enabled !== "boolean"
+    ) throw new Error("manual WhiteBIT boundary differs");
+    state.manualOrderEntryEnabled = status.order_entry_enabled;
+    const account = status.account === null ? null : requiredObject(status.account, "WhiteBIT account");
+    const balances = account === null || !Array.isArray(account.balances) ? [] : account.balances;
+    const available = (asset) => {
+      const row = balances.find((item) => item && item.asset === asset);
+      return row && typeof row.available === "string" ? row.available : "Unavailable";
+    };
+    const marketParts = byId("manual-market").value.split("_");
+    if (marketParts.length !== 2 || marketParts.some((item) => !item)) {
+      throw new Error("manual market identity differs");
+    }
+    const [baseAsset, quoteAsset] = marketParts;
+    const quoteAvailable = available(quoteAsset);
+    const baseAvailable = available(baseAsset);
+    text("manual-cash", quoteAvailable +
+      (quoteAvailable === "Unavailable" ? "" : " " + quoteAsset));
+    text("manual-position", baseAvailable +
+      (baseAvailable === "Unavailable" ? "" : " " + baseAsset));
+    text("manual-fee", requiredText(status.account_projection_status, "account projection status"));
+    renderManualOrders(account !== null && Array.isArray(account.open_orders) ? account.open_orders : []);
+    text("manual-capability-status", status.order_entry_enabled
+      ? "Real WhiteBIT order entry is enabled through the canonical OMS/sender."
+      : "Real order entry is blocked: " + requiredText(status.activation_blocker, "activation blocker"));
+    if (status.confirmation !== null && status.confirmation !== undefined) {
+      const confirmation = requiredObject(status.confirmation, "manual confirmation");
+      text("manual-action-result",
+        "Confirmed " + requiredText(confirmation.action, "manual confirmed action") +
+        ". Canonical result: " + JSON.stringify(confirmation.result) + ".");
+    }
+    syncManualAvailability();
+  }
+
+  async function refreshManual({announceChange = false} = {}) {
+    if (!manualOwnerReady() || state.manualBusy) return false;
+    state.manualBusy = true;
+    syncManualAvailability();
+    try {
+      const [quote, account] = await Promise.all([
+        jsonFetch(HOST_API.route("getManualMarket") + "?market=" +
+          encodeURIComponent(byId("manual-market").value)),
+        jsonFetch(HOST_API.route("getManualStatus"))
+      ]);
+      renderManualQuote(quote, {announceChange});
+      renderManualStatus(account);
+      if (!announceChange) {
+        queuePoliteAnnouncement(
+          byId("manual-market-status").textContent + " " +
+          byId("manual-capability-status").textContent
+        );
+      }
+      return true;
+    } catch {
+      text("manual-market-status",
+        "Manual market or account refresh failed closed. No real order was submitted.");
+      if (announceChange) queuePoliteAnnouncement("Manual price refresh failed closed.");
+      return false;
+    } finally {
+      state.manualBusy = false;
+      syncManualAvailability();
+    }
+  }
+
+  function showManualDraft(result) {
+    const envelope = requiredObject(result, "manual draft result");
+    if (envelope.requires_separate_confirmation !== true) {
+      throw new Error("manual draft does not require separate confirmation");
+    }
+    const draft = requiredObject(envelope.draft, "manual draft");
+    state.manualDraft = draft;
+    const details = draft.action === "CANCEL"
+      ? "Cancel WhiteBIT order " + draft.client_order_id
+      : draft.action === "HOLD"
+        ? "Record HOLD with no order"
+        : draft.action + " " + draft.quantity + " " + draft.instrument.base_asset +
+          " on " + draft.market + ", " + draft.order_type +
+          (draft.order_type === "LIMIT"
+            ? " at " + draft.limit_price + " " + draft.instrument.quote_asset
+            : " at market");
+    text("manual-draft-review",
+      details + ". Prepared by " + draft.source + ". Expires " + draft.expires_at +
+      ". This targets REAL WhiteBIT; no action has executed yet.");
+    const confirmation = byId("manual-confirm-check");
+    confirmation.checked = false;
+    syncManualAvailability();
+    byId("manual-draft-review").focus();
+  }
+
+  async function prepareManualAction(event) {
+    event.preventDefault();
+    if (!manualOwnerReady() || state.manualBusy) return;
+    const action = byId("manual-action").value;
+    const payload = {
+      request_id: crypto.randomUUID(),
+      market: byId("manual-market").value,
+      action
+    };
+    if (["BUY", "SELL"].includes(action)) {
+      payload.quantity = byId("manual-quantity").value.trim();
+      payload.order_type = byId("manual-order-type").value;
+      payload.limit_price = payload.order_type === "LIMIT"
+        ? byId("manual-limit-price").value.trim()
+        : null;
+    } else if (action === "CANCEL") {
+      payload.client_order_id = byId("manual-cancel-order-id").value.trim();
+    }
+    state.manualBusy = true;
+    syncManualAvailability();
+    text("manual-action-result", "Preparing a real WhiteBIT draft. Nothing has executed.");
+    try {
+      showManualDraft(await jsonFetch(HOST_API.route("prepareManualAction"), {
+        method: "POST", body: JSON.stringify(payload)
+      }));
+      text("manual-action-result", "Draft prepared for separate review and confirmation.");
+      queuePoliteAnnouncement("WhiteBIT draft prepared for review. No action has executed.");
+    } catch {
+      state.manualDraft = null;
+      text("manual-draft-review", "Draft was rejected. No action was executed.");
+      text("manual-action-result", "Manual WhiteBIT request rejected; no order was sent.");
+      queuePoliteAnnouncement("Manual WhiteBIT request rejected. No order was sent.");
+    } finally {
+      state.manualBusy = false;
+      syncManualAvailability();
+    }
+  }
+
+  async function confirmManualAction() {
+    if (!manualOwnerReady() || state.manualBusy || state.manualDraft === null ||
+        !byId("manual-confirm-check").checked) return;
+    const draftId = canonicalId(state.manualDraft.draft_id, "manual draft_id");
+    state.manualBusy = true;
+    syncManualAvailability();
+    text("manual-action-result", "Submitting the separately confirmed action through the canonical OMS.");
+    try {
+      const result = await jsonFetch(HOST_API.route("confirmManualAction"), {
+        method: "POST",
+        body: JSON.stringify({
+          draft_id: draftId,
+          confirmation: "CONFIRM REAL WHITEBIT ORDER"
+        })
+      });
+      renderManualStatus(result);
+      state.manualDraft = null;
+      byId("manual-confirm-check").checked = false;
+      text("manual-draft-review", "No action is prepared.");
+      queuePoliteAnnouncement("WhiteBIT action completed through the canonical order path.");
+    } catch {
+      text("manual-action-result",
+        "Confirmation failed closed. No successful real order submission was reported.");
+      queuePoliteAnnouncement("WhiteBIT confirmation failed closed. No successful order submission was reported.");
+    } finally {
+      state.manualBusy = false;
+      syncManualAvailability();
+    }
+  }
+
+  async function queryManualAssistant(event) {
+    event.preventDefault();
+    if (!manualOwnerReady() || state.manualBusy) return;
+    const message = byId("manual-assistant-message").value.trim();
+    state.manualBusy = true;
+    syncManualAvailability();
+    text("manual-assistant-response", "Reading public market context. The assistant cannot execute actions.");
+    try {
+      const result = requiredObject(await jsonFetch(
+        HOST_API.route("queryManualAssistant"), {
+          method: "POST",
+          body: JSON.stringify({
+            request_id: crypto.randomUUID(),
+            market: byId("manual-market").value,
+            message
+          })
+        }), "assistant result");
+      if (result.assistant_execution_authority !== false || result.execution_performed !== false) {
+        throw new Error("assistant authority boundary differs");
+      }
+      text("manual-assistant-response", requiredText(result.response, "assistant response"));
+      queuePoliteAnnouncement(requiredText(result.response, "assistant response"));
+      renderManualQuote(result.quote);
+      if (result.prepared !== null) showManualDraft(result.prepared);
+    } catch {
+      text("manual-assistant-response",
+        "Assistant request failed closed. It did not prepare or execute an action.");
+      queuePoliteAnnouncement("Assistant request failed closed. No action was executed.");
+    } finally {
+      state.manualBusy = false;
+      syncManualAvailability();
     }
   }
 
@@ -2759,13 +3106,36 @@ function renderOperation(operation) {
       byId("historical-" + action).addEventListener("click", () => runHistoricalAction(action));
     }
     byId("historical-export").addEventListener("click", exportHistoricalResults);
+    byId("manual-order-form").addEventListener("submit", prepareManualAction);
+    byId("manual-assistant-form").addEventListener("submit", queryManualAssistant);
+    byId("manual-refresh").addEventListener("click", () => refreshManual());
+    byId("manual-market").addEventListener("change", () => {
+      state.manualDraft = null;
+      byId("manual-confirm-check").checked = false;
+      text("manual-draft-review", "No action is prepared.");
+      refreshManual();
+    });
+    byId("manual-action").addEventListener("change", syncManualActionFields);
+    byId("manual-order-type").addEventListener("change", syncManualActionFields);
+    byId("manual-confirm-check").addEventListener("change", () => syncManualAvailability());
+    byId("manual-confirm").addEventListener("click", confirmManualAction);
+    window.addEventListener("keydown", (event) => {
+      if (event.altKey && !event.ctrlKey && !event.metaKey &&
+          event.key.toLowerCase() === "t") {
+        event.preventDefault();
+        window.location.hash = "manual-trading";
+        byId("manual-trading-heading").focus();
+      }
+    });
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
       syncAuthorityPolicyFields(byId("host-action").value);
+      syncRuntimeModeFields(byId("host-action").value);
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
     });
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
+    syncManualAvailability(false);
     try {
       if (await pairLocalSessionFromFragment()) await refreshSnapshot();
     } catch (error) {
@@ -2778,6 +3148,11 @@ function renderOperation(operation) {
       }
     }
     window.setInterval(pollEvents, 2000);
+    window.setInterval(() => {
+      if (byId("manual-price-narration").checked) {
+        refreshManual({announceChange: true});
+      }
+    }, 5000);
   }
 
   window.addEventListener("pagehide", () => {

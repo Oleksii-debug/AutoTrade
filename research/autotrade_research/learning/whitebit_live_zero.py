@@ -18,6 +18,7 @@ import sqlite3
 import tempfile
 from typing import Any
 from .live_cycle import LiveCycle
+from .multi_horizon_gate import evaluate_multi_horizon_gate
 
 
 SCHEMA = "autotrade-whitebit-live-zero-learning-v1"
@@ -463,6 +464,9 @@ class WhiteBitLiveZeroLearning(LiveCycle):
             incumbent = json.loads(connection.execute(
                 "SELECT model_json FROM models WHERE version=?",
                 (cycle["incumbent_version"],)).fetchone()[0])
+            horizon_rows = [dict(row) for row in connection.execute(
+                "SELECT available_at,bid,ask FROM observations ORDER BY available_at"
+            ).fetchall()]
         model = json.loads(model_row["model_json"])
         evaluation = [json.loads(row["episode_json"]) for row in episodes
                       if row["split"] == "EVALUATION" and
@@ -515,6 +519,15 @@ class WhiteBitLiveZeroLearning(LiveCycle):
             "network_orders": False,
         })
         _write_json(self.state_dir / "independent-evaluation.json", evaluation_report)
+        _write_json(
+            self.state_dir / "multi-horizon-independent-evaluation.json",
+            evaluate_multi_horizon_gate(
+                horizon_rows,
+                virtual_notional=format(self.notional, "f"),
+                fee_bps_per_leg=format(self.fee_bps, "f"),
+                slippage_bps_per_leg=format(self.slippage_bps, "f"),
+            ),
+        )
 
     def status(self) -> dict[str, Any]:
         return json.loads((self.state_dir / "checkpoint.json").read_text(encoding="utf-8"))

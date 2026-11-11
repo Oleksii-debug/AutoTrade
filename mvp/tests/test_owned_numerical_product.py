@@ -9,11 +9,11 @@ from mvp.autotrade_mvp.owned_numerical_research import OwnedResearchError
 
 
 class OwnedNumericalProductTests(unittest.TestCase):
-    def test_windows_launcher_forwards_only_explicit_public_learning_opt_in(self):
+    def test_windows_launcher_runs_owned_learning_by_default_with_explicit_opt_out(self):
         source = (Path(__file__).resolve().parents[2] / 'src' / 'AutoTrade.Desktop'
                   / 'OwnedProviderFreeRuntime.cs').read_text(encoding='utf-8')
         self.assertIn('bool publicLearning = false', source)
-        self.assertIn('Array.IndexOf(Environment.GetCommandLineArgs(), "--public-learning") >= 0', source)
+        self.assertIn('Array.IndexOf(Environment.GetCommandLineArgs(), "--no-public-learning") < 0', source)
         self.assertIn('if (publicLearning)\n            start.ArgumentList.Add("--public-learning");', source)
 
     def test_default_remains_offline(self):

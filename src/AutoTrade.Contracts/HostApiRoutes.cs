@@ -85,6 +85,31 @@ public static class HostApiRoutes
     public const string ExportHistorical = "api/v1/historical/export";
 
     /// <summary>
+    /// Relative route for OpenAPI operation getManualMarket.
+    /// </summary>
+    public const string GetManualMarket = "api/v1/manual/market";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation getManualStatus.
+    /// </summary>
+    public const string GetManualStatus = "api/v1/manual/status";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation prepareManualAction.
+    /// </summary>
+    public const string PrepareManualAction = "api/v1/manual/prepare";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation confirmManualAction.
+    /// </summary>
+    public const string ConfirmManualAction = "api/v1/manual/confirm";
+
+    /// <summary>
+    /// Relative route for OpenAPI operation queryManualAssistant.
+    /// </summary>
+    public const string QueryManualAssistant = "api/v1/assistant/query";
+
+    /// <summary>
     /// Relative route for OpenAPI operation downloadLocalDiagnostics.
     /// </summary>
     public const string DownloadLocalDiagnostics = "api/v1/local-diagnostics";

@@ -626,6 +626,31 @@ class WhiteBitPublicClient:
         raw, _ = self._read("markets")
         return parse_spot_markets(raw)
 
+    def spot_market_snapshot(
+        self, market: str,
+    ) -> tuple[dict[str, Any], PublicBook, str, datetime]:
+        """Read one enabled SPOT instrument and its exact current order book.
+
+        The market-list response is retained as digest evidence so downstream
+        order preparation can pin provider constraints rather than trusting a
+        caller-authored symbol or stale hardcoded limits.
+        """
+
+        market = _symbol(market)
+        markets_raw, markets_received = self._read("markets")
+        matches = [item for item in parse_spot_markets(markets_raw)
+                   if item["market"] == market]
+        if len(matches) != 1:
+            raise PublicDataError("SPOT_MARKET_NOT_AVAILABLE")
+        query = (("limit", "100"), ("level", "0"))
+        raw, received = self._read("orderbook/" + market, query)
+        return (
+            matches[0],
+            parse_orderbook(raw, market, received),
+            "sha256:" + sha256(markets_raw).hexdigest(),
+            markets_received,
+        )
+
     def market_activity(self, market: str) -> PublicTicker:
         market = _symbol(market)
         raw, received = self._read("ticker")
@@ -659,7 +684,9 @@ class WhiteBitPublicClient:
 
     def orderbook(self, market: str) -> PublicBook:
         market = _symbol(market)
-        # A caller cannot route _PERP or unknown instruments into the spot connector.
+        # Preserve the narrow order-book API and its pre-network unknown-market
+        # rejection. Order preparation uses spot_market_snapshot() when it also
+        # needs the exact metadata response digest.
         available = {item["market"] for item in self.markets()}
         if market not in available:
             raise PublicDataError("SPOT_MARKET_NOT_AVAILABLE")

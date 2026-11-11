@@ -51,8 +51,13 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         string data = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "AutoTrade-ZERO");
+        // The installed product owns its public WhiteBIT collector and durable
+        // learning worker.  Normal launches therefore continue learning without
+        // requiring a hidden developer flag.  The explicit opt-out is retained
+        // for offline recovery and support; the isolated candidate smoke path
+        // below still passes its own false default and remains network-free.
         return StartAsync(AppContext.BaseDirectory, data,
-            Array.IndexOf(Environment.GetCommandLineArgs(), "--public-learning") >= 0);
+            Array.IndexOf(Environment.GetCommandLineArgs(), "--no-public-learning") < 0);
     }
 
     // The installed-candidate gate invokes this exact production bootstrap with
@@ -85,8 +90,9 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
         foreach (string arg in new[] {"-B", "-m", "mvp.autotrade_mvp.product_runtime", "--data-dir", data,
             "--port", "0", "--no-browser", "--desktop-child", "--parent-pid", Environment.ProcessId.ToString()})
             start.ArgumentList.Add(arg);
-        // Explicit opt-in only. Installed smoke/ordinary offline startup keeps
-        // the same no-network default; the Python Host owns graceful research drain.
+        // The public launcher opts in by default. Installed-candidate smoke calls
+        // this overload without the flag and remains network-free; the Python Host
+        // owns graceful research drain in either case.
         if (publicLearning)
             start.ArgumentList.Add("--public-learning");
         Process process = Process.Start(start) ?? throw new InvalidOperationException("The installed host could not start.");

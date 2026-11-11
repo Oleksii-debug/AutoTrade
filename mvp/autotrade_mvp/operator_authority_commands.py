@@ -21,6 +21,14 @@ from .simulation_commands import (
     execute_simulation_action, resolve_simulation_action,
 )
 from .host_actions import canonical_host_action
+from .runtime_modes import (
+    RUNTIME_MODE_ACTION,
+    assert_runtime_action_allowed,
+    canonical_runtime_mode_payload,
+    execute_runtime_mode_action,
+    resolve_runtime_mode_action,
+    validate_runtime_mode_payload,
+)
 from .persistence import JournalStore, payload_digest
 from .risk import _canonical_decimal_text
 
@@ -207,7 +215,12 @@ def canonical_operator_payload(
     command = _text(command_id, "command_id")
     account = _text(account_id, "account_id")
     env = _text(environment, "environment")
+    if action_name == RUNTIME_MODE_ACTION:
+        return canonical_runtime_mode_payload(
+            journal, dict(raw_payload), command, account, env
+        )
     if action_name in SIMULATION_ACTIONS:
+        assert_runtime_action_allowed(journal, action_name)
         return canonical_simulation_payload(journal, action_name, raw_payload, command, account, env)
     _service, state, _authority_events, version = _state(journal)
     epoch = state.get("epoch")
@@ -386,6 +399,10 @@ def validate_persisted_payload(
     action_name = canonical_host_action(action)
     account = _text(account_id, "account_id")
     env = _text(environment, "environment")
+    if action_name == RUNTIME_MODE_ACTION:
+        return validate_runtime_mode_payload(
+            payload, payload_hash, account, env
+        )
     if action_name in SIMULATION_ACTIONS:
         return validate_simulation_payload(action_name, payload, payload_hash, account, env)
     if not isinstance(payload, Mapping):
@@ -866,7 +883,11 @@ def execute_operator_authority_action(
         account_id,
         environment,
     )
+    if action_name == RUNTIME_MODE_ACTION:
+        result = execute_runtime_mode_action(journal, payload, accepted)
+        return AuthorityExecutionResult(result.affected_refs, result.evidence)
     if action_name in SIMULATION_ACTIONS:
+        assert_runtime_action_allowed(journal, action_name)
         return execute_simulation_action(journal, action_name, payload, accepted)
     resolved = _resolved(journal, action_name, payload, accepted)
     if resolved is not None:
@@ -1104,6 +1125,13 @@ def observed_authority_operation_effects(
         account_id,
         environment,
     )
+    if action_name == RUNTIME_MODE_ACTION:
+        result = resolve_runtime_mode_action(journal, payload, accepted)
+        return (
+            AuthorityExecutionResult((), ())
+            if result is None
+            else AuthorityExecutionResult(result.affected_refs, result.evidence)
+        )
     if action_name in SIMULATION_ACTIONS:
         result = resolve_simulation_action(journal, action_name, payload)
         return result or AuthorityExecutionResult((), ())
@@ -1204,9 +1232,19 @@ def validate_authority_success_evidence(
         account_id,
         environment,
     )
-    result = (resolve_simulation_action(journal, action_name, payload)
-              if action_name in SIMULATION_ACTIONS else _resolved(
-                  journal, action_name, payload, _text(accepted_at, "accepted_at")))
+    if action_name == RUNTIME_MODE_ACTION:
+        mode_result = resolve_runtime_mode_action(
+            journal, payload, _text(accepted_at, "accepted_at")
+        )
+        result = (
+            None
+            if mode_result is None
+            else AuthorityExecutionResult(mode_result.affected_refs, mode_result.evidence)
+        )
+    else:
+        result = (resolve_simulation_action(journal, action_name, payload)
+                  if action_name in SIMULATION_ACTIONS else _resolved(
+                      journal, action_name, payload, _text(accepted_at, "accepted_at")))
     if result is None:
         raise ValueError("terminal authority operation has no canonical outcome")
     if tuple(affected_refs) != result.affected_refs:

@@ -93,6 +93,7 @@ class WhiteBitHistoricalAlphaTests(unittest.TestCase):
                              "FIRST_MILLISECOND_AFTER_CANDLE_CLOSE")
             self.assertEqual(first["costs"]["source_ref"],
                              "HYPOTHETICAL_NOT_ACCOUNT_FEES:WHITEBIT_ALPHA_BRIDGE_V1")
+            self.assertEqual(first["costs"]["model_cost_quote"], "0")
 
     def test_tampered_csv_and_manifest_identity_fail_closed(self):
         with TemporaryDirectory() as tmp:

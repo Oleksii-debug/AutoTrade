@@ -241,7 +241,7 @@ def build_alpha_input(
     entry_slippage_bps: str = "1",
     exit_slippage_bps: str = "1",
     funding_borrow_bps: str = "0",
-    model_cost_quote: str = "0.02",
+    model_cost_quote: str = "0",
     notional_quote: str = "1000",
     min_notional_quote: str = "5",
 ) -> tuple[dict, dict]:
@@ -320,7 +320,15 @@ def _add_cost_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--entry-slippage-bps", default="1")
     parser.add_argument("--exit-slippage-bps", default="1")
     parser.add_argument("--funding-borrow-bps", default="0")
-    parser.add_argument("--model-cost-quote", default="0.02")
+    parser.add_argument(
+        "--model-cost-quote",
+        default="0",
+        help=(
+            "External quote-currency charge per model decision. The native "
+            "DLinear/XGBoost/CatBoost path has no token bill, so its truthful "
+            "default is zero; pass an evidenced non-zero amount for paid models."
+        ),
+    )
     parser.add_argument("--notional-quote", default="1000")
     parser.add_argument("--min-notional-quote", default="5")
 

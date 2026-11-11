@@ -295,6 +295,7 @@ WHITEBIT_ORDER_ENDPOINTS = frozenset(
         "/api/v4/order/collateral/limit",
         "/api/v4/order/collateral/trigger-market",
         "/api/v4/order/collateral/stop-limit",
+        "/api/v4/order/cancel",
     }
 )
 
@@ -2839,6 +2840,31 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "prepared WhiteBIT body contains transport-owned authentication fields"
             )
+        if endpoint == "/api/v4/order/cancel":
+            identities = {"clientOrderId", "orderId"} & set(normalized)
+            if len(identities) != 1 or set(normalized) != {"market", *identities}:
+                raise ProviderTransportScopeError(
+                    "prepared WhiteBIT cancel requires market and exactly one order identity"
+                )
+            market = normalized.get("market")
+            if (
+                type(market) is not str
+                or re.fullmatch(r"[A-Z0-9]{1,20}_[A-Z0-9]{1,20}", market) is None
+            ):
+                raise ProviderTransportScopeError(
+                    "prepared WhiteBIT cancel market is not canonical"
+                )
+            if "clientOrderId" in identities:
+                try:
+                    validate_client_order_id(normalized["clientOrderId"])
+                except (TypeError, ValueError) as error:
+                    raise ProviderTransportScopeError(
+                        "prepared WhiteBIT cancel client order identity is invalid"
+                    ) from error
+            elif type(normalized["orderId"]) is not int or normalized["orderId"] <= 0:
+                raise ProviderTransportScopeError(
+                    "prepared WhiteBIT cancel order identity is invalid"
+                )
         capability = _canonical_text(
             request["capability_snapshot_id"],
             name="capability_snapshot_id",
@@ -2859,7 +2885,7 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "prepared request capability snapshot mismatch"
             )
-        if body.get("clientOrderId") != client_id:
+        if endpoint != "/api/v4/order/cancel" and body.get("clientOrderId") != client_id:
             raise ProviderTransportScopeError(
                 "prepared request client order identity mismatch"
             )
@@ -2868,7 +2894,7 @@ class WhiteBitHttpTransport:
             "WHITEBIT",
             self.account_id,
             "LIVE",
-            "ORDER_WRITE",
+            "ORDER_CANCEL_RESERVED" if endpoint == "/api/v4/order/cancel" else "ORDER_WRITE",
         )
 
         with self.secret_resolver.lease_for_execution(

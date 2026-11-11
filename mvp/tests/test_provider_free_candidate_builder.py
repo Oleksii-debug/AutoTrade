@@ -107,6 +107,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             self.assertIn('autotrade_runtime/artifacts/store.py', collected)
             self.assertIn('autotrade_runtime/resource_lock.py', collected)
             self.assertTrue(candidate.HISTORICAL_SOURCE.issubset(selected))
+            self.assertTrue(candidate.DELIVERY_SOURCE.issubset(selected))
             # Run from the staged package, without the checkout on PYTHONPATH.
             # The Windows embedded Python uses these same two product roots.
             env = os.environ.copy()
@@ -153,6 +154,13 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('--supervisor-state-dir', result.stdout)
             self.assertIn('--state-dir', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-m', 'tools.run_windows_update', '--help'],
+                cwd=root / 'product', env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--descriptor-sha256', result.stdout)
+            self.assertIn('--install-root', result.stdout)
 
     def test_canonical_runtime_source_selector_only_adds_python_modules(self):
         self.assertTrue(candidate._source_path_selected('autotrade_runtime/artifacts/store.py'))
@@ -178,10 +186,24 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
         self.assertTrue(candidate._source_path_selected('tools/configure_mistral.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_model_provider.py'))
         self.assertTrue(candidate._source_path_selected('tools/configure_whitebit.py'))
+        self.assertTrue(candidate._source_path_selected('tools/run_windows_update.py'))
+        self.assertTrue(candidate._source_path_selected('tools/configure_whitebit_trade.py'))
         self.assertFalse(candidate._source_path_selected('tools/build_provider_free_candidate.py'))
         self.assertFalse(candidate._source_path_selected('autotrade_runtime/private-key.pem'))
         self.assertFalse(candidate._source_path_selected('autotrade_runtime/credentials.json'))
         self.assertFalse(candidate._source_path_selected('other/autotrade_runtime/artifacts/store.py'))
+
+    def test_packaged_whitebit_trade_setup_has_hidden_input_cli_contract(self):
+        result = subprocess.run(
+            [sys.executable, '-m', 'tools.configure_whitebit_trade', '--help'],
+            cwd=candidate.ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--ip-whitelist-confirmed', result.stdout)
+        self.assertNotIn('--api-key', result.stdout)
+        self.assertNotIn('--api-secret', result.stdout)
 
     def test_archive_replacement_after_digest_check_cannot_change_extracted_bytes(self):
         with TemporaryDirectory() as directory:
@@ -582,6 +604,33 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
         self.assertNotIn(
             'Invoke-WebRequest $inputs.webview2_sdk.url', workflow
         )
+
+    def test_windows_workflow_publishes_exact_source_pinned_candidate(self):
+        workflow = (
+            candidate.ROOT / '.github/workflows/provider-free-product.yml'
+        ).read_text(encoding='utf-8')
+        self.assertIn('branches:\n      - main', workflow)
+        self.assertIn(
+            'AUTOTRADE_SOURCE_SHA: '
+            '${{ github.event.pull_request.head.sha || github.sha }}',
+            workflow,
+        )
+        self.assertIn('runs-on: windows-2025', workflow)
+        self.assertIn('ref: ${{ env.AUTOTRADE_SOURCE_SHA }}', workflow)
+        self.assertGreaterEqual(
+            workflow.count('-p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }}'),
+            2,
+        )
+        self.assertIn(
+            '--source-sha ${{ env.AUTOTRADE_SOURCE_SHA }}', workflow
+        )
+        self.assertIn(
+            'name: AutoTrade-ZERO-UNQUALIFIED-'
+            '${{ env.AUTOTRADE_SOURCE_SHA }}',
+            workflow,
+        )
+        self.assertIn('artifacts/AutoTrade-ZERO-win-x64.zip', workflow)
+        self.assertIn('artifacts/AutoTrade-ZERO-win-x64.zip.sha256', workflow)
 
     def test_candidate_verifies_signed_archive_physical_digest_separately(self):
         # The lock has an unsigned contentHash; the copied signed .nupkg

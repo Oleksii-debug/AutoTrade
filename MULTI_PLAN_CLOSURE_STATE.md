@@ -5,9 +5,10 @@
 - **Плани 1–8:** завершені в межах затвердженої repository-controllable engineering scope; історичні точні PR/злиття/обмеження наведено нижче. `DONE` не дорівнює перевірці реальної торгівлі, підписаного публічного релізу або фізичного NVDA.
 - **План 9:** `30/30` самостійних розділів закрито або термінально вирішено для приватного provider-free/ZERO обсягу; real provider/account, PAPER і LIVE позначені `NOT_CLAIMED / NOT_ACTIVATED` та НЕ видаються за виконану реальну торгівлю.
 - **План 10:** `23/23` самостійних розділів затвердженої історичної симуляції/навчання позначені `DONE`; це не доказ майбутньої прибутковості.
+- **Додатковий стан 2026-10-20:** у поточній інтеграційній лінії вже є п’ять довгоживучих runtime-режимів, реальний manual/assisted WhiteBIT SPOT ticket і cancel path, автентифікована READ-проєкція рахунку, живий public-data ZERO learner та виконуваний fail-closed Windows updater bridge. Це не змінює правдиві межі: live-order не відправлявся, TRADE-профіль не активовано, нову Windows-збірку з цієї лінії ще не заявлено.
 - **Сумарна поточна робота для 53 атомарних розділів Планів 9–10: 0 незакритих у затвердженому PRIVATE/ZERO scope.** Історичні `NOT DONE` всередині довгих рядків доказів, старі плани та застарілі PR не є поточними статусами.
 - **Межі:** відкладені зовнішні права/довіра/фінальний реліз і нові окремі дефекти/запити ведуться окремо, без автоматичного `REOPEN` закритих планів. Відкритий PR, що не потрібен для завершеного затвердженого scope, не робить його знову незакритим.
-- **Підстава перевірки:** поточні реєстри в `main` на `32b435d40fcf93e39ab69ac99cc645f3da241fc3`. Зовнішню інсталяцію й нові тести в цій реєстровій синхронізації **НЕ** запускали.
+- **Підстава перевірки:** additive implementation baseline поточної інтеграційної лінії `b31ad7cca4dff579428fcf63afa72bcd6d6783e6`; локальний focused набір нижче фактично виконано. Зовнішню інсталяцію, live-order та нову Windows-збірку в цій реєстровій синхронізації **НЕ** виконували.
 
 **Термінальний висновок для затвердженої розробки:** `CLOSED_FOR_DEVELOPMENT / TERMINAL`; **першого незакритого затвердженого розділу немає.** Не призначати ці розділи агентам повторно без нової затвердженої вимоги або доведеного регресійного дефекту.
 
@@ -198,6 +199,26 @@ the data → decision → simulation → accounting → memory → learning → 
 evaluation loop. Private experiments must not be represented as true-paper fills
 or demonstrated profitability until verified. Canonical
 plan: https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/edit
+
+### 2026-10-20 additive Plans 9–10 product checkpoint
+
+This checkpoint supersedes stale statements that the following capabilities are
+absent or that Plans 9/10 have zero completed sections. It does not reopen or
+renumber the already terminal approved rows above.
+
+| Capability | Current integration evidence | Honest boundary |
+| --- | --- | --- |
+| Durable product modes | `614735d18`: `RUNNING`, `PAUSED`, `RESEARCH_ONLY`, `RECOVERY`, `STOPPED`; journal-backed transition/checkpoint authority, Web control and final submission fence | Only `RUNNING` admits a new order submission; RECOVERY must reconcile first |
+| Real manual and assisted WhiteBIT SPOT | `dbf9818e9`, `5fe383fe7`, `49fab9734`, `b31ad7cca`: per-market public quote/constraints, market/limit BUY/SELL draft, guarded single-order cancel, explicit owner confirmation, prepare-only assistant, semantic keyboard UI, selected-market balances and runtime fence | Real-capable product path, not a simulation substitute; canonical OMS gateway remains fail-closed until a separate least-privilege TRADE credential is available; no live order was sent |
+| Authenticated owner account READ | `49fab9734` plus existing protected `whitebit-primary`: bounded TTL projection of signed main/trading balances into manual status; secrets never enter UI/status/diagnostics | READ only; no order, transfer, withdrawal, leverage or other authority follows from the projection |
+| Current-data learning | `3262b4101` makes the owned WhiteBIT public-data ZERO learner default on ordinary Desktop launch, with explicit opt-out and restart-safe state; Plan-10 historical learning remains separate | Public-data numerical learning only; no paid-LLM spend, live-order authority or profitability claim |
+| Executable Windows update bridge | `eda3a3042`, `a3d66cb64`: CLI/bridge verifies HTTPS descriptor, release identity/version/SHA and migration evidence; requires checkpointed STOP and learning checkpoint; locks financial/learning processes; backs up external data, installs side-by-side, activates atomically, resumes learning in degraded mode and rolls back on failure | Source/runtime bridge is implemented; no fresh installer package, signed public release or physical installed-machine acceptance is claimed |
+
+Local focused qualification on the integration lineage: `33 passed, 13 subtests
+passed` in `102.08s` for `test_product_runtime_modes.py`,
+`test_manual_trading.py`, `test_whitebit_public_status.py` and
+`test_windows_update_bridge.py`. This is scoped evidence, not a full-repository
+or Windows packaging result.
 
 Migration note: old parked/partial PRs may have stale bases after the control-plane switch. Their existence is preserved as work/evidence, not as a requirement to merge stale topology. When a Section becomes actionable, refresh head/base/current-main, preserve unique changes, and converge once under the new owner plan.
 

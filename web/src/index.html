@@ -18,6 +18,7 @@
       <li><a href="#overview">Overview</a></li>
       <li><a href="#accounts">Accounts and host</a></li>
       <li><a href="#opportunities">Opportunities and decisions</a></li>
+      <li><a href="#manual-trading">Manual trading and assistant</a></li>
       <li><a href="#portfolio">Portfolio and orders</a></li>
       <li><a href="#risk">Risk and authority</a></li>
       <li><a href="#research">Research and replay</a></li>
@@ -117,6 +118,91 @@
       </div>
     </section>
 
+    <section id="manual-trading" aria-labelledby="manual-trading-heading">
+      <h2 id="manual-trading-heading" tabindex="-1">Manual trading and assistant</h2>
+      <p><strong>Real WhiteBIT order ticket.</strong> Public prices work without trading permission. A real order can be sent only after separate confirmation and only when the current key has ORDER_MANAGEMENT permission and the canonical OMS/sender is active. Press Alt+T to return here.</p>
+      <p id="manual-market-status">Public WhiteBIT quote has not been loaded.</p>
+      <p id="manual-capability-status">WhiteBIT order capability has not been checked.</p>
+      <label for="manual-market">WhiteBIT spot market</label>
+      <select id="manual-market">
+        <option value="BTC_USDT">BTC_USDT</option>
+        <option value="ETH_USDT">ETH_USDT</option>
+        <option value="SOL_USDT">SOL_USDT</option>
+      </select>
+      <button id="manual-refresh" type="button">Refresh public WhiteBIT price and account</button>
+      <label>
+        <input id="manual-price-narration" type="checkbox">
+        Announce price changes every five seconds while this page is open
+      </label>
+      <dl>
+        <dt>Bid</dt><dd><span id="manual-bid">Unavailable</span></dd>
+        <dt>Ask</dt><dd><span id="manual-ask">Unavailable</span></dd>
+        <dt>Available <span id="manual-quote-asset">quote asset</span></dt><dd><span id="manual-cash">Unavailable</span></dd>
+        <dt>Available <span id="manual-base-asset">base asset</span></dt><dd><span id="manual-position">Unavailable</span></dd>
+        <dt>Instrument constraints</dt><dd><span id="manual-instrument">Unavailable</span></dd>
+        <dt>Account projection</dt><dd><span id="manual-fee">Unavailable</span></dd>
+      </dl>
+
+      <form id="manual-order-form">
+        <fieldset>
+          <legend>Prepare a real WhiteBIT action</legend>
+          <label for="manual-action">Action</label>
+          <select id="manual-action" required>
+            <option value="BUY">Buy base asset on WhiteBIT</option>
+            <option value="SELL">Sell base asset on WhiteBIT</option>
+            <option value="HOLD">Hold; record no order</option>
+            <option value="CANCEL">Cancel an open WhiteBIT order</option>
+          </select>
+          <label for="manual-order-type">Order type</label>
+          <select id="manual-order-type">
+            <option value="MARKET">Market</option>
+            <option value="LIMIT">Limit</option>
+          </select>
+          <label for="manual-quantity">Base-asset quantity</label>
+          <input id="manual-quantity" type="text" inputmode="decimal" autocomplete="off">
+          <label for="manual-limit-price">Limit price in quote asset</label>
+          <input id="manual-limit-price" type="text" inputmode="decimal" autocomplete="off">
+          <label for="manual-cancel-order-id">WhiteBIT client order ID to cancel</label>
+          <input id="manual-cancel-order-id" type="text" autocomplete="off">
+          <button id="manual-prepare" type="submit">Prepare for review</button>
+        </fieldset>
+      </form>
+
+      <section aria-labelledby="manual-review-heading">
+        <h3 id="manual-review-heading">Separate confirmation</h3>
+        <p id="manual-draft-review" tabindex="-1">No action is prepared.</p>
+        <label>
+          <input id="manual-confirm-check" type="checkbox" disabled>
+          I reviewed this exact action and authorize this REAL WhiteBIT order or cancellation.
+        </label>
+        <button id="manual-confirm" type="button" disabled>Send confirmed action through canonical OMS</button>
+        <p id="manual-action-result">No real action has been executed.</p>
+      </section>
+
+      <section aria-labelledby="manual-orders-heading">
+        <h3 id="manual-orders-heading">WhiteBIT orders</h3>
+        <div class="table-scroll" role="region" aria-label="WhiteBIT orders" tabindex="0">
+          <table>
+            <caption>Current WhiteBIT account orders</caption>
+            <thead><tr><th scope="col">Order ID</th><th scope="col">Side</th><th scope="col">Status</th><th scope="col">Price USDT</th></tr></thead>
+            <tbody id="manual-orders-body"><tr><td colspan="4">No account orders loaded.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <form id="manual-assistant-form">
+        <fieldset>
+          <legend>Read-only trading assistant</legend>
+          <p>The assistant may report public prices or prepare a real-order draft. It never confirms or executes an action.</p>
+          <label for="manual-assistant-message">Ask about price or prepare a WhiteBIT action</label>
+          <input id="manual-assistant-message" type="text" maxlength="500" autocomplete="off" aria-describedby="manual-assistant-help">
+          <p id="manual-assistant-help">Examples: “ціна BTC”, “купити 0.001 BTC”, “ліміт купити 0.001 за 60000”, or “скасувати manual-…”.</p>
+          <button id="manual-assistant-send" type="submit">Ask assistant</button>
+        </fieldset>
+      </form>
+      <p id="manual-assistant-response">The assistant has not answered yet.</p>
+    </section>
+
     <section id="portfolio" aria-labelledby="portfolio-heading">
       <h2 id="portfolio-heading" tabindex="-1">Portfolio and orders</h2>
       <p>Financial values remain host-authoritative. Accepted commands are not fills.</p>
@@ -202,7 +288,19 @@
             <option value="START_SIMULATION">Start provider-free simulation</option>
             <option value="RECOVER_SIMULATION">Recover provider-free simulation</option>
             <option value="BACKUP_SIMULATION">Back up provider-free simulation</option>
+            <option value="SET_RUNTIME_MODE">Change runtime mode</option>
           </select>
+          <div id="runtime-mode-fields" hidden>
+            <label for="runtime-mode">Runtime mode</label>
+            <select id="runtime-mode" name="runtime_mode" aria-describedby="runtime-mode-help">
+              <option value="RUNNING">Running — decisions and allowed simulation can execute</option>
+              <option value="PAUSED">Paused — block new trade decisions, preserve research</option>
+              <option value="RESEARCH_ONLY">Research only — analysis without order submission</option>
+              <option value="RECOVERY">Recovery — reconcile before ordinary execution</option>
+              <option value="STOPPED">Stopped — checkpointed safe stop</option>
+            </select>
+            <p id="runtime-mode-help">Every transition is journaled with learning, memory, strategy and diagnostic preservation evidence.</p>
+          </div>
           <div id="authority-policy-fields" hidden>
             <p>
               Owner-only policy activation. The host, account and environment are copied from the

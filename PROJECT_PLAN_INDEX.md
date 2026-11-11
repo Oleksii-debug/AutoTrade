@@ -46,6 +46,37 @@ https://docs.google.com/document/d/1bTDCb0yGLrOqlKClhyAD_7k7aZsP57kFRkexHz_b6d4/
 
 **Plan 10 is owner-authorized independent ACTIONABLE provider-free historical simulation work.** It reuses terminal Plans 1–8 and is not blocked by optional real-provider/manual-screen-reader work in Plan 9. No real money or credentials. Plan 10 statuses live in MULTI_PLAN_CLOSURE_STATE.md; strict historical causality and technical data provenance are binding.
 
+## Current Plans 9–10 implementation checkpoint — 2026-10-20
+
+Plans 9 and 10 are **not at zero**. The canonical closure registry records
+Plan 9 as `30/30` resolved for its approved private-local/ZERO scope and Plan 10
+as `23/23 DONE` for its approved historical-simulation/learning scope. The
+following owner-requested capabilities are additive implementation on the current
+integration lineage and must not be hidden by older `NOT_ACTIVATED` snapshots:
+
+- one durable runtime-mode authority implements `RUNNING`, `PAUSED`,
+  `RESEARCH_ONLY`, `RECOVERY` and `STOPPED`, with checkpoint preservation and a
+  final order-submission fence outside `RUNNING`;
+- the canonical Web/Windows product exposes a keyboard-accessible **real**
+  WhiteBIT SPOT manual ticket and assistant prepare-only flow for market/limit
+  buy/sell and single-order cancellation. Draft and explicit confirmation are
+  separate; the assistant cannot confirm;
+- the protected READ-only `whitebit-primary` profile is bound to the owner UI
+  through a bounded authenticated account projection. Public per-market quote
+  and instrument constraints remain available independently;
+- normal Desktop launches own the restart-safe WhiteBIT public-data ZERO learner,
+  while historical learning remains an independent causal Plan-10 path;
+- an executable fail-closed Windows updater bridge now verifies release identity,
+  version and SHA, requires checkpointed STOP, keeps data outside versioned
+  program directories, installs side-by-side, resumes learning in degraded mode,
+  and rolls back on failed safe resume.
+
+Focused local qualification for the current integration lineage passed
+`33 tests + 13 subtests` across runtime modes, manual trading/public status and
+the Windows updater bridge. These facts do **not** claim that a live order was
+sent, that a least-privilege TRADE profile is active, that current economic edge
+is proven, or that a new Windows installer was compiled from this lineage.
+
 ## Worker selection
 
 For Plans 1–7:

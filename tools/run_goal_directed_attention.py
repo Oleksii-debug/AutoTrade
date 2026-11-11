@@ -118,11 +118,17 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     workstreams = []
     for spec, state_path, reference, decision in state_rows:
         grant = grants[spec.session_id]
+        # A completed wake/recovery cycle establishes a new monitoring anchor.
+        # Without rebasing, a boundary crossed during downtime wakes the same
+        # workstream every poll forever and starves the other workstreams.
+        persisted_reference = (
+            mid if decision.phase in {"WAKE_ANALYSIS", "RECOVERY"} else reference
+        )
         state = {
             "schema": SCHEMA,
             "session_id": spec.session_id,
             "profile_id": spec.profile.profile_id,
-            "reference_price": format(reference, "f"),
+            "reference_price": format(persisted_reference, "f"),
             "current_price": format(mid, "f"),
             "market_available_at": market["available_at"],
             "next_scheduled_review": decision.next_check_at.isoformat(),

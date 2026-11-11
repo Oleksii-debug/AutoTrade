@@ -13,6 +13,8 @@ import stat
 from typing import Callable
 
 from research.autotrade_research.io.strict_json import strict_json_loads
+from research.autotrade_research.integrations.whitebit_public import WhiteBitPublicClient
+from .exact_decimal import canonical_decimal_text, exact_add, parse_bounded_exact_decimal
 
 
 _SUPERVISOR_SCHEMA = "autotrade-whitebit-public-supervisor-v1"
@@ -344,3 +346,136 @@ def read_whitebit_public_status(
         }
     except (OSError, UnicodeDecodeError, TypeError, ValueError):
         return _blocked_status(as_of, "whitebit_public_status_unavailable")
+
+
+def read_whitebit_public_quote(
+    state_dir: str | Path,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Return the current exact public top-of-book for the manual WhiteBIT ticket.
+
+    Unlike the compact host freshness projection, this explicit authenticated
+    product route is allowed to expose bid/ask values.  It remains a read-only
+    public-data fact and never conveys account or order authority.
+    """
+
+    observed_now = clock()
+    if type(observed_now) is not datetime or observed_now.tzinfo is None:
+        raise ValueError("quote clock must return a timezone-aware datetime")
+    now = observed_now.astimezone(timezone.utc)
+    if type(state_dir) not in (str, type(Path())):
+        raise TypeError("WhiteBIT state path must be exact text or Path")
+    root = Path(state_dir).resolve(strict=False)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("WhiteBIT supervisor state directory is unavailable")
+
+    state = latest = heartbeat = None
+    for _attempt in range(_COHERENT_READ_ATTEMPTS):
+        candidate_state = _validated_state(root)
+        first, first_digest = _latest_diagnostic(root / "diagnostics")
+        candidate_latest = _validated_latest(root)
+        second, second_digest = _latest_diagnostic(root / "diagnostics")
+        if (
+            first["sequence"] == second["sequence"]
+            and first_digest == second_digest
+        ):
+            state, latest, heartbeat = candidate_state, candidate_latest, second
+            break
+    if state is None or latest is None or heartbeat is None:
+        raise ValueError("WhiteBIT public quote changed during bounded read")
+    heartbeat_at = _utc(
+        heartbeat["recorded_at_utc"], name="heartbeat recorded_at_utc"
+    )[1]
+    if (
+        (now - heartbeat_at).total_seconds() < 0
+        or (now - heartbeat_at).total_seconds() > _MAX_HEARTBEAT_AGE_SECONDS
+        or heartbeat["phase"] != "RUNNING"
+        or heartbeat["connection_code"] != "SUBSCRIBED"
+        or heartbeat["market"] != state["market"]
+        or latest["market"] != state["market"]
+        or latest["stream_generation"] != heartbeat["generation"]
+        or heartbeat["last_observed_at"] is None
+        or _utc(
+            heartbeat["last_observed_at"], name="heartbeat last_observed_at"
+        )[0] != _utc(latest["available_at"], name="latest available_at")[0]
+    ):
+        raise ValueError("WhiteBIT public quote is not current")
+    bid = parse_bounded_exact_decimal(latest["bid_price"])
+    ask = parse_bounded_exact_decimal(latest["ask_price"])
+    bid_quantity = parse_bounded_exact_decimal(latest["bid_quantity"])
+    ask_quantity = parse_bounded_exact_decimal(latest["ask_quantity"])
+    if bid <= 0 or ask <= 0 or bid > ask or bid_quantity <= 0 or ask_quantity <= 0:
+        raise ValueError("WhiteBIT public quote values are invalid")
+    evidence = latest["raw_evidence_ref"]
+    return {
+        "schema": "autotrade-whitebit-public-quote-v1",
+        "status": "READY",
+        "market": latest["market"],
+        "venue": latest["venue"],
+        "bid_price": canonical_decimal_text(bid),
+        "bid_quantity": canonical_decimal_text(bid_quantity),
+        "ask_price": canonical_decimal_text(ask),
+        "ask_quantity": canonical_decimal_text(ask_quantity),
+        "mid_price": canonical_decimal_text(exact_add(bid, ask) / 2),
+        "available_at": _utc(latest["available_at"], name="latest available_at")[0],
+        "published_at": _utc(latest["published_at"], name="latest published_at")[0],
+        "update_id": latest["update_id"],
+        "stream_generation": latest["stream_generation"],
+        "evidence_sha256": evidence["sha256"],
+        "public_data_only": True,
+        "trading_authority": False,
+    }
+
+
+def read_whitebit_live_spot_snapshot(
+    client: WhiteBitPublicClient,
+    market: str,
+) -> dict[str, object]:
+    """Read current enabled SPOT metadata and top of book from one shared client."""
+
+    if type(client) is not WhiteBitPublicClient:
+        raise TypeError("client must be exact WhiteBitPublicClient")
+    metadata, book, metadata_digest, metadata_received = client.spot_market_snapshot(
+        market
+    )
+    bid_price, bid_quantity = book.bids[0]
+    ask_price, ask_quantity = book.asks[0]
+    bid = parse_bounded_exact_decimal(bid_price)
+    ask = parse_bounded_exact_decimal(ask_price)
+    return {
+        "schema": "autotrade-whitebit-public-quote-v1",
+        "status": "READY",
+        "market": book.market,
+        "venue": "WHITEBIT_SPOT",
+        "bid_price": canonical_decimal_text(bid),
+        "bid_quantity": canonical_decimal_text(
+            parse_bounded_exact_decimal(bid_quantity)
+        ),
+        "ask_price": canonical_decimal_text(ask),
+        "ask_quantity": canonical_decimal_text(
+            parse_bounded_exact_decimal(ask_quantity)
+        ),
+        "mid_price": canonical_decimal_text(exact_add(bid, ask) / 2),
+        "available_at": book.received_at.isoformat().replace("+00:00", "Z"),
+        "published_at": book.source_time.isoformat().replace("+00:00", "Z"),
+        "evidence_sha256": book.digest,
+        "public_data_only": True,
+        "trading_authority": False,
+        "instrument": {
+            "schema": "autotrade-whitebit-spot-instrument-v1",
+            "market": metadata["market"],
+            "base_asset": metadata["base_asset"],
+            "quote_asset": metadata["quote_asset"],
+            "minimum_quantity": metadata["minimum_quantity"],
+            "minimum_notional": metadata["minimum_notional"],
+            "quantity_precision": metadata["quantity_precision"],
+            "quote_precision": metadata["quote_precision"],
+            "trades_enabled": True,
+            "delisted_at": None,
+            "metadata_observed_at": metadata_received.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "metadata_sha256": metadata_digest,
+        },
+    }

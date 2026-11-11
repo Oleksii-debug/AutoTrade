@@ -343,6 +343,17 @@ def whitebit_prepared_request(
     }
 
 
+def whitebit_cancel_request(*, capability_snapshot_id="wb-cap-1"):
+    return {
+        "endpoint": "/api/v4/order/cancel",
+        "body": {
+            "market": "ETH_USDT",
+            "clientOrderId": "manual-target-order",
+        },
+        "capability_snapshot_id": capability_snapshot_id,
+    }
+
+
 def kraken_trade_handle(
     *,
     account_id="acct-kraken",
@@ -985,6 +996,157 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(body["request"], "/api/v4/order/new")
             self.assertEqual(body["nonce"], 1_700_000_000_000)
             self.assertIn("X-TXC-SIGNATURE", signed.headers)
+
+    def test_whitebit_cancel_uses_distinct_attempt_identity_and_reserved_quota(self):
+        events = []
+        quota_calls = []
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: events.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            wire = RecordingWire(events, response=b'{"orderId":123,"status":"CANCELED"}')
+            transport = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=allocator,
+                quota_gate=lambda *args: quota_calls.append(args) or events.append("quota"),
+                wire_client=wire,
+            )
+            response = transport(
+                "at-cancel-attempt-1",
+                whitebit_cancel_request(),
+                lambda: events.append("guard"),
+            )
+            self.assertEqual(events, ["quota", "resolve", "nonce", "guard", "wire"])
+            self.assertEqual(
+                quota_calls,
+                [("WHITEBIT", "acct-wb", "LIVE", "ORDER_CANCEL_RESERVED")],
+            )
+            self.assertFalse(response.requires_reconciliation)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(wire.requests[0].url, "https://whitebit.com/api/v4/order/cancel")
+            signed = json.loads(wire.requests[0].body)
+            self.assertEqual(signed["clientOrderId"], "manual-target-order")
+            self.assertEqual(signed["market"], "ETH_USDT")
+
+    def test_whitebit_cancel_body_fails_closed_before_quota_or_secret(self):
+        events = []
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            transport = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=WhiteBitDurableNonceAllocator(
+                    journal=JournalStore(f"{directory}/journal.sqlite3"),
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: fixed,
+                ),
+                quota_gate=lambda *_args: events.append("quota"),
+                wire_client=RecordingWire(events),
+            )
+            for body in (
+                {"market": "ETH_USDT"},
+                {"market": "ETH_USDT", "orderId": 1, "clientOrderId": "both"},
+                {"market": "eth_usdt", "orderId": 1},
+            ):
+                with self.subTest(body=body), self.assertRaises(
+                    ProviderTransportScopeError
+                ):
+                    transport(
+                        "at-cancel-attempt-1",
+                        {
+                            "endpoint": "/api/v4/order/cancel",
+                            "body": body,
+                            "capability_snapshot_id": "wb-cap-1",
+                        },
+                        lambda: events.append("guard"),
+                    )
+            self.assertEqual(events, [])
+
+    def test_whitebit_cancel_ambiguous_response_is_unknown_and_never_retried(self):
+        events = []
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            wire = RecordingWire(
+                events,
+                response=b'{"message":"upstream unavailable"}',
+                http_status=503,
+            )
+            transport = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=WhiteBitDurableNonceAllocator(
+                    journal=store,
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: fixed,
+                ),
+                quota_gate=lambda *_args: events.append("quota"),
+                wire_client=wire,
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="LIVE",
+                account_id="acct-wb",
+                owner_token="owner-wb",
+            )
+            kwargs = {
+                "attempt_id": "attempt-whitebit-cancel",
+                "intent_id": "intent-whitebit-cancel",
+                "intent_hash": "intent-hash-whitebit-cancel",
+                "provider": "WHITEBIT",
+                "request": whitebit_cancel_request(),
+                "authority_check": lambda _hash, _now: (True, "allowed"),
+                "transport_send": transport,
+                "sender_check": lambda _owner, _epoch: None,
+                "submission_scope": {
+                    "capability_snapshot_id": "wb-cap-1",
+                    "provider": "WHITEBIT",
+                    "account_id": "acct-wb",
+                    "environment": "LIVE",
+                },
+            }
+            first = dispatcher.dispatch(
+                **kwargs,
+                now="2026-09-25T12:00:00Z",
+                final_barrier_clock=lambda: "2026-09-25T12:00:01Z",
+            )
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "whitebit_ambiguous_write")
+            self.assertEqual(events.count("wire"), 1)
+            second = dispatcher.dispatch(
+                **kwargs,
+                now="2026-09-25T12:00:02Z",
+            )
+            self.assertEqual(second.status, "UNKNOWN")
+            self.assertEqual(events.count("wire"), 1)
 
     def test_whitebit_transport_rejects_self_asserted_credential_boundary(self):
         calls = []

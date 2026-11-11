@@ -402,6 +402,63 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                     install_signals=False,
                 )
 
+    async def test_restart_recovers_authenticated_snapshot_one_step_ahead(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+
+            async def publish(update_id):
+                stop = asyncio.Event()
+                task = asyncio.create_task(supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([
+                        FakeSocket([_subscription(), _ticker(update_id)])
+                    ]),
+                    stop=stop,
+                    install_signals=False,
+                ))
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    state_path = root / "supervisor-state.json"
+                    if state_path.is_file():
+                        state = json.loads(state_path.read_text(encoding="utf-8"))
+                        if state["observation_count"] >= update_id:
+                            stop.set()
+                            return await asyncio.wait_for(task, timeout=2)
+                    await asyncio.sleep(0.01)
+                self.fail("supervisor did not publish expected observation")
+
+            await publish(1)
+            prior_state = json.loads(
+                (root / "supervisor-state.json").read_text(encoding="utf-8")
+            )
+            await publish(2)
+
+            # Recreate the only legitimate mismatch window: latest-market is
+            # durable, while the preceding RUNNING checkpoint is still on disk.
+            prior_state["phase"] = "RUNNING"
+            atomic_write_json(root / "supervisor-state.json", prior_state)
+            stop = asyncio.Event()
+            stop.set()
+            outcome = await supervise(
+                market="BTC_USDT",
+                state_dir=root,
+                connector=Connector([]),
+                stop=stop,
+                install_signals=False,
+            )
+            self.assertEqual(outcome["observation_count"], 2)
+            recovered = json.loads(
+                (root / "supervisor-state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(recovered["observation_count"], 2)
+            self.assertEqual(
+                recovered["latest_evidence_ref"],
+                json.loads((root / "latest-market.json").read_text(encoding="utf-8"))[
+                    "raw_evidence_ref"
+                ],
+            )
+
 
 class DiagnosticJournalTests(unittest.TestCase):
     def test_heartbeat_rotates_boundedly_and_recovers_sequence(self):

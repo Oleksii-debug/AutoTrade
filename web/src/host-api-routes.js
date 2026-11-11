@@ -17,6 +17,11 @@
     stopHistorical: '/api/v1/historical/stop',
     resumeHistorical: '/api/v1/historical/resume',
     exportHistorical: '/api/v1/historical/export',
+    getManualMarket: '/api/v1/manual/market',
+    getManualStatus: '/api/v1/manual/status',
+    prepareManualAction: '/api/v1/manual/prepare',
+    confirmManualAction: '/api/v1/manual/confirm',
+    queryManualAssistant: '/api/v1/assistant/query',
     downloadLocalDiagnostics: '/api/v1/local-diagnostics',
     downloadTechnicalDiagnostics: '/api/v1/technical-diagnostics',
     downloadAgentReport: '/api/v1/agent-report'

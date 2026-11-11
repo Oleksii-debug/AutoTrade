@@ -66,6 +66,11 @@ class WhiteBitLiveZeroLearningTests(unittest.TestCase):
             )
             self.assertEqual(json.loads((root / "latest-model.json").read_text())[
                 "model_version"], 0)
+            horizon = json.loads(
+                (root / "multi-horizon-independent-evaluation.json").read_text()
+            )
+            self.assertFalse(horizon["automatic_trading_promotion"])
+            self.assertFalse(horizon["trading_authority"])
 
             evaluation_result = learner.process_snapshot(
                 snapshot(4, bid="102", ask="103")

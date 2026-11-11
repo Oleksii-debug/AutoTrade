@@ -48,6 +48,7 @@ from mvp.autotrade_mvp.whitebit import (
     parse_open_positions,
     parse_order_snapshot,
     parse_submission_result,
+    prepare_cancel_request,
     prepare_order_request,
     redact_whitebit_debug,
     provider_collateral_borrow,
@@ -241,6 +242,72 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(request.body["clientOrderId"], "at-0123456789abcdef")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("request", request.body)
+
+    def test_cancel_preparer_requires_one_exact_identity_and_current_capability(self):
+        by_client = prepare_cancel_request(
+            market="BTC_USDT",
+            client_order_id="manual-existing-order",
+            account_id="account-1",
+            environment="PAPER",
+            capability=capability(),
+            instrument_version="BTC_USDT:v1",
+            at=NOW,
+        )
+        self.assertEqual(by_client.endpoint, "/api/v4/order/cancel")
+        self.assertEqual(by_client.body, {
+            "market": "BTC_USDT",
+            "clientOrderId": "manual-existing-order",
+        })
+        by_provider_id = prepare_cancel_request(
+            market="BTC_USDT",
+            order_id=123456,
+            account_id="account-1",
+            environment="PAPER",
+            capability=capability(),
+            instrument_version="BTC_USDT:v1",
+            at=NOW,
+        )
+        self.assertEqual(by_provider_id.body["orderId"], 123456)
+        self.assertIn("cancel-order", by_provider_id.documentation_refs[-1])
+
+        for values in ({}, {"order_id": 1, "client_order_id": "both"}):
+            with self.subTest(values=values), self.assertRaisesRegex(
+                WhiteBitAdapterError, "exactly one"
+            ):
+                prepare_cancel_request(
+                    market="BTC_USDT",
+                    account_id="account-1",
+                    environment="PAPER",
+                    capability=capability(),
+                    instrument_version="BTC_USDT:v1",
+                    at=NOW,
+                    **values,
+                )
+
+    def test_cancel_preparer_rejects_noncanonical_market_and_stale_scope(self):
+        for market in ("btc_usdt", "BTC-USDT"):
+            with self.subTest(market=market), self.assertRaisesRegex(
+                WhiteBitAdapterError, "canonical uppercase"
+            ):
+                prepare_cancel_request(
+                    market=market,
+                    client_order_id="manual-existing-order",
+                    account_id="account-1",
+                    environment="PAPER",
+                    capability=capability(),
+                    instrument_version="BTC_USDT:v1",
+                    at=NOW,
+                )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "instrument version"):
+            prepare_cancel_request(
+                market="BTC_USDT",
+                order_id=1,
+                account_id="account-1",
+                environment="PAPER",
+                capability=capability(),
+                instrument_version="ETH_USDT:v1",
+                at=NOW,
+            )
 
     def test_prepared_and_recorded_submission_share_exact_account_environment_scope(self):
         intent = WhiteBitOrderIntent.create(

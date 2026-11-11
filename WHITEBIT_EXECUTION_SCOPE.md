@@ -14,8 +14,9 @@ the fallback when hosted Actions quota is unavailable.
 The functional priority order is:
 
 1. real WhiteBIT public market data and durable collection;
-2. causal agent decisions, simulation, exact accounting, risk, memory, learning,
-   and independent evaluation;
+2. real owner-directed manual and assisted spot trading, plus causal agent
+   decisions, simulation, exact accounting, risk, memory, learning, and
+   independent evaluation;
 3. recovery, diagnostics, update safety, and a verified Windows package;
 4. standard semantic/keyboard accessibility;
 5. optional interface polish after the functional loop is complete.
@@ -45,10 +46,28 @@ Allowed through the protected credential now available to the process:
 
 - authenticated account reads only, initially, with secret-redacted evidence.
 
-Real BUY/SELL, transfer, withdrawal, leverage, or another irreversible exchange
-effect is not part of the current running campaign. If an official WhiteBIT demo or
-sandbox becomes documented and technically available, it may be connected as an
-explicit DEMO environment. Production endpoints must never be disguised as demo.
+The product scope includes real WhiteBIT spot BUY/SELL and cancellation in two
+owner-facing paths:
+
+- **manual:** the owner enters and reviews the exact market, side, order type,
+  quantity/notional and price before submitting to the canonical LIVE OMS;
+- **assisted:** an agent may analyse and prepare the same exact order ticket, but
+  submission remains a separate explicit owner action.
+
+Both paths must use one canonical OMS/sender, idempotency identity, durable UNKNOWN
+handling, reconciliation, accounting and diagnostics. They must fail closed until
+a dedicated protected `TRADE` credential has the documented minimum `Info +
+Trading` permissions and an evidenced production IP allowlist. Deposit, withdrawal,
+balance transfer, codes, convert, lending, credit and leverage routes are outside
+this product and remain structurally absent even if a mistakenly broad exchange key
+exists. The current `whitebit-primary` READ credential can display account state but
+cannot be reused as trading authority.
+
+No live order has been sent merely by implementing or testing these paths. A real
+financial submission requires a concrete reviewed order (market, side, type and
+amount) at execution time. If an official WhiteBIT demo or sandbox becomes
+documented and technically available, it may be connected as an explicit DEMO
+environment; production endpoints must never be disguised as demo.
 
 ## Reuse and scope control
 

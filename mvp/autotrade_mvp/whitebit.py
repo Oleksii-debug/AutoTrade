@@ -46,10 +46,12 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "websocket": "https://docs.whitebit.com/websocket/overview",
         "rate_limits": "https://docs.whitebit.com/api-reference/rate-limits",
         "security": "https://docs.whitebit.com/best-practices/security",
+        "cancel_order": "https://docs.whitebit.com/api-reference/trading/cancel-order",
     }
 )
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_MARKET = re.compile(r"^[A-Z0-9]{1,20}_[A-Z0-9]{1,20}$")
 _PRODUCTS = frozenset({"SPOT", "COLLATERAL", "FUTURES"})
 _ORDER_TYPES = frozenset({"MARKET", "LIMIT", "STOP_MARKET", "STOP_LIMIT"})
 _SIDES = frozenset({"BUY", "SELL"})
@@ -158,6 +160,15 @@ def validate_client_order_id(value: str) -> str:
             "client_order_id must be 1-64 characters using only letters, numbers, dash, dot or underscore"
         )
     return client_id
+
+
+def _canonical_market(value: object) -> str:
+    market = _text(value, name="market")
+    if _MARKET.fullmatch(market) is None:
+        raise WhiteBitAdapterError(
+            "market must be canonical uppercase BASE_QUOTE text"
+        )
+    return market
 
 
 @dataclass(frozen=True)
@@ -333,6 +344,7 @@ class WhiteBitPreparedRequest:
             "/api/v4/order/collateral/limit",
             "/api/v4/order/collateral/trigger-market",
             "/api/v4/order/collateral/stop-limit",
+            "/api/v4/order/cancel",
         }
         if endpoint not in allowed_endpoints:
             raise WhiteBitAdapterError(
@@ -341,8 +353,19 @@ class WhiteBitPreparedRequest:
         if not isinstance(self.body, Mapping):
             raise TypeError("body must be a mapping")
         body = dict(self.body)
-        validate_client_order_id(body.get("clientOrderId"))
-        _text(body.get("market"), name="market")
+        _canonical_market(body.get("market"))
+        if endpoint == "/api/v4/order/cancel":
+            identities = {"clientOrderId", "orderId"} & set(body)
+            if len(identities) != 1 or set(body) != {"market", *identities}:
+                raise WhiteBitAdapterError(
+                    "cancel body requires market and exactly one order identity"
+                )
+            if "clientOrderId" in identities:
+                validate_client_order_id(body["clientOrderId"])
+            elif type(body["orderId"]) is not int or body["orderId"] <= 0:
+                raise WhiteBitAdapterError("cancel orderId must be a positive integer")
+        else:
+            validate_client_order_id(body.get("clientOrderId"))
         account = _text(self.account_id, name="account_id")
         environment = _text(self.environment, name="environment").upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
@@ -614,6 +637,76 @@ def prepare_order_request(
 
     return WhiteBitPreparedRequest(
         endpoint=endpoint,
+        body=body,
+        account_id=account,
+        environment=env,
+        capability_snapshot_id=capability.snapshot_id,
+        documentation_refs=tuple(WHITEBIT_OFFICIAL_DOCS.values()),
+    )
+
+
+def prepare_cancel_request(
+    *,
+    market: str,
+    account_id: str,
+    environment: str,
+    capability: CapabilitySnapshot,
+    instrument_version: str,
+    at: datetime,
+    order_id: int | None = None,
+    client_order_id: str | None = None,
+) -> WhiteBitPreparedRequest:
+    """Prepare one exact spot cancellation without sending it.
+
+    WhiteBIT requires the market and exactly one provider order identity. The
+    transport later uses a separate dispatcher identity for the cancellation
+    attempt, so a target clientOrderId is never confused with retry authority.
+    """
+
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
+    point = _instant(at, name="at")
+    canonical_market = _canonical_market(market)
+    account = _text(account_id, name="account_id")
+    env = _text(environment, name="environment").upper()
+    version = _text(instrument_version, name="instrument_version")
+    if capability.provider_id.upper() != "WHITEBIT":
+        raise WhiteBitAdapterError("capability belongs to another provider")
+    if capability.account_id != account:
+        raise WhiteBitAdapterError("capability account does not match target account")
+    if capability.environment.upper() != env:
+        raise WhiteBitAdapterError("capability environment does not match target environment")
+    if capability.instrument_version != version:
+        raise WhiteBitAdapterError(
+            "capability instrument version does not match cancellation"
+        )
+    admitted = any(
+        capability.admits(
+            at=point,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            permission_scope="ORDER_WRITE",
+        )
+        for order_type in capability.supported_order_types
+        for time_in_force in capability.time_in_force
+    )
+    if not admitted:
+        raise WhiteBitAdapterError(
+            "exact capability evidence does not admit cancellation"
+        )
+    if (order_id is None) == (client_order_id is None):
+        raise WhiteBitAdapterError(
+            "cancel requires exactly one of order_id or client_order_id"
+        )
+    body: dict[str, object] = {"market": canonical_market}
+    if order_id is not None:
+        if type(order_id) is not int or order_id <= 0:
+            raise WhiteBitAdapterError("cancel order_id must be a positive integer")
+        body["orderId"] = order_id
+    else:
+        body["clientOrderId"] = validate_client_order_id(client_order_id)
+    return WhiteBitPreparedRequest(
+        endpoint="/api/v4/order/cancel",
         body=body,
         account_id=account,
         environment=env,

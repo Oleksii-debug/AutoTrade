@@ -209,6 +209,67 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             self.assertEqual(report["paid_model_calls"], 0)
             self.assertFalse(report["network_orders"])
 
+    def test_attention_runner_rebases_reference_after_wake(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            organism = root / "organism"
+            manifest = build_manifest(
+                root=organism,
+                symbols=("BTC_USDT",),
+                created_at=NOW,
+            )
+            market = root / "latest-market.json"
+            snapshot = {
+                "schema": "autotrade-whitebit-public-supervisor-v1",
+                "market": "BTC_USDT",
+                "venue": "WHITEBIT_SPOT",
+                "bid_price": "93",
+                "bid_quantity": "1",
+                "ask_price": "95",
+                "ask_quantity": "2",
+                "source_event_at": NOW.isoformat(),
+                "available_at": NOW.isoformat(),
+                "published_at": NOW.isoformat(),
+                "update_id": 1,
+                "stream_generation": 1,
+                "raw_evidence_ref": {
+                    "artifact_id": "one",
+                    "sha256": "sha256:" + "1" * 64,
+                    "source_uri": "wss://wss.whitebit.com/ws#bookTicker",
+                    "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                    "rights_id": "whitebit-public-websocket-internal-v1",
+                },
+                "public_data_only": True,
+                "trading_authority": False,
+            }
+            market.write_text(json.dumps(snapshot), encoding="utf-8")
+            baseline = manifest["workstreams"][0]
+            state_path = organism / baseline["memory_namespace"] / "attention-state.json"
+            state_path.write_text(json.dumps({
+                "reference_price": "100",
+                "next_scheduled_review": (NOW + timedelta(hours=1)).isoformat(),
+            }), encoding="utf-8")
+            first = run_cycle(
+                organism_root=organism,
+                market_snapshot=market,
+                now=NOW + timedelta(milliseconds=20),
+            )
+            baseline_state = next(
+                row for row in first["workstreams"] if row["profile_id"] == "BASELINE"
+            )
+            self.assertEqual(baseline_state["reason"], "stop-loss boundary reached")
+            self.assertEqual(baseline_state["reference_price"], "94")
+
+            second = run_cycle(
+                organism_root=organism,
+                market_snapshot=market,
+                now=NOW + timedelta(seconds=1),
+            )
+            baseline_state = next(
+                row for row in second["workstreams"] if row["profile_id"] == "BASELINE"
+            )
+            self.assertNotEqual(baseline_state["reason"], "stop-loss boundary reached")
+
     def test_attention_runner_rejects_manifest_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

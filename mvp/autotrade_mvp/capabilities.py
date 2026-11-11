@@ -26,6 +26,7 @@ ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 STATUSES = frozenset({"VERIFIED", "UNKNOWN", "CONFLICTED", "EXPIRED"})
 _DERIVED_SNAPSHOT_TOKEN = object()
 _FRESH_ADMISSION_TOKEN = object()
+_ARTIFACT_EVIDENCE_VERIFIER_TOKEN = object()
 
 
 def _text(value: str, field: str) -> str:
@@ -474,6 +475,16 @@ def artifact_store_evidence_verifier(
             raise TypeError("issuer verifier must return exact EvidenceVerification")
         return issuer_result
 
+    # The marker is closure-private authority consumed only by
+    # derive_current_process_capability_snapshot().  It prevents the production
+    # admission helper from accepting a caller-authored ``lambda: valid`` while
+    # retaining the descriptive derive_capability_snapshot() API for audits and
+    # tests.
+    setattr(
+        verify,
+        "_autotrade_artifact_evidence_verifier_token",
+        _ARTIFACT_EVIDENCE_VERIFIER_TOKEN,
+    )
     return verify
 
 
@@ -779,6 +790,65 @@ def derive_capability_snapshot(
         sources=verified_sources,
         _verification_token=_DERIVED_SNAPSHOT_TOKEN,
         _admission_token=None,
+    )
+
+
+def derive_current_process_capability_snapshot(
+    *,
+    snapshot_id: str,
+    claims: Iterable[CapabilityClaim],
+    observed_at: datetime,
+    evidence_verifier: Callable[[CapabilityClaim], EvidenceVerification],
+) -> CapabilitySnapshot:
+    """Derive and admit one freshly verified current-process capability.
+
+    Financial admission is intentionally narrower than descriptive capability
+    derivation: evidence must pass the canonical authenticated ArtifactStore
+    verifier, including its source-specific issuer checks.  The returned value
+    receives the unpersistable process-local admission token only after the
+    canonical four-source intersection is VERIFIED.  Rehydrated snapshots do
+    not retain that token and therefore remain fail-closed after restart.
+    """
+
+    if getattr(
+        evidence_verifier,
+        "_autotrade_artifact_evidence_verifier_token",
+        None,
+    ) is not _ARTIFACT_EVIDENCE_VERIFIER_TOKEN:
+        raise CapabilityError(
+            "current-process admission requires the canonical authenticated "
+            "ArtifactStore evidence verifier"
+        )
+    snapshot = derive_capability_snapshot(
+        snapshot_id=snapshot_id,
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=evidence_verifier,
+    )
+    if snapshot.status != "VERIFIED":
+        return snapshot
+    return CapabilitySnapshot(
+        snapshot_id=snapshot.snapshot_id,
+        provider_id=snapshot.provider_id,
+        account_id=snapshot.account_id,
+        entity_id=snapshot.entity_id,
+        environment=snapshot.environment,
+        provider_environment=snapshot.provider_environment,
+        instrument_version=snapshot.instrument_version,
+        observed_at=snapshot.observed_at,
+        expires_at=snapshot.expires_at,
+        supported_order_types=snapshot.supported_order_types,
+        time_in_force=snapshot.time_in_force,
+        permission_scopes=snapshot.permission_scopes,
+        position_mode=snapshot.position_mode,
+        native_protection=snapshot.native_protection,
+        rate_limit_policy_id=snapshot.rate_limit_policy_id,
+        data_entitlements=snapshot.data_entitlements,
+        evidence=snapshot.evidence,
+        status=snapshot.status,
+        sources=snapshot.sources,
+        _verification_token=_DERIVED_SNAPSHOT_TOKEN,
+        _admission_token=_FRESH_ADMISSION_TOKEN,
     )
 
 

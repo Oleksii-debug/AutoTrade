@@ -143,6 +143,48 @@ paths:
               schema:
                 type: string
                 format: binary
+  /api/v1/manual/market:
+    get:
+      operationId: getManualMarket
+      description: OWNER-authenticated exact public WhiteBIT top-of-book and current enabled SPOT instrument constraints for one canonical market; never trading authority.
+      parameters:
+        - in: query
+          name: market
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Z0-9]{1,20}_[A-Z0-9]{1,20}$'
+      responses:
+        "200":
+          description: Current public bid and ask for the real WhiteBIT manual ticket
+  /api/v1/manual/status:
+    get:
+      operationId: getManualStatus
+      description: WhiteBIT account/order projection and current fail-closed order capability. A READ-only key never admits an order.
+      responses:
+        "200":
+          description: Current manual WhiteBIT capability and account projection
+  /api/v1/manual/prepare:
+    post:
+      operationId: prepareManualAction
+      description: Durably prepare but never execute a real WhiteBIT action.
+      responses:
+        "200":
+          description: Reviewable draft requiring a separate confirmation
+  /api/v1/manual/confirm:
+    post:
+      operationId: confirmManualAction
+      description: Explicitly confirm one exact unexpired real WhiteBIT draft. Execution uses only the canonical OMS/sender and requires current ORDER_MANAGEMENT plus ORDER_WRITE capability.
+      responses:
+        "200":
+          description: Canonical OMS result and refreshed manual WhiteBIT projection
+  /api/v1/assistant/query:
+    post:
+      operationId: queryManualAssistant
+      description: Read public prices or prepare a real WhiteBIT draft; the assistant cannot confirm or execute it.
+      responses:
+        "200":
+          description: Read-only answer and optional separately confirmable draft
   /api/v1/local-diagnostics:
     get:
       operationId: downloadLocalDiagnostics

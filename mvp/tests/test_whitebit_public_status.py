@@ -10,7 +10,15 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp import whitebit_public_status
-from mvp.autotrade_mvp.whitebit_public_status import read_whitebit_public_status
+from mvp.autotrade_mvp.whitebit_public_status import (
+    read_whitebit_live_spot_snapshot,
+    read_whitebit_public_quote,
+    read_whitebit_public_status,
+)
+from research.autotrade_research.integrations.whitebit_public import (
+    PublicBook,
+    WhiteBitPublicClient,
+)
 from mvp.autotrade_mvp.host_network import SnapshotPrincipal
 from mvp.autotrade_mvp.product_runtime import build_product
 
@@ -81,6 +89,58 @@ def _fixture(root: Path, *, heartbeat_at="2026-10-18T08:00:09+00:00") -> None:
 
 
 class WhitebitPublicStatusTests(unittest.TestCase):
+    def test_live_spot_snapshot_binds_selected_market_and_current_constraints(self):
+        client = WhiteBitPublicClient()
+        book = PublicBook(
+            market="TON_USDT",
+            source_time=NOW,
+            received_at=NOW,
+            bids=(("5.10", "100"),),
+            asks=(("5.12", "80"),),
+            raw=b'{"exact":"book"}',
+            source_uri="https://whitebit.com/api/v4/public/orderbook/TON_USDT",
+        )
+        metadata = {
+            "market": "TON_USDT",
+            "base_asset": "TON",
+            "quote_asset": "USDT",
+            "minimum_quantity": "0.1",
+            "minimum_notional": "5",
+            "quantity_precision": 2,
+            "quote_precision": 4,
+        }
+        with patch.object(
+            client,
+            "spot_market_snapshot",
+            return_value=(metadata, book, "sha256:" + "c" * 64, NOW),
+        ):
+            value = read_whitebit_live_spot_snapshot(client, "TON_USDT")
+        self.assertEqual(value["market"], "TON_USDT")
+        self.assertEqual(value["bid_price"], "5.1")
+        self.assertEqual(value["ask_price"], "5.12")
+        self.assertEqual(value["instrument"]["base_asset"], "TON")
+        self.assertEqual(value["instrument"]["minimum_quantity"], "0.1")
+        self.assertIs(value["public_data_only"], True)
+        self.assertIs(value["trading_authority"], False)
+
+    def test_current_public_quote_exposes_exact_top_of_book_without_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "whitebit"
+            _fixture(root)
+            value = read_whitebit_public_quote(root, clock=lambda: NOW)
+            self.assertEqual(value["bid_price"], "100")
+            self.assertEqual(value["ask_price"], "101")
+            self.assertEqual(value["mid_price"], "100.5")
+            self.assertIs(value["public_data_only"], True)
+            self.assertIs(value["trading_authority"], False)
+
+    def test_public_quote_rejects_stale_supervisor(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "whitebit"
+            _fixture(root, heartbeat_at="2026-10-18T07:00:00+00:00")
+            with self.assertRaisesRegex(ValueError, "not current"):
+                read_whitebit_public_quote(root, clock=lambda: NOW)
+
     def test_rotated_history_is_not_scanned_by_snapshot_hot_path(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "whitebit"

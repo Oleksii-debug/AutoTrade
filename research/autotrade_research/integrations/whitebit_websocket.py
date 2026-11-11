@@ -29,6 +29,7 @@ from .whitebit_public import PublicDataError, WS, _decimal, _symbol, decode_publ
 
 ADAPTER_VERSION = "whitebit-public-websocket-book-ticker-v1"
 MAX_WEBSOCKET_MESSAGE_BYTES = 65_536
+MAX_MESSAGE_CLOCK_SKEW = timedelta(seconds=2)
 SOURCE_URI = WS + "#bookTicker"
 _CONTROL_CODES = frozenset({"SUBSCRIBED", "PONG"})
 _DIAGNOSTIC_CODES = frozenset(
@@ -160,7 +161,12 @@ def _raw_bytes(raw: str | bytes) -> bytes:
     return value
 
 
-def _epoch_time(value: object, *, received_at: datetime) -> datetime:
+def _epoch_time(
+    value: object,
+    *,
+    received_at: datetime,
+    future_tolerance: timedelta = timedelta(0),
+) -> datetime:
     if type(value) not in (int, Decimal):
         raise PublicDataError("INVALID_WEBSOCKET_TIMESTAMP")
     exact = Decimal(value)
@@ -179,7 +185,7 @@ def _epoch_time(value: object, *, received_at: datetime) -> datetime:
         )
     except (OverflowError, ValueError):
         raise PublicDataError("INVALID_WEBSOCKET_TIMESTAMP") from None
-    if parsed > received_at:
+    if parsed > received_at + future_tolerance:
         raise PublicDataError("FUTURE_WEBSOCKET_TIMESTAMP")
     return parsed
 
@@ -224,7 +230,15 @@ def parse_book_ticker_message(
         raise PublicDataError("INVALID_BOOK_TICKER_ROW")
 
     transaction_time = _epoch_time(row[0], received_at=received_at)
-    message_time = _epoch_time(row[1], received_at=received_at)
+    # WhiteBIT's message clock can lead the local receive clock by a few
+    # hundred milliseconds.  This field is retained as provider metadata and
+    # never becomes the canonical availability or source-event timestamp, so
+    # admit only a small bounded skew while still rejecting future market data.
+    message_time = _epoch_time(
+        row[1],
+        received_at=received_at,
+        future_tolerance=MAX_MESSAGE_CLOCK_SKEW,
+    )
     if transaction_time > message_time:
         raise PublicDataError("INVALID_BOOK_TICKER_TIME_ORDER")
     if row[2] != expected_market:

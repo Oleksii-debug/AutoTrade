@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from autotrade_research.integrations.whitebit_private_readonly import (
     MAIN_BALANCE_PATH,
+    MARKET_FEE_PATH,
     MAX_RESPONSE_BYTES,
     NETWORK_TIMEOUT_SECONDS,
     PrivateHttpResponse,
@@ -103,24 +104,52 @@ class WhitebitPrivateReadTests(unittest.TestCase):
         nonces = [json.loads(call["body"])["nonce"] for call in transport.calls]
         self.assertLess(nonces[0], nonces[1])
 
-    def test_only_two_exact_balance_routes_exist(self):
+    def test_only_three_exact_read_only_routes_exist(self):
         transport = RecordingTransport()
         with WhitebitPrivateReader("key", "secret", transport=transport) as reader:
             wallet = reader.main_balance()
             spot = reader.trading_balance()
+            fee = reader.market_fee()
         self.assertEqual(
             [call["path"] for call in transport.calls],
-            [MAIN_BALANCE_PATH, TRADING_BALANCE_PATH],
+            [MAIN_BALANCE_PATH, TRADING_BALANCE_PATH, MARKET_FEE_PATH],
         )
         self.assertEqual(wallet.path, MAIN_BALANCE_PATH)
         self.assertEqual(spot.path, TRADING_BALANCE_PATH)
         self.assertEqual(spot.trading_authority, "NONE")
+        self.assertEqual(fee.path, MARKET_FEE_PATH)
+        self.assertEqual(fee.trading_authority, "NONE")
         self.assertFalse(
             any(
-                token in (MAIN_BALANCE_PATH + TRADING_BALANCE_PATH).lower()
+                token in (
+                    MAIN_BALANCE_PATH + TRADING_BALANCE_PATH + MARKET_FEE_PATH
+                ).lower()
                 for token in ("order", "withdraw", "transfer", "leverage")
             )
         )
+
+    def test_market_fee_requires_a_json_object(self):
+        valid = b'{"taker":"0.1","maker":"0.1"}'
+        with WhitebitPrivateReader(
+            "key",
+            "secret",
+            transport=RecordingTransport(
+                lambda _: PrivateHttpResponse(200, "application/json", valid)
+            ),
+        ) as reader:
+            observation = reader.market_fee()
+        self.assertEqual(observation.body, valid)
+        self.assertEqual(observation.path, MARKET_FEE_PATH)
+
+        with WhitebitPrivateReader(
+            "key",
+            "secret",
+            transport=RecordingTransport(
+                lambda _: PrivateHttpResponse(200, "application/json", b"[]")
+            ),
+        ) as reader:
+            with self.assertRaisesRegex(PrivateReadError, "JSON_INVALID"):
+                reader.market_fee()
 
     def test_foreign_or_state_changing_routes_fail_before_io(self):
         body = json.dumps(

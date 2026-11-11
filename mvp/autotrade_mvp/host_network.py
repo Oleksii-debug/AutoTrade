@@ -62,6 +62,25 @@ _SNAPSHOT_FIELDS = {
 }
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
+
+
+def authenticated_request_execution_context() -> tuple[str, str]:
+    """Return the current bearer/origin only inside an admitted Host request.
+
+    Provider transports use this at the terminal protected-credential lease.
+    Nothing is persisted or exposed to the Web application response.
+    """
+
+    token = _AUTHENTICATED_SESSION_TOKEN.get()
+    origin = _REQUEST_ORIGIN.get()
+    if (
+        type(token) is not str
+        or not token
+        or type(origin) is not str
+        or not origin
+    ):
+        raise PermissionError("authenticated Host request context is unavailable")
+    return token, origin
 _SINGLETON_REQUEST_HEADERS = (
     "Authorization",
     "X-AutoTrade-Actor",

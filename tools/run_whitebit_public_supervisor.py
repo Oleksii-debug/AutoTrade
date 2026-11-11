@@ -446,15 +446,53 @@ def _read_restart_state(
         type(latest) is not dict
         or latest.get("schema") != SCHEMA
         or latest.get("market") != market
-        or latest.get("raw_evidence_ref") != evidence
         or latest.get("public_data_only") is not True
         or latest.get("trading_authority") is not False
     ):
         raise ValueError("supervisor restart snapshot is not coherent")
-    manifest, _raw = artifacts.read_authenticated_snapshot(evidence["artifact_id"])
-    if manifest.get("sha256") != evidence["sha256"]:
-        raise ValueError("supervisor restart evidence digest changed")
-    return state["observation_count"], latest
+    latest_evidence = latest.get("raw_evidence_ref")
+    recovered_count = state["observation_count"]
+    if latest_evidence != evidence:
+        # Publication is deliberately ordered snapshot -> checkpoint.  A
+        # process can therefore die after one authenticated snapshot is
+        # durable but before its matching checkpoint is replaced.  Admit only
+        # that exact one-record-ahead cut: both evidence objects must still be
+        # authenticated, use the same source/rights, and advance time.  Any
+        # other mismatch remains fail-closed.
+        if (
+            state["phase"] != "RUNNING"
+            or type(latest_evidence) is not dict
+            or frozenset(latest_evidence) != _EVIDENCE_FIELDS
+            or latest_evidence.get("source_uri") != evidence.get("source_uri")
+            or latest_evidence.get("rights_id") != evidence.get("rights_id")
+        ):
+            raise ValueError("supervisor restart snapshot is not coherent")
+        try:
+            prior_manifest, _prior_raw = artifacts.read_authenticated_snapshot(
+                evidence["artifact_id"]
+            )
+            latest_manifest, _latest_raw = artifacts.read_authenticated_snapshot(
+                latest_evidence["artifact_id"]
+            )
+            prior_at = datetime.fromisoformat(evidence["observed_at"])
+            latest_at = datetime.fromisoformat(latest_evidence["observed_at"])
+        except (ArtifactIntegrityError, OSError, TypeError, ValueError):
+            raise ValueError("supervisor restart snapshot is not coherent") from None
+        if (
+            prior_manifest.get("sha256") != evidence["sha256"]
+            or latest_manifest.get("sha256") != latest_evidence["sha256"]
+            or prior_at.tzinfo is None
+            or latest_at.tzinfo is None
+            or latest_at <= prior_at
+        ):
+            raise ValueError("supervisor restart snapshot is not coherent")
+        evidence = latest_evidence
+        recovered_count += 1
+    else:
+        manifest, _raw = artifacts.read_authenticated_snapshot(evidence["artifact_id"])
+        if manifest.get("sha256") != evidence["sha256"]:
+            raise ValueError("supervisor restart evidence digest changed")
+    return recovered_count, latest
 
 
 def _ordinary_owned_file(path: Path, *, parent: Path) -> None:

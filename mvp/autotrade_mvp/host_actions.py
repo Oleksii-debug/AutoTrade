@@ -21,6 +21,7 @@ HOST_ACTION_REQUIRED_ROLES: Mapping[str, frozenset[str]] = MappingProxyType(
         "START_SIMULATION": frozenset({"OWNER", "OPERATOR"}),
         "RECOVER_SIMULATION": frozenset({"OWNER", "OPERATOR"}),
         "BACKUP_SIMULATION": frozenset({"OWNER"}),
+        "SET_RUNTIME_MODE": frozenset({"OWNER", "OPERATOR"}),
     }
 )
 

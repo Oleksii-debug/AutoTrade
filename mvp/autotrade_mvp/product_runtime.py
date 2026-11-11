@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 from threading import Lock, Thread
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
 from .embedded_web import EmbeddedWebHostApplication, ImmutableWebAsset, ImmutableWebAssetBundle, HOST_API_CONTRACT_VERSION
@@ -24,6 +24,7 @@ from .host_network import (
     SnapshotTemporarilyUnavailable,
     TransportResponse,
     _headers,
+    authenticated_request_execution_context,
     public_session_reference,
     header_principal_resolver,
 )
@@ -40,8 +41,25 @@ from .diagnostic_export import (
 from .runtime_diagnostic_sampler import RuntimeDiagnosticSampler
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
 from .windows_host_session import persist_desktop_owner_session
-from .whitebit_public_status import read_whitebit_public_status
+from .whitebit_public_status import (
+    read_whitebit_live_spot_snapshot,
+    read_whitebit_public_status,
+)
+from research.autotrade_research.integrations.whitebit_public import WhiteBitPublicClient
 from .live_learning_status import read_whitebit_live_learning_status
+from .runtime_modes import (
+    assert_order_submission_allowed,
+    current_runtime_mode,
+    ensure_runtime_mode,
+)
+from .manual_trading import (
+    ManualTradingController,
+    ManualTradingError,
+    ManualTradingUnavailable,
+    unarmed_whitebit_capability,
+)
+from .whitebit_account_projection import WhitebitAccountProjectionProvider
+from .whitebit_live_composition import default_whitebit_live_gateway_factory
 
 ROOT = Path(__file__).resolve().parents[2]
 PRICES = ['100', '101', '103', '102', '100', '100', '101', '103']
@@ -149,8 +167,11 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         pairing_code,
         desktop_session_sink,
         diagnostic_sampler,
+        whitebit_public_state_dir,
         whitebit_learning_state_dir,
         groq_advisory_state_dir,
+        credential_vault,
+        whitebit_live_gateway_factory,
         **kwargs,
     ):
         self.state_dir = state_dir
@@ -158,6 +179,9 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         if type(diagnostic_sampler) is not RuntimeDiagnosticSampler:
             raise TypeError('diagnostic_sampler must be the canonical runtime sampler')
         self._diagnostic_sampler = diagnostic_sampler
+        if type(whitebit_public_state_dir) is not type(Path()):
+            raise TypeError('whitebit public state directory must be an exact path')
+        self._whitebit_public_state_dir = whitebit_public_state_dir
         if type(whitebit_learning_state_dir) is not type(Path()):
             raise TypeError('whitebit learning state directory must be an exact path')
         self._whitebit_learning_state_dir = whitebit_learning_state_dir
@@ -180,13 +204,170 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
             # Structural/status verification is read-only on restart. Recovery is
             # an explicit durable operator command, never a silent resend.
             inspect_canonical_simulation(state_dir)
+        from datetime import datetime, timezone
+        ensure_runtime_mode(
+            journal,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            transitioned_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        )
         from .product_research import prepare_research
         prepare_research(journal, _protocol(journal))
         self._origin = kwargs['public_origin']
         self._boundary = kwargs['security_boundary']
+        # This provider-free candidate intentionally has no financial sender.
+        # Manual drafts target real WhiteBIT, but confirmation remains fail-closed
+        # until a least-privilege TRADE credential, current
+        # ORDER_MANAGEMENT/ORDER_WRITE capability and the canonical production
+        # OMS/WhiteBitHttpTransport are injected by production composition. The
+        # existing broad credential is intentionally inadmissible here.
+        self._manual_public_client = WhiteBitPublicClient()
+        self._whitebit_account_projection = WhitebitAccountProjectionProvider()
+        self._whitebit_live_gateway = None
+        if whitebit_live_gateway_factory is not None:
+            if not callable(whitebit_live_gateway_factory):
+                raise TypeError('whitebit_live_gateway_factory must be callable or None')
+            try:
+                candidate = whitebit_live_gateway_factory(
+                    journal=journal,
+                    data_dir=Path(state_dir).parent,
+                    credential_vault=credential_vault,
+                    security_boundary=self._boundary,
+                    public_snapshot_provider=lambda market: read_whitebit_live_spot_snapshot(
+                        self._manual_public_client, market
+                    ),
+                    session_token_provider=lambda: authenticated_request_execution_context()[0],
+                    origin_provider=lambda: authenticated_request_execution_context()[1],
+                )
+                if not callable(candidate) or not callable(
+                    getattr(candidate, 'capability_projection', None)
+                ):
+                    raise TypeError('WhiteBIT LIVE gateway composition differs')
+                # Prove current capability at composition time. A later change
+                # is independently fenced again by the gateway at final send.
+                projection = candidate.capability_projection()
+                if (
+                    type(projection) is not dict
+                    or projection.get('current') is not True
+                    or projection.get('credential_purpose') != 'TRADE'
+                    or projection.get('forbidden_permissions') != []
+                ):
+                    raise PermissionError('WhiteBIT LIVE capability is not current')
+                self._whitebit_live_gateway = candidate
+            except (OSError, PermissionError, RuntimeError, TypeError, ValueError):
+                # Credential absence, stale evidence or an invalid broad key
+                # must not hide the manual market/account screen. The default
+                # unarmed capability below retains the explicit blocker.
+                self._whitebit_live_gateway = None
+        self._manual = ManualTradingController(
+            journal,
+            quote_provider=lambda market: read_whitebit_live_spot_snapshot(
+                self._manual_public_client, market
+            ),
+            capability_provider=(
+                self._whitebit_live_gateway.capability_projection
+                if self._whitebit_live_gateway is not None
+                else unarmed_whitebit_capability
+            ),
+            account_projection_provider=self._whitebit_account_projection,
+            canonical_command_gateway=self._whitebit_live_gateway,
+            submission_guard=lambda: assert_order_submission_allowed(journal),
+        )
         super().__init__(journal, web_bundle=web_bundle(), **kwargs)
 
     def dispatch(self, *, method, target, headers, body=b''):
+        parsed_target = urlsplit(target)
+        route = parsed_target.path
+        manual_get_routes = {
+            '/api/v1/manual/status': self._manual.status,
+        }
+        manual_post_routes = {
+            '/api/v1/manual/prepare': self._manual.prepare,
+            '/api/v1/manual/confirm': self._manual.confirm,
+            '/api/v1/assistant/query': self._manual.assistant_query,
+        }
+        if route == '/api/v1/manual/market' or route in {
+            *manual_get_routes, *manual_post_routes
+        }:
+            try:
+                normalized = _headers(headers)
+                supplied_origin = normalized.get('origin')
+                if supplied_origin not in (None, self._origin):
+                    raise PermissionError('manual WhiteBIT trading requires same origin')
+                _principal, role = self._principal(normalized)
+                if role != 'OWNER':
+                    raise PermissionError('manual WhiteBIT trading requires owner')
+                if route == '/api/v1/manual/market':
+                    query = parse_qs(
+                        parsed_target.query,
+                        keep_blank_values=True,
+                        strict_parsing=True,
+                    )
+                    if set(query) != {'market'} or len(query['market']) != 1:
+                        raise ManualTradingError(
+                            'manual WhiteBIT market query differs'
+                        )
+                    if method != 'GET' or body:
+                        return TransportResponse(
+                            405, 'application/json', b'{"error":"METHOD_NOT_ALLOWED"}',
+                            (('Cache-Control', 'no-store'),),
+                        )
+                    value = self._manual.market(query['market'][0])
+                elif route in manual_get_routes:
+                    if parsed_target.query:
+                        raise ManualTradingError('manual route query is unsupported')
+                    if method != 'GET' or body:
+                        return TransportResponse(
+                            405, 'application/json', b'{"error":"METHOD_NOT_ALLOWED"}',
+                            (('Cache-Control', 'no-store'),),
+                        )
+                    value = manual_get_routes[route]()
+                else:
+                    if parsed_target.query:
+                        raise ManualTradingError('manual route query is unsupported')
+                    if method != 'POST':
+                        return TransportResponse(
+                            405, 'application/json', b'{"error":"METHOD_NOT_ALLOWED"}',
+                            (('Cache-Control', 'no-store'),),
+                        )
+                    value = manual_post_routes[route](
+                        self._parse_body(body, normalized)
+                    )
+                encoded = json.dumps(
+                    value, sort_keys=True, separators=(',', ':'),
+                    ensure_ascii=False, allow_nan=False,
+                ).encode('utf-8')
+                return TransportResponse(
+                    200,
+                    'application/json',
+                    encoded,
+                    (('Cache-Control', 'no-store'),
+                     ('X-Content-Type-Options', 'nosniff')),
+                )
+            except ManualTradingUnavailable:
+                return TransportResponse(
+                    409, 'application/json',
+                    b'{"error":"WHITEBIT_SAFE_TRADE_AUTHORITY_UNAVAILABLE"}',
+                    (('Cache-Control', 'no-store'),),
+                )
+            except PermissionError:
+                return TransportResponse(
+                    403, 'application/json',
+                    b'{"error":"AUTHENTICATION_OR_AUTHORIZATION_FAILED"}',
+                    (('Cache-Control', 'no-store'),),
+                )
+            except (ManualTradingError, TypeError, ValueError):
+                return TransportResponse(
+                    409, 'application/json',
+                    b'{"error":"MANUAL_WHITEBIT_REQUEST_REJECTED"}',
+                    (('Cache-Control', 'no-store'),),
+                )
+            except OSError:
+                return TransportResponse(
+                    503, 'application/json',
+                    b'{"error":"PUBLIC_MARKET_DATA_UNAVAILABLE"}',
+                    (('Cache-Control', 'no-store'),),
+                )
         diagnostic_routes = {
             '/api/v1/agent-report': lambda: agent_report_zip(
                 self._diagnostic_journal,
@@ -329,9 +510,14 @@ def build_product(
     whitebit_learning_state_dir=None,
     groq_advisory_state_dir=None,
     public_learning=False,
+    whitebit_live_gateway_factory=None,
 ):
     if type(public_learning) is not bool:
         raise TypeError('public_learning must be an exact boolean')
+    if whitebit_live_gateway_factory is not None and not callable(
+        whitebit_live_gateway_factory
+    ):
+        raise TypeError('whitebit_live_gateway_factory must be callable or None')
     research_owner = None
     if port == 0:
         import socket
@@ -416,7 +602,8 @@ def build_product(
                 ),
             },
             'portfolio': {'status': status, 'economic_report': report, 'orders': orders, 'fills': fills},
-            'risk': {'mode': 'ZERO', 'real_order_submission': 'UNAVAILABLE',
+            'risk': {'mode': 'ZERO', 'runtime_mode': current_runtime_mode(store),
+                'real_order_submission': 'UNAVAILABLE',
                 'active_reservations': status.get('active_reservations', []),
                 'restore_trading_gate': 'RECONCILIATION_REQUIRED' if (data / 'RESTORE_RECONCILIATION_REQUIRED.json').exists() else 'NOT_RESTORED'},
             'strategy': {'strategy': 'moving-average-2-3-long-only-target-2',
@@ -451,8 +638,11 @@ def build_product(
             pairing_code=pairing,
             desktop_session_sink=session_sink,
             diagnostic_sampler=diagnostic_sampler,
+            whitebit_public_state_dir=whitebit_public_state,
             whitebit_learning_state_dir=whitebit_learning_state,
             groq_advisory_state_dir=groq_advisory_state,
+            credential_vault=vault,
+            whitebit_live_gateway_factory=whitebit_live_gateway_factory,
         ))
     def finalize_owned_work():
         # A failed research drain must retain the Host fence and block a clean
@@ -652,6 +842,11 @@ def main(argv=None):
         port=args.port,
         public_learning=args.public_learning,
         desktop_session_sink=_owned_desktop_session_sink if args.desktop_child else None,
+        # Installed launches attempt the concrete protected WhiteBIT
+        # composition. Missing/stale evidence remains an explicit unarmed UI
+        # blocker inside ProviderFreeApplication; it never degrades to an
+        # unguarded sender.
+        whitebit_live_gateway_factory=default_whitebit_live_gateway_factory,
     )
     def stop(*_):
         Thread(target=runtime.close, daemon=True).start()

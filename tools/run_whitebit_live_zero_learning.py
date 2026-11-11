@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import signal
@@ -16,7 +15,6 @@ for dependency_root in (ROOT, ROOT / "research", ROOT / "mvp"):
     if str(dependency_root) not in sys.path:
         sys.path.insert(0, str(dependency_root))
 
-from autotrade_mvp.whitebit_public_status import read_whitebit_public_status
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.learning.whitebit_live_zero import (
@@ -29,28 +27,25 @@ from tools.run_whitebit_public_supervisor import _read_restart_state
 def authenticated_latest(state_dir: Path) -> dict:
     """Read one coherent, artifact-authenticated public snapshot."""
     for _attempt in range(20):
-        status = read_whitebit_public_status(state_dir)
-        if status["health"]["status"] != "READY" or status["latest"] is None:
-            time.sleep(0.05)
-            continue
-        state = strict_json_loads(
-            (state_dir / "supervisor-state.json").read_text(encoding="utf-8")
-        )
         try:
+            state = strict_json_loads(
+                (state_dir / "supervisor-state.json").read_text(encoding="utf-8")
+            )
             _count, latest = _read_restart_state(
                 state_dir,
                 market=state["market"],
                 artifacts=ArtifactStore(state_dir / "artifacts"),
             )
         except (OSError, TypeError, ValueError):
+            time.sleep(0.05)
             continue
-        projected = status["latest"]
-        if (latest is not None
-                and latest["update_id"] == projected["update_id"]
-                and latest["stream_generation"] == projected["stream_generation"]
-                and datetime.fromisoformat(latest["available_at"]).astimezone(timezone.utc)
-                    == datetime.fromisoformat(projected["available_at"])):
+        # _read_restart_state authenticates both the checkpoint evidence and
+        # the current immutable snapshot, including the one-record crash
+        # window.  A second status projection created an avoidable race on an
+        # active BBO stream and could starve learning indefinitely.
+        if latest is not None:
             return latest
+        time.sleep(0.05)
     raise ValueError("WhiteBIT public supervisor cut changed during authenticated read")
 
 

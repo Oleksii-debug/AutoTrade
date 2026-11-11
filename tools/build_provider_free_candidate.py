@@ -62,6 +62,16 @@ HISTORICAL_SOURCE = frozenset({
     'tools/configure_model_provider.py',
     'tools/configure_whitebit.py',
 })
+DELIVERY_SOURCE = frozenset({
+    # Keep the audited updater command beside its bridge in installed
+    # candidates.  The bridge implementation is selected through SOURCE_PREFIXES;
+    # this is the intentionally small operator entry point for it.
+    'tools/run_windows_update.py',
+    # Hidden-input installer for the separate least-privilege WhiteBIT TRADE
+    # profile.  It stores secrets only through Windows DPAPI and cannot send an
+    # order, so the installed product can be activated without a source tree.
+    'tools/configure_whitebit_trade.py',
+})
 REVIEWED_LICENSE_PREFIX = 'provenance/licenses/'
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',
@@ -80,6 +90,7 @@ def _source_path_selected(path):
     return (
         (path.startswith(SOURCE_PREFIXES) and path.endswith('.py'))
         or path in HISTORICAL_SOURCE
+        or path in DELIVERY_SOURCE
         or (
             path.startswith('contracts/jsonschema/')
             and path.endswith('.json')

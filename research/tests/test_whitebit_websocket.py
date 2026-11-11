@@ -92,10 +92,26 @@ class SchemaTests(unittest.TestCase):
         )
         self.assertEqual(parsed.message_time.microsecond, 234567)
 
+    def test_bounded_provider_message_clock_skew_is_admitted(self):
+        raw = ticker().replace(b"1792303200.2", b"1792303201.25")
+        parsed = parse_book_ticker_message(
+            raw, market="BTC_USDT", received_at=NOW
+        )
+        self.assertGreater(parsed.message_time, NOW)
+
     def test_more_than_nanosecond_timestamp_precision_is_rejected(self):
         raw = ticker().replace(b"1792303200.2", b"1792303200.2345678910")
         with self.assertRaisesRegex(PublicDataError, "PRECISION"):
             parse_book_ticker_message(raw, market="BTC_USDT", received_at=NOW)
+
+    def test_small_provider_transaction_clock_lead_is_rejected(self):
+        value = json.loads(ticker())
+        value["params"][0][0] = 1792303201.5
+        value["params"][0][1] = 1792303201.75
+        with self.assertRaisesRegex(PublicDataError, "FUTURE"):
+            parse_book_ticker_message(
+                encoded(value), market="BTC_USDT", received_at=NOW
+            )
 
     def test_hostile_or_wrong_schema_is_rejected(self):
         cases = (

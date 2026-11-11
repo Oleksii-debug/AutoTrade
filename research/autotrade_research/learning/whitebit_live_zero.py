@@ -144,6 +144,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         max_observation_gap_seconds: int = 180,
         min_evaluation_trades: int = 3,
         outcome_horizon_seconds: int = 0,
+        signal_lookback_seconds: int = 0,
     ) -> None:
         if type(state_dir) is not type(Path()):
             raise TypeError("state_dir must be an exact Path")
@@ -166,7 +167,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         self._configure_cycle(cycle_episodes, cycle_seconds, evaluation_episodes,
                               max_drawdown_usdt, cooldown_seconds, max_trials,
                               max_observation_gap_seconds, min_evaluation_trades,
-                              outcome_horizon_seconds)
+                              outcome_horizon_seconds, signal_lookback_seconds)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database = self.state_dir / "episode-memory.sqlite3"
         self._initialize()
@@ -408,9 +409,12 @@ class WhiteBitLiveZeroLearning(LiveCycle):
                         episode = self._mature(connection, pending[0], canonical, key)
             cycle = self._advance_cycle(connection, canonical, key, episode)
             decision_payload = None
-            if (previous is not None and not gap and not pending_waiting
+            signal_reference = self._signal_reference(connection, canonical, key)
+            if (signal_reference is not None and not gap and not pending_waiting
                     and cycle["phase"] in {"RUNNING", "RESEARCH"}):
-                feature = current_mid - _decimal(previous["mid"], name="previous_mid")
+                feature = current_mid - _decimal(
+                    signal_reference["mid"], name="signal_reference_mid"
+                )
                 model = connection.execute(
                     "SELECT * FROM models WHERE version=?", (cycle["incumbent_version"],)
                 ).fetchone()

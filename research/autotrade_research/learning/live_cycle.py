@@ -4,7 +4,7 @@ The parent SQLite transaction commits observations, decisions and this state
 together. JSON files are rebuildable projections. Evaluation is prospective,
 paired shadow scoring using the parent's existing one-step cost model.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
@@ -18,10 +18,12 @@ def digest(value):
 
 class LiveCycle:
     def _configure_cycle(self, episodes, seconds, evaluation, drawdown, cooldown, trials,
-                         max_gap, min_trades, outcome_horizon):
-        if (type(outcome_horizon) is not int or isinstance(outcome_horizon, bool)
-                or not 0 <= outcome_horizon <= 86_400):
-            raise ValueError("outcome horizon must be 0..86400 seconds")
+                         max_gap, min_trades, outcome_horizon, signal_lookback):
+        for name, value in (("outcome horizon", outcome_horizon),
+                            ("signal lookback", signal_lookback)):
+            if (type(value) is not int or isinstance(value, bool)
+                    or not 0 <= value <= 86_400):
+                raise ValueError(f"{name} must be 0..86400 seconds")
         for value in (episodes, seconds, evaluation, cooldown, trials, max_gap, min_trades):
             if type(value) is not int or value < 1:
                 raise ValueError("cycle bounds must be positive integers")
@@ -34,7 +36,8 @@ class LiveCycle:
             slippage_bps=str(self.slippage_bps), evaluation_every=self.evaluation_every)
         self.cycle_config.update(max_observation_gap_seconds=max_gap,
                                  min_evaluation_trades=min_trades,
-                                 outcome_horizon_seconds=outcome_horizon)
+                                 outcome_horizon_seconds=outcome_horizon,
+                                 signal_lookback_seconds=signal_lookback)
 
     def _initialize_cycle(self, con):
         con.executescript("""
@@ -50,9 +53,9 @@ class LiveCycle:
             state = json.loads(row[0])
             persisted_config = state["config"]
             migrated_config = dict(persisted_config)
-            if ("outcome_horizon_seconds" not in migrated_config
-                    and self.cycle_config["outcome_horizon_seconds"] == 0):
-                migrated_config["outcome_horizon_seconds"] = 0
+            for key in ("outcome_horizon_seconds", "signal_lookback_seconds"):
+                if key not in migrated_config and self.cycle_config[key] == 0:
+                    migrated_config[key] = 0
             if migrated_config != self.cycle_config:
                 raise ValueError("persisted learning cycle configuration differs")
             if migrated_config != persisted_config:
@@ -110,6 +113,28 @@ class LiveCycle:
             ask, bid = Decimal(snapshot["ask_price"]), Decimal(snapshot["bid_price"])
             required_bid = ask * (1 + slip) * (1 + fee) / ((1 - slip) * (1 - fee))
             return signed > required_bid - bid
+
+    def _signal_reference(self, con, current, key):
+        lookback = self.cycle_config["signal_lookback_seconds"]
+        if lookback == 0:
+            return con.execute(
+                "SELECT mid,available_at FROM observations "
+                "WHERE observation_key != ? ORDER BY available_at DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+        cutoff = datetime.fromisoformat(current["available_at"]) - timedelta(
+            seconds=lookback
+        )
+        reference = con.execute(
+            "SELECT mid,available_at FROM observations WHERE observation_key != ? "
+            "AND available_at <= ? ORDER BY available_at DESC LIMIT 1",
+            (key, cutoff.isoformat()),
+        ).fetchone()
+        if (reference is None or (
+                cutoff - datetime.fromisoformat(reference["available_at"])
+                ).total_seconds() > self.cycle_config["max_observation_gap_seconds"]):
+            return None
+        return reference
 
     def _training_rows(self, con, cutoff):
         rows = con.execute("""SELECT d.*,o.ask,o.bid,x.bid AS exit_bid,
@@ -260,11 +285,9 @@ class LiveCycle:
                         if minimum_trades_unreachable else
                         "PROSPECTIVE_COST_OR_RISK_GATE_FAILED"))
             return
-        previous = con.execute("SELECT mid,available_at FROM observations WHERE observation_key != ? "
-                               "ORDER BY available_at DESC LIMIT 1", (key,)).fetchone()
-        if previous and (datetime.fromisoformat(current["available_at"]) -
-                         datetime.fromisoformat(previous["available_at"])).total_seconds() <= self.cycle_config["max_observation_gap_seconds"]:
-            feature = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"])) - Decimal(previous[0])
+        reference = self._signal_reference(con, current, key)
+        if reference:
+            feature = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"])) - Decimal(reference[0])
             pending = dict(ask=current["ask_price"], observation_key=key,
                            available_at=current["available_at"],
                            last_available_at=current["available_at"])

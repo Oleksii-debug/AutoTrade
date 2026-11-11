@@ -56,7 +56,8 @@ def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
         evaluation_episodes: int = 12, max_drawdown_usdt: str = "2",
         cooldown_seconds: int = 3600, max_trials: int = 3,
         max_observation_gap_seconds: int = 180, min_evaluation_trades: int = 3,
-        outcome_horizon_seconds: int = 0) -> dict:
+        outcome_horizon_seconds: int = 0,
+        signal_lookback_seconds: int = 0) -> dict:
     if (isinstance(interval_seconds, bool) or not isinstance(interval_seconds, (int, float))
             or not 0.1 <= float(interval_seconds) <= 3600):
         raise ValueError("poll interval must be 0.1..3600 seconds")
@@ -73,7 +74,8 @@ def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
             max_drawdown_usdt=max_drawdown_usdt, cooldown_seconds=cooldown_seconds,
             max_trials=max_trials, max_observation_gap_seconds=max_observation_gap_seconds,
             min_evaluation_trades=min_evaluation_trades,
-            outcome_horizon_seconds=outcome_horizon_seconds)
+            outcome_horizon_seconds=outcome_horizon_seconds,
+            signal_lookback_seconds=signal_lookback_seconds)
         while not stop.is_set():
             if stop_file is not None and stop_file.is_file():
                 stop.set()
@@ -128,6 +130,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-observation-gap-seconds", type=int, default=180)
     parser.add_argument("--min-evaluation-trades", type=int, default=3)
     parser.add_argument("--outcome-horizon-seconds", type=int, default=0)
+    parser.add_argument("--signal-lookback-seconds", type=int, default=0)
     parser.add_argument("--stop-file")
     args = parser.parse_args(argv)
     stop = Event()
@@ -150,6 +153,7 @@ def main(argv=None) -> int:
             max_observation_gap_seconds=args.max_observation_gap_seconds,
             min_evaluation_trades=args.min_evaluation_trades,
             outcome_horizon_seconds=args.outcome_horizon_seconds,
+            signal_lookback_seconds=args.signal_lookback_seconds,
         )
         print(json.dumps(result, sort_keys=True, ensure_ascii=False, indent=2))
         return 0

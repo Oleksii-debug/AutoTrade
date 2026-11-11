@@ -109,6 +109,7 @@ class LiveLearningCycleTests(unittest.TestCase):
                     "SELECT state FROM live_cycle WHERE id=1"
                 ).fetchone()[0])
                 state["config"].pop("outcome_horizon_seconds")
+                state["config"].pop("signal_lookback_seconds")
                 con.execute(
                     "UPDATE live_cycle SET state=? WHERE id=1",
                     (json.dumps(state, sort_keys=True),),
@@ -122,8 +123,29 @@ class LiveLearningCycleTests(unittest.TestCase):
                 ],
                 0,
             )
+            self.assertEqual(
+                migrated.status()["learning_cycle"]["config"][
+                    "signal_lookback_seconds"
+                ],
+                0,
+            )
             with self.assertRaisesRegex(ValueError, "configuration differs"):
                 self.learner(root, outcome_horizon_seconds=60)
+
+    def test_signal_lookback_uses_only_causal_horizon_reference(self):
+        with TemporaryDirectory() as tmp:
+            learner = self.learner(
+                Path(tmp),
+                cycle_episodes=100,
+                signal_lookback_seconds=180,
+            )
+            self.assertIsNone(self.tick(learner, 1, 100)["new_decision"])
+            self.assertIsNone(self.tick(learner, 2, 101)["new_decision"])
+            self.assertIsNone(self.tick(learner, 3, 99)["new_decision"])
+            decision = self.tick(learner, 4, 104)["new_decision"]
+            self.assertIsNotNone(decision)
+            self.assertEqual(decision["feature_momentum"], "4.000")
+            self.assertEqual(decision["prediction"], "UP")
 
     def test_time_bound_and_atomic_rollback_do_not_skip_an_observation(self):
         with TemporaryDirectory() as tmp:

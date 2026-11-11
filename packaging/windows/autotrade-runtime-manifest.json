@@ -88,6 +88,31 @@
       "backoff_seconds": 2
     },
     {
+      "id": "learning-btc-horizon-signal",
+      "script": "tools/run_whitebit_live_zero_learning.py",
+      "args": [
+        "--supervisor-state-dir", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111",
+        "--interval-seconds", "15",
+        "--cycle-episodes", "20",
+        "--cycle-seconds", "7200",
+        "--evaluation-episodes", "12",
+        "--max-drawdown-usdt", "2",
+        "--cooldown-seconds", "60",
+        "--max-trials", "12",
+        "--max-observation-gap-seconds", "180",
+        "--min-evaluation-trades", "3",
+        "--outcome-horizon-seconds", "300",
+        "--signal-lookback-seconds", "300",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
       "id": "whitebit-public-eth",
       "script": "tools/run_whitebit_public_supervisor.py",
       "args": [

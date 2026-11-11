@@ -143,9 +143,13 @@ class LiveCycle:
             JOIN observations x ON x.observation_key=d.outcome_observation_key
             WHERE d.split='TRAIN' AND d.episode_json IS NOT NULL
             AND d.decision_sequence<=? ORDER BY d.decision_sequence""", (cutoff,)).fetchall()
+        maximum_duration = (
+            self.cycle_config["outcome_horizon_seconds"]
+            + self.cycle_config["max_observation_gap_seconds"]
+        )
         return [r for r in rows if json.loads(r["episode_json"]).get("training_eligible") is not False
                 and 0 < (datetime.fromisoformat(r["exit_at"])-datetime.fromisoformat(r["entry_at"])).total_seconds()
-                <= self.cycle_config["max_observation_gap_seconds"]]
+                <= maximum_duration]
 
     def _advance_cycle(self, con, current, key, episode):
         state = self._load_cycle(con)

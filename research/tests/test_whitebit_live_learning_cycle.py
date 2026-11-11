@@ -202,6 +202,21 @@ class LiveLearningCycleTests(unittest.TestCase):
                     1,
                 )
 
+    def test_horizon_episodes_remain_training_eligible_after_pause(self):
+        with TemporaryDirectory() as tmp:
+            learner = self.learner(
+                Path(tmp),
+                cycle_episodes=2,
+                outcome_horizon_seconds=180,
+            )
+            for index in range(1, 12):
+                self.tick(learner, index, 100 + index)
+            cycle = learner.status()["learning_cycle"]
+            self.assertEqual(cycle["phase"], "EVALUATING")
+            self.assertEqual(cycle["training_cutoff"], 2)
+            self.assertEqual(cycle["candidate_version"], 1)
+            self.assertEqual(cycle["analysis"]["episodes"], 2)
+
     def test_shadow_evaluation_waits_for_same_bounded_horizon_across_restart(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

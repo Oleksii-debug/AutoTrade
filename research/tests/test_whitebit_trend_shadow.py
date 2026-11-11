@@ -37,6 +37,8 @@ class WhitebitTrendShadowTests(unittest.TestCase):
                         Decimal("104.1"), datetime(2025, 1, 1, 1, 0, tzinfo=UTC),
                         self.costs, self.strategy)
         self.assertEqual(event["action"], "BUY")
+        self.assertEqual(event["reason"], "FAST_AND_SLOW_TREND_ENTRY")
+        self.assertEqual(self.state["last_decision"]["action"], "BUY")
         self.assertGreater(Decimal(self.state["quantity"]), 0)
         self.assertNotEqual(Decimal(self.state["cash"]),
                             Decimal(self.state["current_equity"]))

@@ -132,28 +132,46 @@ def _mark(state, price, costs):
 def _decision(state, strategy):
     closes = [decimal(value) for value in state["history_closes"]]
     if len(closes) < strategy.slow_lookback + 1:
+        state["last_decision"] = {"action": "HOLD", "reason": "INSUFFICIENT_HISTORY"}
         return None
     fast = (closes[-1]-closes[-1-strategy.fast_lookback]) / closes[-1-strategy.fast_lookback]
     slow = (closes[-1]-closes[-1-strategy.slow_lookback]) / closes[-1-strategy.slow_lookback]
     quantity = decimal(state["quantity"])
     if quantity == 0:
         if fast >= decimal(strategy.entry_threshold) and slow >= decimal(strategy.slow_threshold):
+            state["last_decision"] = {"action": "BUY", "reason": "FAST_AND_SLOW_TREND_ENTRY",
+                "fast_return": str(fast), "slow_return": str(slow)}
             return "BUY"
         if (strategy.allow_short and fast <= -decimal(strategy.short_entry_threshold)
                 and slow <= -decimal(strategy.short_slow_threshold)):
+            state["last_decision"] = {"action": "SHORT", "reason": "FAST_AND_SLOW_DOWNTREND_ENTRY",
+                "fast_return": str(fast), "slow_return": str(slow)}
             return "SHORT"
+        state["last_decision"] = {"action": "HOLD", "reason": "NO_ENTRY_THRESHOLD",
+            "fast_return": str(fast), "slow_return": str(slow)}
         return None
     if state["holding_bars"] >= strategy.max_hold_bars:
-        return "SELL" if quantity > 0 else "COVER"
+        action = "SELL" if quantity > 0 else "COVER"
+        state["last_decision"] = {"action": action, "reason": "MAX_HOLD_EXIT",
+            "fast_return": str(fast), "slow_return": str(slow)}
+        return action
     if state["holding_bars"] < strategy.min_hold_bars:
+        state["last_decision"] = {"action": "HOLD", "reason": "MINIMUM_HOLD_ACTIVE",
+            "fast_return": str(fast), "slow_return": str(slow)}
         return None
     close, water = closes[-1], decimal(state["favorable_water"])
     if quantity > 0 and (close <= water*(1-decimal(strategy.trailing_stop_fraction))
                          or fast <= -decimal(strategy.exit_threshold)):
+        state["last_decision"] = {"action": "SELL", "reason": "LONG_RISK_EXIT",
+            "fast_return": str(fast), "slow_return": str(slow)}
         return "SELL"
     if quantity < 0 and (close >= water*(1+decimal(strategy.trailing_stop_fraction))
                          or fast >= decimal(strategy.exit_threshold)):
+        state["last_decision"] = {"action": "COVER", "reason": "SHORT_RISK_EXIT",
+            "fast_return": str(fast), "slow_return": str(slow)}
         return "COVER"
+    state["last_decision"] = {"action": "HOLD", "reason": "POSITION_HELD",
+        "fast_return": str(fast), "slow_return": str(slow)}
     return None
 
 
@@ -190,6 +208,7 @@ def _execute(state, action, bid, ask, costs, observed):
         state["favorable_water"] = (None if quantity == 0 else str(price))
         state["holding_bars"] = 0
         event = {"action": action, "at": observed.isoformat(), "price": str(price),
+                 "reason": state.get("last_decision", {}).get("reason"),
                  "fee": str(charge), "cash": str(cash), "quantity": str(quantity)}
         state["last_action"] = event
         return event
@@ -298,8 +317,23 @@ def main(argv=None):
             snapshot, bid, ask, observed = _snapshot(args.market_snapshot)
             if (state.get("last_source_event_at") is None
                     or observed > datetime.fromisoformat(state["last_source_event_at"])):
+                prior_bars = state["completed_live_bars"]
                 event = advance(state, snapshot, bid, ask, observed, costs, strategy)
                 atomic_write_json(checkpoint, state)
+                if state["completed_live_bars"] > prior_bars:
+                    diagnostic = {"timestamp": datetime.now(UTC).isoformat(),
+                        "schema": "autotrade-agent-diagnostic-v1",
+                        "agent": "SOL_TREND_FORWARD_SHADOW",
+                        "qualification_file_sha256": qualification_sha,
+                        "decision": state.get("last_decision"),
+                        "current_equity": state.get("current_equity"),
+                        "net_pnl": state.get("net_pnl"),
+                        "return_fraction": state.get("return_fraction"),
+                        "max_drawdown_fraction": state.get("max_drawdown_fraction"),
+                        "network_orders": False, "trading_authority": False}
+                    with (args.state_dir / "agent-diagnostics.jsonl").open(
+                            "a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(diagnostic, sort_keys=True)+"\n")
                 if event:
                     with (args.state_dir / "actions.jsonl").open("a", encoding="utf-8") as stream:
                         stream.write(json.dumps(event, sort_keys=True)+"\n")

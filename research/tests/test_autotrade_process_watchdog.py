@@ -92,7 +92,9 @@ def test_manifest_expands_only_bounded_paths_and_rejects_secrets(tmp_path):
         tmp_path, _row(args=["--poll-seconds", "15"])
     )
     assert len(digest) == 64
-    assert Path(manifest["processes"][0]["stop_file"]).is_relative_to(runtime)
+    assert Path(manifest["processes"][0]["stop_file"]).is_relative_to(
+        runtime.resolve(strict=False)
+    )
 
     bad = tmp_path / "bad.json"
     _write_manifest(bad, _row(args=["--api-key", "must-not-appear"]))

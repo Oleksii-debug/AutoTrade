@@ -143,6 +143,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         max_trials: int = 3,
         max_observation_gap_seconds: int = 180,
         min_evaluation_trades: int = 3,
+        outcome_horizon_seconds: int = 0,
     ) -> None:
         if type(state_dir) is not type(Path()):
             raise TypeError("state_dir must be an exact Path")
@@ -164,7 +165,8 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         self.evaluation_every = evaluation_every
         self._configure_cycle(cycle_episodes, cycle_seconds, evaluation_episodes,
                               max_drawdown_usdt, cooldown_seconds, max_trials,
-                              max_observation_gap_seconds, min_evaluation_trades)
+                              max_observation_gap_seconds, min_evaluation_trades,
+                              outcome_horizon_seconds)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database = self.state_dir / "episode-memory.sqlite3"
         self._initialize()
@@ -379,6 +381,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
                 _instant(previous["available_at"], name="previous_available_at")
             ).total_seconds() > self.cycle_config["max_observation_gap_seconds"]
             episode = None
+            pending_waiting = False
             if pending:
                 if gap:
                     invalid = dict(status="INVALID_OBSERVATION_GAP", training_eligible=False,
@@ -388,10 +391,25 @@ class WhiteBitLiveZeroLearning(LiveCycle):
                         "episode_id=?,episode_json=? WHERE decision_sequence=?",
                         (key, _digest(invalid), json.dumps(invalid, sort_keys=True), pending[0]["decision_sequence"]))
                 else:
-                    episode = self._mature(connection, pending[0], canonical, key)
+                    source = connection.execute(
+                        "SELECT available_at FROM observations WHERE observation_key=?",
+                        (pending[0]["observation_key"],),
+                    ).fetchone()
+                    if source is None:
+                        connection.rollback()
+                        raise ValueError("pending decision lacks its public observation")
+                    pending_age = (
+                        _instant(canonical["available_at"], name="available_at")
+                        - _instant(source["available_at"], name="decision_available_at")
+                    ).total_seconds()
+                    if pending_age < self.cycle_config["outcome_horizon_seconds"]:
+                        pending_waiting = True
+                    else:
+                        episode = self._mature(connection, pending[0], canonical, key)
             cycle = self._advance_cycle(connection, canonical, key, episode)
             decision_payload = None
-            if previous is not None and not gap and cycle["phase"] in {"RUNNING", "RESEARCH"}:
+            if (previous is not None and not gap and not pending_waiting
+                    and cycle["phase"] in {"RUNNING", "RESEARCH"}):
                 feature = current_mid - _decimal(previous["mid"], name="previous_mid")
                 model = connection.execute(
                     "SELECT * FROM models WHERE version=?", (cycle["incumbent_version"],)

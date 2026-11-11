@@ -156,6 +156,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     )
     assert [row["id"] for row in manifest["processes"]] == [
         "whitebit-public", "learning-primary", "learning-fast",
+        "learning-btc-horizon",
         "whitebit-public-eth", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "goal-attention",
     ]

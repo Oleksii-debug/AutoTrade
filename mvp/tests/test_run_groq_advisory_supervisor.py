@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from tools.run_groq_advisory_supervisor import project_learning_checkpoint
+from tools.run_groq_advisory_supervisor import project_learning_checkpoint, run
 
 
 class GroqAdvisorySupervisorTests(unittest.TestCase):
@@ -30,6 +30,18 @@ class GroqAdvisorySupervisorTests(unittest.TestCase):
         self.assertFalse(projected["constraints"]["trading_authority"])
         self.assertNotIn("unexpected", repr(projected))
         self.assertNotIn("extra", repr(projected))
+        self.assertEqual(
+            projected["accounting_contract"]["net_identity"],
+            "net_usdt = gross_usdt - fees_usdt",
+        )
+        self.assertFalse(
+            projected["accounting_contract"]["subtract_slippage_cost_again"]
+        )
+        self.assertFalse(
+            projected["causal_split_contract"][
+                "prospective_evaluation_used_for_training"
+            ]
+        )
 
     def test_nonzero_or_authorized_checkpoint_is_rejected(self):
         base = {

@@ -160,6 +160,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "learning-btc-horizon-signal",
         "whitebit-public-eth", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "goal-attention",
+        "groq-advisory",
     ]
     serialized = json.dumps(manifest).lower()
     assert "api-key" not in serialized

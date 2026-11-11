@@ -204,6 +204,24 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "groq-advisory",
+      "script": "tools/run_groq_advisory_supervisor.py",
+      "args": [
+        "--checkpoint", "${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111/checkpoint.json",
+        "--state-dir", "${RUNTIME_ROOT}/groq-advisory-btc-v1-20261111",
+        "--interval-seconds", "300",
+        "--max-waves", "4",
+        "--max-runtime-seconds", "604800",
+        "--daily-reset",
+        "--stop-file", "${RUNTIME_ROOT}/groq-advisory-btc-v1-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/groq-advisory-btc-v1-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/groq-advisory-btc-v1-20261111/supervisor-checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }

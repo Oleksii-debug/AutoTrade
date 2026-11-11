@@ -254,10 +254,25 @@ def main(argv=None):
     parser.add_argument("--stop-file", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
-    costs, strategy, _result, qualification_sha = _qualification(args.qualification_result)
-    seed, identities = _seed(args.manifest, strategy.slow_lookback+1)
     args.state_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = args.state_dir / "checkpoint.json"
+    waiting_started = monotonic()
+    required = [args.qualification_result, *args.manifest]
+    while any(not path.is_file() for path in required):
+        missing = [str(path) for path in required if not path.is_file()]
+        waiting = {"schema": SCHEMA, "status": "WAITING_FOR_QUALIFIED_ARTIFACTS",
+            "market": "SOL_USDT", "missing_count": len(missing),
+            "network_orders": False, "trading_authority": False,
+            "updated_at": datetime.now(UTC).isoformat()}
+        atomic_write_json(checkpoint, waiting)
+        if (args.once or monotonic()-waiting_started >= args.max_runtime_seconds
+                or (args.stop_file and args.stop_file.exists())):
+            print(json.dumps({"checkpoint": str(checkpoint), "status": waiting["status"],
+                "network_orders": False, "trading_authority": False}))
+            return 0
+        sleep(args.poll_seconds)
+    costs, strategy, _result, qualification_sha = _qualification(args.qualification_result)
+    seed, identities = _seed(args.manifest, strategy.slow_lookback+1)
     if checkpoint.exists():
         state = _read_json(checkpoint)
         if state.get("schema") != SCHEMA or state.get("qualification_file_sha256") != qualification_sha:

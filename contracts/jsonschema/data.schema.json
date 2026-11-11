@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/6.2.0/data.schema.json",
+  "$id": "https://schemas.autotrade.local/7.0.0/data.schema.json",
   "title": "AutoTrade information and dataset contracts",
   "$defs": {
     "InformationClaim": {
@@ -189,7 +189,7 @@
           "$ref": "common.schema.json#/$defs/UtcInstant"
         }
       },
-      "$comment": "Structural JSON Schema validation is necessary but not sufficient. Canonical v6 DatasetManifest authority additionally requires semantic validator dataset-manifest-content-authority-v1: every declared content_hashes[] digest must have at least one exact matching source_evidence[].sha256. A matching EvidenceRef is the exact content-object binding; additional non-matching source_evidence remains provenance-only.",
+      "$comment": "Structural JSON Schema validation is necessary but not sufficient. Canonical v7 DatasetManifest authority additionally requires semantic validator dataset-manifest-content-authority-v1: every declared content_hashes[] digest must have at least one exact matching source_evidence[].sha256. A matching EvidenceRef is the exact content-object binding; additional non-matching source_evidence remains provenance-only.",
       "x-autotrade-semantic-validator": "dataset-manifest-content-authority-v1"
     }
   }

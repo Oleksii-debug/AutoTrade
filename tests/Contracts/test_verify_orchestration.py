@@ -4,7 +4,7 @@ from tools.verify import verification_commands
 
 
 class VerifyOrchestrationContractTests(unittest.TestCase):
-    def test_dotnet_contract_harness_receives_every_v6_corpus(self):
+    def test_dotnet_contract_harness_receives_every_v7_corpus(self):
         commands = verification_commands(platform="linux")
         contract_commands = [
             command

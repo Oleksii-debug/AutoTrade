@@ -100,6 +100,31 @@ class LiveLearningCycleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "configuration differs"):
                 self.learner(Path(tmp), max_drawdown_usdt="200")
 
+    def test_pre_horizon_state_migrates_only_to_zero_horizon(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(root)
+            with closing(sqlite3.connect(learner.database)) as con:
+                state = json.loads(con.execute(
+                    "SELECT state FROM live_cycle WHERE id=1"
+                ).fetchone()[0])
+                state["config"].pop("outcome_horizon_seconds")
+                con.execute(
+                    "UPDATE live_cycle SET state=? WHERE id=1",
+                    (json.dumps(state, sort_keys=True),),
+                )
+                con.commit()
+
+            migrated = self.learner(root)
+            self.assertEqual(
+                migrated.status()["learning_cycle"]["config"][
+                    "outcome_horizon_seconds"
+                ],
+                0,
+            )
+            with self.assertRaisesRegex(ValueError, "configuration differs"):
+                self.learner(root, outcome_horizon_seconds=60)
+
     def test_time_bound_and_atomic_rollback_do_not_skip_an_observation(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

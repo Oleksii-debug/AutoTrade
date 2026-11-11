@@ -47,8 +47,18 @@ class LiveCycle:
         """)
         row = con.execute("SELECT state FROM live_cycle WHERE id=1").fetchone()
         if row:
-            if json.loads(row[0])["config"] != self.cycle_config:
+            state = json.loads(row[0])
+            persisted_config = state["config"]
+            migrated_config = dict(persisted_config)
+            if ("outcome_horizon_seconds" not in migrated_config
+                    and self.cycle_config["outcome_horizon_seconds"] == 0):
+                migrated_config["outcome_horizon_seconds"] = 0
+            if migrated_config != self.cycle_config:
                 raise ValueError("persisted learning cycle configuration differs")
+            if migrated_config != persisted_config:
+                state["config"] = migrated_config
+                self._save_cycle(con, state, event=True)
+                con.commit()
             return
         count = con.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
         version = con.execute("SELECT MAX(version) FROM models").fetchone()[0]

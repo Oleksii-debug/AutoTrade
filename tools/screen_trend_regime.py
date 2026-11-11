@@ -69,6 +69,8 @@ def main(argv=None):
         selected_candidate=result["selected_candidate"],
         training_rejection_reasons=result["training_rejection_reasons"],
         development_rejection_reasons=result["development_rejection_reasons"],
+        final_rejection_reasons=result["final_rejection_reasons"],
+        prospective_qualification=result["prospective_qualification"],
         holdout_consumed=result["holdout_consumed"], evaluation=result["evaluation"],
         result_sha256=result["result_sha256"], network_orders=False, paid_model_calls=0)))
     return 0

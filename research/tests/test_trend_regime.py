@@ -99,7 +99,24 @@ class TrendRegimeTests(unittest.TestCase):
         with patch("research.autotrade_research.strategies.trend_regime.simulate", side_effect=fake):
             result = screen(data, train_count=6, development_count=6, dataset_sha256="c"*64)
         self.assertTrue(result["holdout_consumed"])
+        self.assertTrue(result["prospective_qualification"])
+        self.assertEqual(result["final_rejection_reasons"], [])
         self.assertEqual(sum(stage == 2 for stage, _ in seen), 3)
+
+    def test_final_failure_is_recorded_and_candidate_is_not_selected(self):
+        data = bars(range(100, 118))
+        def fake(partition, *, candidate, **unused):
+            stage = partition[0]["opened_at"].hour // 6
+            tables = ({"CASH": 0, "HOLD": 1, "TREND_REGIME_TRAILING": 3},
+                      {"CASH": 0, "HOLD": 1, "TREND_REGIME_TRAILING": 2},
+                      {"CASH": 0, "HOLD": 2, "TREND_REGIME_TRAILING": -1})
+            return fake_result(candidate, partition, tables[stage][candidate])
+        with patch("research.autotrade_research.strategies.trend_regime.simulate", side_effect=fake):
+            result = screen(data, train_count=6, development_count=6, dataset_sha256="d"*64)
+        self.assertTrue(result["holdout_consumed"])
+        self.assertFalse(result["prospective_qualification"])
+        self.assertEqual(result["selected_candidate"], "CASH")
+        self.assertIn("FINAL_DID_NOT_BEAT_CASH_AND_HOLD", result["final_rejection_reasons"])
 
     def test_configuration_bounds(self):
         for config in (TrendRegime(fast_lookback=1),

@@ -16,7 +16,7 @@ import json
 from research.autotrade_research.strategies.fast_screen import Costs, decimal, digest, validate_bars
 
 
-VERSION = "trend-regime-trailing-screen-v2-three-way"
+VERSION = "trend-regime-trailing-screen-v3-three-way"
 EVIDENCE = "ZERO_RESEARCH_SCREENING_ONLY_APPROXIMATE_EXECUTION"
 CANDIDATES = ("CASH", "HOLD", "TREND_REGIME_TRAILING")
 
@@ -287,6 +287,7 @@ def screen(bars, *, train_count, development_count, dataset_sha256,
     evaluation_matrix = []
     evaluation = None
     holdout_consumed = False
+    final_rejections = []
     if not train_rejections:
         development_bars = bars[train_count:train_count+development_count]
         validate_bars(development_bars, require_ohlcv=True)
@@ -309,11 +310,22 @@ def screen(bars, *, train_count, development_count, dataset_sha256,
             evaluation_matrix = evaluate(final_bars, "final")
             evaluation = next(row for row in evaluation_matrix if row["candidate"] == CANDIDATES[-1])
             holdout_consumed = True
+            controls = [row for row in evaluation_matrix if row["candidate"] != CANDIDATES[-1]]
+            if evaluation["closed_cycles"] < min_cycles:
+                final_rejections.append("MINIMUM_FINAL_CYCLES_NOT_MET")
+            if Decimal(evaluation["net_pnl"]) <= max(
+                    Decimal(row["net_pnl"]) for row in controls):
+                final_rejections.append("FINAL_DID_NOT_BEAT_CASH_AND_HOLD")
+            if Decimal(evaluation["max_drawdown_fraction"]) > maximum_drawdown:
+                final_rejections.append("FINAL_DRAWDOWN_LIMIT_EXCEEDED")
+    prospective_qualification = holdout_consumed and not final_rejections
     result = dict(schema=VERSION, evidence_class=EVIDENCE, config=config,
         config_sha256=config_sha, training=training,
         training_rejection_reasons=train_rejections, development=development,
         development_rejection_reasons=development_rejections,
-        selected_candidate=(CANDIDATES[-1] if holdout_consumed else "CASH"),
+        final_rejection_reasons=final_rejections,
+        prospective_qualification=prospective_qualification,
+        selected_candidate=(CANDIDATES[-1] if prospective_qualification else "CASH"),
         evaluation=evaluation, evaluation_matrix=evaluation_matrix,
         holdout_consumed=holdout_consumed, network_orders=False, paid_model_calls=0,
         canonical_qualification=False,

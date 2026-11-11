@@ -1,6 +1,7 @@
 """Dependency-free, read-only WhiteBIT private balance collector.
 
-Only the two documented account-balance routes can cross this boundary. The
+Only the two documented account-balance routes and the read-only account fee
+schedule can cross this boundary. The
 default transport connects directly to the fixed WhiteBIT HTTPS origin, ignores
 environment proxy configuration and never follows redirects. This module has
 no order, transfer, withdrawal, leverage or credential-persistence API.
@@ -24,7 +25,9 @@ WHITEBIT_PRIVATE_HOST = "whitebit.com"
 WHITEBIT_PRIVATE_PORT = 443
 MAIN_BALANCE_PATH = "/api/v4/main-account/balance"
 TRADING_BALANCE_PATH = "/api/v4/trade-account/balance"
+MARKET_FEE_PATH = "/api/v4/market/fee"
 READ_BALANCE_PATHS = frozenset({MAIN_BALANCE_PATH, TRADING_BALANCE_PATH})
+READ_ONLY_PATHS = READ_BALANCE_PATHS | frozenset({MARKET_FEE_PATH})
 MAX_REQUEST_BYTES = 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 NETWORK_TIMEOUT_SECONDS = 10.0
@@ -88,7 +91,7 @@ def _decode_json_object(raw: bytes, *, error_code: str) -> dict[str, object]:
 
 def _validate_request(path: str, headers: Mapping[str, str], body: bytes) -> None:
     """Fail closed before signing or I/O if the fixed read contract is widened."""
-    if type(path) is not str or path not in READ_BALANCE_PATHS:
+    if type(path) is not str or path not in READ_ONLY_PATHS:
         raise PrivateReadError("WHITEBIT_READ_ROUTE_DENIED")
     if type(body) is not bytes or not body or len(body) > MAX_REQUEST_BYTES:
         raise PrivateReadError("WHITEBIT_READ_REQUEST_INVALID")
@@ -262,10 +265,18 @@ class WhitebitPrivateReader:
 
     def trading_balance(self) -> PrivateReadObservation:
         """Read spot available/frozen funds; this cannot place or cancel orders."""
-        return self._read_balance(TRADING_BALANCE_PATH)
+        return self._read(TRADING_BALANCE_PATH)
+
+    def market_fee(self) -> PrivateReadObservation:
+        """Read the authenticated account fee schedule without trade authority."""
+        return self._read(MARKET_FEE_PATH)
 
     def _read_balance(self, path: str) -> PrivateReadObservation:
-        if path not in READ_BALANCE_PATHS:
+        """Compatibility wrapper for the original balance-only implementation."""
+        return self._read(path)
+
+    def _read(self, path: str) -> PrivateReadObservation:
+        if path not in READ_ONLY_PATHS:
             raise PrivateReadError("WHITEBIT_READ_ROUTE_DENIED")
         with self._lock:
             if self._closed:

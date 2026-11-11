@@ -1,10 +1,13 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import json
 import unittest
 
 from research.autotrade_research.strategies.fast_screen import Costs
 from research.autotrade_research.strategies.trend_regime import TrendRegime
-from tools.run_whitebit_trend_shadow import _new_state, advance
+from tools.run_whitebit_trend_shadow import _new_state, advance, main
 
 
 def seed():
@@ -43,6 +46,18 @@ class WhitebitTrendShadowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "continuity gap"):
             advance(self.state, {"update_id": 1}, Decimal("100"), Decimal("101"),
                     datetime(2025, 1, 1, 2, tzinfo=UTC), self.costs, self.strategy)
+
+    def test_fresh_install_waits_when_research_artifacts_are_absent(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = main(["--qualification-result", str(root/"missing-result.json"),
+                "--manifest", str(root/"missing-seed.json"),
+                "--market-snapshot", str(root/"missing-market.json"),
+                "--state-dir", str(root/"state"), "--once"])
+            self.assertEqual(result, 0)
+            checkpoint = json.loads((root/"state"/"checkpoint.json").read_text())
+            self.assertEqual(checkpoint["status"], "WAITING_FOR_QUALIFIED_ARTIFACTS")
+            self.assertFalse(checkpoint["network_orders"])
 
 
 if __name__ == "__main__":

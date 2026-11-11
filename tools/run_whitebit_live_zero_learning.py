@@ -51,6 +51,7 @@ def authenticated_latest(state_dir: Path) -> dict:
 
 def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
         max_new_observations: int | None = None, stop: Event | None = None,
+        stop_file: Path | None = None,
         cycle_episodes: int = 20, cycle_seconds: int = 1200,
         evaluation_episodes: int = 12, max_drawdown_usdt: str = "2",
         cooldown_seconds: int = 3600, max_trials: int = 3,
@@ -72,6 +73,9 @@ def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
             max_trials=max_trials, max_observation_gap_seconds=max_observation_gap_seconds,
             min_evaluation_trades=min_evaluation_trades)
         while not stop.is_set():
+            if stop_file is not None and stop_file.is_file():
+                stop.set()
+                break
             if (state_dir / "learning-cycle.pause.json").exists():
                 stop.set()
                 break
@@ -121,6 +125,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-trials", type=int, default=3)
     parser.add_argument("--max-observation-gap-seconds", type=int, default=180)
     parser.add_argument("--min-evaluation-trades", type=int, default=3)
+    parser.add_argument("--stop-file")
     args = parser.parse_args(argv)
     stop = Event()
     for name in ("SIGINT", "SIGTERM"):
@@ -134,6 +139,7 @@ def main(argv=None) -> int:
             interval_seconds=args.interval_seconds,
             max_new_observations=args.max_new_observations,
             stop=stop,
+            stop_file=None if args.stop_file is None else Path(args.stop_file),
             cycle_episodes=args.cycle_episodes, cycle_seconds=args.cycle_seconds,
             evaluation_episodes=args.evaluation_episodes,
             max_drawdown_usdt=args.max_drawdown_usdt,

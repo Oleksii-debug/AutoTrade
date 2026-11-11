@@ -310,3 +310,26 @@ Plan 5 develops the existing semantic browser-like Web UI as the canonical navig
 
 **Реальні зовнішні до цього closure-запису дефекти:** [#1113](https://github.com/Oleksii-debug/AutoTrade/issues/1113) — Prepared-only crash після expiry сьогодні тестом фіксується UNKNOWN попри можливий доказ zero-wire; [#979](https://github.com/Oleksii-debug/AutoTrade/issues/979) — `src/AutoTrade.Host/Program.cs` досі використовує `UnavailableHostAuthorityBoundary`. Обидва **OPEN**, із конкретними source-readback коментарями; не заявляти звідси installed fully-authoritative Host, full Verify GREEN, зовнішній provider/PAPER/LIVE, signed release чи фізичний NVDA. Вони не є приводом заново переписувати вже завершені арифметичні/симуляційні компоненти.
 
+
+## 2026-11-11 — Plan 9/10 additive multi-worker learning diagnostics
+
+Plans 9 and 10 remain terminal for their already approved scopes; this entry
+records a later owner-requested functional addition and does not recount their
+sections. Candidate `bc6f5eebb` closes the concrete gap where the downloadable
+agent report exposed only one WhiteBIT live-learning process even while primary
+and fast independent learners were accumulating separate durable experience.
+
+The product now accepts a bounded strict-JSON map of up to 16 named learning
+state directories through `AUTOTRADE_WHITEBIT_LEARNING_STATE_DIRS_JSON`, retains
+the backward-compatible primary status, and exports a redacted status plus a
+machine-readable index for every configured worker. Duplicate JSON keys,
+invalid worker names, an inconsistent primary path, oversized worker sets and
+non-dictionary status payloads fail closed. No API key, prompt database, raw
+credential, trading authority or order command is added to the archive.
+
+Executed local evidence on Python 3.12: diagnostic/product configuration slice
+`12 passed, 2 skipped`; broader product Host + WhiteBIT manual gateway + public
+status slice `67 passed, 7 subtests passed`. This is component evidence, not a
+profit claim, real-order execution, full Verify result, signed installer or
+physical NVDA acceptance.
+

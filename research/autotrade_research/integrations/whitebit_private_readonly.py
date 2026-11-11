@@ -339,12 +339,22 @@ class WhitebitPrivateReader:
             if type(decoded) is dict and "code" in decoded and "message" in decoded:
                 raise PrivateReadError("WHITEBIT_READ_REMOTE_REJECTED")
             if path == MAIN_BALANCE_PATH:
-                # WhiteBIT returns a JSON array for the main-account balance,
-                # including [] for a valid empty account.  Keep the boundary
-                # strict by accepting only object entries in that array.
-                if type(decoded) is not list or any(
-                    type(item) is not dict for item in decoded
-                ):
+                # The current WhiteBIT contract returns an object keyed by
+                # asset (for example {"USDT":{"main_balance":"0"}}).
+                # Older deployments returned an array of asset objects, so
+                # retain that already-qualified shape during the transition.
+                # In both cases reject scalar leaves instead of widening the
+                # private response boundary to arbitrary JSON.
+                current_object = type(decoded) is dict and all(
+                    type(asset) is str
+                    and bool(asset)
+                    and type(balance) is dict
+                    for asset, balance in decoded.items()
+                )
+                legacy_array = type(decoded) is list and all(
+                    type(item) is dict for item in decoded
+                )
+                if not (current_object or legacy_array):
                     raise PrivateReadError("WHITEBIT_READ_JSON_INVALID")
             elif type(decoded) is not dict:
                 raise PrivateReadError("WHITEBIT_READ_JSON_INVALID")

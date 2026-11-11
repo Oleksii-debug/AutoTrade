@@ -326,6 +326,29 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             outcome = await asyncio.wait_for(task, timeout=2)
             self.assertEqual(outcome["observation_count"], 0)
 
+    async def test_managed_stop_file_leaves_terminal_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            root.mkdir()
+            stop_file = root / "managed.stop.json"
+            stop_file.write_text("{}", encoding="utf-8")
+            outcome = await asyncio.wait_for(
+                supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([FakeSocket([_subscription()])]),
+                    stop_file=stop_file,
+                    install_signals=False,
+                    heartbeat_seconds=0.1,
+                ),
+                timeout=2,
+            )
+            self.assertEqual(outcome["phase"], "STOPPED")
+            state = json.loads(
+                (root / "supervisor-state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], "STOPPED")
+
     async def test_restart_continues_count_and_retains_bounded_artifacts(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "state"

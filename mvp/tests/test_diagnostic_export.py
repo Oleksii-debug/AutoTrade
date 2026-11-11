@@ -203,6 +203,53 @@ class DiagnosticExportTests(unittest.TestCase):
                         sha256(archive.read(name)).hexdigest(), evidence["sha256"]
                     )
 
+    def test_agent_zip_includes_each_bounded_live_learning_worker(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            run_vertical_slice([100, 101, 102, 103], state)
+            primary = {
+                "schema": "autotrade-whitebit-live-learning-status-v1",
+                "status": "READY",
+                "phase": "TRAINING",
+                "api_key": "primary-secret-sentinel",
+            }
+            fast = {
+                "schema": "autotrade-whitebit-live-learning-status-v1",
+                "status": "STALE",
+                "phase": "COOLDOWN",
+                "access_token": "fast-secret-sentinel",
+            }
+
+            report = agent_report_zip(
+                JournalStore(state / "journal.sqlite3"),
+                state,
+                source_revision="d" * 40,
+                live_learning_status=primary,
+                live_learning_statuses={"primary": primary, "fast": fast},
+            )
+
+            self.assertNotIn(b"primary-secret-sentinel", report.data)
+            self.assertNotIn(b"fast-secret-sentinel", report.data)
+            with ZipFile(BytesIO(report.data)) as archive:
+                names = set(archive.namelist())
+                self.assertIn("live-learning/status.json", names)
+                self.assertIn("live-learning/workers/primary/status.json", names)
+                self.assertIn("live-learning/workers/fast/status.json", names)
+                fleet = json.loads(archive.read("live-learning/workers.json"))
+                self.assertEqual(
+                    [worker["worker"] for worker in fleet["workers"]],
+                    ["fast", "primary"],
+                )
+                manifest = json.loads(archive.read("manifest.json"))
+                self.assertEqual(
+                    manifest["live_learning_workers"],
+                    {"included": True, "count": 2, "names": ["fast", "primary"]},
+                )
+                for name, evidence in manifest["members"].items():
+                    self.assertEqual(
+                        sha256(archive.read(name)).hexdigest(), evidence["sha256"]
+                    )
+
     def test_groq_export_fails_closed_for_nonfile_and_oversized_mirror(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

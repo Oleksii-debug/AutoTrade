@@ -1,0 +1,160 @@
+{
+  "schema": "autotrade-process-watchdog-manifest-v1",
+  "processes": [
+    {
+      "id": "whitebit-public",
+      "script": "tools/run_whitebit_public_supervisor.py",
+      "args": [
+        "--market", "BTC_USDT",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111",
+        "--checkpoint-seconds", "15",
+        "--max-artifacts", "4096",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111/supervisor-state.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "learning-primary",
+      "script": "tools/run_whitebit_live_zero_learning.py",
+      "args": [
+        "--supervisor-state-dir", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-live-zero-learning-v2-20261020",
+        "--interval-seconds", "15",
+        "--cycle-episodes", "60",
+        "--cycle-seconds", "21600",
+        "--evaluation-episodes", "30",
+        "--max-drawdown-usdt", "2",
+        "--cooldown-seconds", "1800",
+        "--max-trials", "12",
+        "--max-observation-gap-seconds", "180",
+        "--min-evaluation-trades", "8",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-live-zero-learning-v2-20261020/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-live-zero-learning-v2-20261020/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-live-zero-learning-v2-20261020/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "learning-fast",
+      "script": "tools/run_whitebit_live_zero_learning.py",
+      "args": [
+        "--supervisor-state-dir", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111",
+        "--interval-seconds", "15",
+        "--cycle-episodes", "20",
+        "--cycle-seconds", "1200",
+        "--evaluation-episodes", "12",
+        "--max-drawdown-usdt", "2",
+        "--cooldown-seconds", "60",
+        "--max-trials", "12",
+        "--max-observation-gap-seconds", "180",
+        "--min-evaluation-trades", "3",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-public-eth",
+      "script": "tools/run_whitebit_public_supervisor.py",
+      "args": [
+        "--market", "ETH_USDT",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-public-eth-v1-20261111",
+        "--checkpoint-seconds", "15",
+        "--max-artifacts", "4096",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-public-eth-v1-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-public-eth-v1-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-public-eth-v1-20261111/supervisor-state.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "learning-eth-fast",
+      "script": "tools/run_whitebit_live_zero_learning.py",
+      "args": [
+        "--supervisor-state-dir", "${RUNTIME_ROOT}/whitebit-public-eth-v1-20261111",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111",
+        "--interval-seconds", "15",
+        "--cycle-episodes", "20",
+        "--cycle-seconds", "1200",
+        "--evaluation-episodes", "12",
+        "--max-drawdown-usdt", "2",
+        "--cooldown-seconds", "60",
+        "--max-trials", "12",
+        "--max-observation-gap-seconds", "180",
+        "--min-evaluation-trades", "3",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-public-sol",
+      "script": "tools/run_whitebit_public_supervisor.py",
+      "args": [
+        "--market", "SOL_USDT",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111",
+        "--checkpoint-seconds", "15",
+        "--max-artifacts", "4096",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111/supervisor-state.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "learning-sol-fast",
+      "script": "tools/run_whitebit_live_zero_learning.py",
+      "args": [
+        "--supervisor-state-dir", "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111",
+        "--interval-seconds", "15",
+        "--cycle-episodes", "20",
+        "--cycle-seconds", "1200",
+        "--evaluation-episodes", "12",
+        "--max-drawdown-usdt", "2",
+        "--cooldown-seconds", "60",
+        "--max-trials", "12",
+        "--max-observation-gap-seconds", "180",
+        "--min-evaluation-trades", "3",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
+      "id": "goal-attention",
+      "script": "tools/run_goal_directed_attention.py",
+      "args": [
+        "--organism-root", "${RUNTIME_ROOT}/goal-directed-organism",
+        "--market-snapshot", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111/latest-market.json",
+        "--poll-seconds", "15",
+        "--stop-file", "${RUNTIME_ROOT}/goal-directed-organism/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/goal-directed-organism/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/goal-directed-organism/latest-attention-cycle.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    }
+  ]
+}

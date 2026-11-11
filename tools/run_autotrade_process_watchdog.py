@@ -22,6 +22,17 @@ import time
 from typing import Any, Callable
 
 
+ROOT = Path(__file__).resolve().parents[1]
+for dependency_root in (ROOT, ROOT / "research", ROOT / "mvp", ROOT / "src"):
+    if str(dependency_root) not in sys.path:
+        sys.path.insert(0, str(dependency_root))
+
+from research.autotrade_research.artifacts.resource_lock import (
+    ResourceLock,
+    ResourceLockBusyError,
+)
+
+
 MANIFEST_SCHEMA = "autotrade-process-watchdog-manifest-v1"
 STATE_SCHEMA = "autotrade-process-watchdog-state-v1"
 _SENSITIVE_OPTIONS = frozenset({
@@ -374,20 +385,41 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("poll-seconds must be 0.1..60")
     manifest, digest = load_manifest(Path(args.manifest), repo_root=repo_root,
                                      runtime_root=runtime_root, state_dir=state_dir)
-    watchdog = ProcessWatchdog(manifest, manifest_digest=digest, state_dir=state_dir)
     stop_file = state_dir / "watchdog.stop.json"
-    stop_file.unlink(missing_ok=True)
-    previous: dict[signal.Signals, Any] = {}
-    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
-        signum = getattr(signal, name, None)
-        if signum is not None:
-            previous[signum] = signal.getsignal(signum)
-            signal.signal(signum, lambda *_args: setattr(watchdog, "stop_requested", True))
     try:
-        return watchdog.run(poll_seconds=args.poll_seconds, stop_file=stop_file)
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        with ResourceLock(state_dir / "watchdog.lock"):
+            # Only the lock owner may clear a previous terminal stop request.
+            # A duplicate startup must not consume the request intended for
+            # the process that already owns the runtime.
+            stop_file.unlink(missing_ok=True)
+            watchdog = ProcessWatchdog(
+                manifest, manifest_digest=digest, state_dir=state_dir
+            )
+            previous: dict[signal.Signals, Any] = {}
+            for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+                signum = getattr(signal, name, None)
+                if signum is not None:
+                    previous[signum] = signal.getsignal(signum)
+                    signal.signal(
+                        signum,
+                        lambda *_args: setattr(watchdog, "stop_requested", True),
+                    )
+            try:
+                return watchdog.run(
+                    poll_seconds=args.poll_seconds, stop_file=stop_file
+                )
+            finally:
+                for signum, handler in previous.items():
+                    signal.signal(signum, handler)
+    except ResourceLockBusyError:
+        print(json.dumps({
+            "schema": STATE_SCHEMA,
+            "phase": "ALREADY_RUNNING",
+            "state_dir": str(state_dir),
+            "network_orders": False,
+            "trading_authority": False,
+        }, sort_keys=True), flush=True)
+        return 0
 
 
 if __name__ == "__main__":

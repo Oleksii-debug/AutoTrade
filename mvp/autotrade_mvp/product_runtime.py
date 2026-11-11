@@ -647,6 +647,10 @@ def build_product(
         fills = [{'fill_id': f.fill_id, 'quantity': str(f.quantity), 'price': str(f.price)} for f in oms.effective_fills()]
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        learning_workers = {
+            name: read_whitebit_live_learning_status(path)
+            for name, path in resolved_learning_workers.items()
+        }
         return {'state_version': durable['state_version'], 'event_cursor': durable['event_cursor'],
             'server_time': now, 'host_id': 'local-simulation', 'account_id': ACCOUNT, 'environment': ENVIRONMENT,
             'permission_summary': {'actor': principal.actor, 'session': principal.session, 'role': principal.role,
@@ -675,9 +679,8 @@ def build_product(
                     {'status': 'NOT_STARTED', 'checkpoint_confirmed': False,
                      'network_orders': False, 'model_calls': 0}
                 ),
-                'whitebit_learning': read_whitebit_live_learning_status(
-                    whitebit_learning_state
-                )},
+                'whitebit_learning': learning_workers['primary'],
+                'whitebit_learning_workers': learning_workers},
             'jobs': [{'kind': 'provider-free-research', 'result': e['payload']} for e in research] + [{'kind': 'provider-free-lifecycle', 'result': e['payload']} for e in receipts[-20:]],
             'reason_codes': ['SIMULATION_ONLY', 'ECONOMIC_EDGE_UNPROVEN']}
 

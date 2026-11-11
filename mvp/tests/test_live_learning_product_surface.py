@@ -40,8 +40,9 @@ class LiveLearningProductSurfaceTests(unittest.TestCase):
         renderer = app[app.index("function renderWhitebitLearning"):
                        app.index("function normalizedTableQuery")]
         self.assertIn("const learningValue = strategy.whitebit_learning;", parser)
+        self.assertIn("const workerValue = strategy.whitebit_learning_workers;", parser)
         self.assertIn("learningValue === undefined", parser)
-        self.assertIn('key !== "whitebit_learning"', parser)
+        self.assertIn('key !== "whitebit_learning_workers"', parser)
         self.assertNotIn('"risk", "strategy", "whitebit_learning",', parser)
         self.assertIn('"learning-body"', renderer)
         self.assertIn('"models-body"', renderer)
@@ -60,9 +61,43 @@ class LiveLearningProductSurfaceTests(unittest.TestCase):
         self.assertIn('id="models-region"', page)
         self.assertIn('aria-label="WhiteBIT ZERO models and cost evidence"', page)
         self.assertIn("deterministic numeric learner", page)
-        self.assertIn("It does not use an LLM", page)
+        self.assertIn("These learners do not use an LLM", page)
         self.assertIn("not foundation-model weights", page)
         self.assertIn("not evidence that an external LLM is active", page)
+        self.assertIn("every configured local deterministic numeric learner", page)
+        self.assertIn("lifecycle by worker", page)
+
+    def test_snapshot_projects_each_configured_learning_worker(self):
+        projected = {
+            "primary": {
+                "status": "READY", "phase": "TRAINING", "market": "BTC_USDT",
+                "network_orders": False, "trading_authority": False,
+            },
+            "fast": {
+                "status": "READY", "phase": "EVALUATING", "market": "ETH_USDT",
+                "network_orders": False, "trading_authority": False,
+            },
+        }
+        with TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "AUTOTRADE_WHITEBIT_LEARNING_STATE_DIRS_JSON": json.dumps(
+                    {"fast": str(Path(directory) / "fast-learning")}
+                )
+            },
+        ), patch(
+            "mvp.autotrade_mvp.product_runtime.read_whitebit_live_learning_status",
+            side_effect=lambda path: projected[
+                "fast" if Path(path).name == "fast-learning" else "primary"
+            ],
+        ):
+            client = ProductClient(directory)
+            try:
+                strategy = client.state()["strategy"]
+                self.assertEqual(strategy["whitebit_learning"], projected["primary"])
+                self.assertEqual(strategy["whitebit_learning_workers"], projected)
+            finally:
+                client.close()
 
     def test_agent_report_includes_bounded_redacted_learning_snapshot(self):
         projected = {

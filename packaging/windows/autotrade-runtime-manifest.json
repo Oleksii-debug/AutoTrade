@@ -233,6 +233,26 @@
       "backoff_seconds": 2
     },
     {
+      "id": "learning-fleet-diagnostics",
+      "script": "tools/run_learning_fleet_diagnostics.py",
+      "args": [
+        "--source", "primary=${RUNTIME_ROOT}/whitebit-live-zero-learning-v2-20261020/checkpoint.json",
+        "--source", "btc-fast=${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111/checkpoint.json",
+        "--source", "btc-horizon=${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-v1-20261111/checkpoint.json",
+        "--source", "btc-horizon-signal=${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json",
+        "--source", "eth-fast=${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111/checkpoint.json",
+        "--source", "sol-fast=${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111/checkpoint.json",
+        "--state-dir", "${RUNTIME_ROOT}/learning-fleet-diagnostics-v1-20261112",
+        "--poll-seconds", "15",
+        "--stop-file", "${RUNTIME_ROOT}/learning-fleet-diagnostics-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/learning-fleet-diagnostics-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/learning-fleet-diagnostics-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
       "id": "groq-advisory",
       "script": "tools/run_groq_advisory_supervisor.py",
       "args": [

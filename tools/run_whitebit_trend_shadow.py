@@ -100,6 +100,8 @@ def _new_state(seed, identities, costs, strategy, qualification_sha):
         "costs": costs.__dict__, "history_closes": [bar["close"] for bar in seed],
         "last_completed_at": last.isoformat(), "current_candle": None,
         "last_source_event_at": None, "last_update_id": None,
+        "initial_equity": str(initial), "current_equity": str(initial),
+        "net_pnl": "0", "return_fraction": "0",
         "cash": str(initial), "quantity": "0", "fees": "0",
         "financing_costs": "0", "peak_equity": str(initial),
         "max_drawdown_fraction": "0", "favorable_water": None,
@@ -119,6 +121,10 @@ def _mark(state, price, costs):
     drawdown = max(decimal(state["max_drawdown_fraction"]),
                    ((peak-equity)/peak if peak > 0 else Decimal(1)))
     unit = Decimal("1e-18")
+    initial = decimal(state["initial_equity"])
+    state["current_equity"] = str(equity.quantize(unit))
+    state["net_pnl"] = str((equity-initial).quantize(unit))
+    state["return_fraction"] = str(((equity-initial)/initial).quantize(unit))
     state["peak_equity"] = str(peak.quantize(unit))
     state["max_drawdown_fraction"] = str(drawdown.quantize(unit))
 
@@ -199,6 +205,7 @@ def advance(state, snapshot, bid, ask, observed, costs, strategy):
             raise ValueError("forward shadow has a seed/live continuity gap")
         state["current_candle"] = {"opened_at": bucket.isoformat(), "open": str(mid),
             "high": str(mid), "low": str(mid), "close": str(mid)}
+        _mark(state, mid, costs)
         event = None
     else:
         opened = datetime.fromisoformat(current["opened_at"])
@@ -208,6 +215,7 @@ def advance(state, snapshot, bid, ask, observed, costs, strategy):
             current["high"] = str(max(decimal(current["high"]), mid))
             current["low"] = str(min(decimal(current["low"]), mid))
             current["close"] = str(mid)
+            _mark(state, mid, costs)
             event = None
         else:
             if bucket != opened + timedelta(hours=1):
@@ -277,6 +285,11 @@ def main(argv=None):
         state = _read_json(checkpoint)
         if state.get("schema") != SCHEMA or state.get("qualification_file_sha256") != qualification_sha:
             raise ValueError("forward shadow checkpoint identity differs")
+        initial = str(decimal(costs.initial_cash))
+        state.setdefault("initial_equity", initial)
+        state.setdefault("current_equity", initial)
+        state.setdefault("net_pnl", "0")
+        state.setdefault("return_fraction", "0")
     else:
         state = _new_state(seed, identities, costs, strategy, qualification_sha)
     started = monotonic()

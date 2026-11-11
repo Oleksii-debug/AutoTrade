@@ -38,6 +38,10 @@ class WhitebitTrendShadowTests(unittest.TestCase):
                         self.costs, self.strategy)
         self.assertEqual(event["action"], "BUY")
         self.assertGreater(Decimal(self.state["quantity"]), 0)
+        self.assertNotEqual(Decimal(self.state["cash"]),
+                            Decimal(self.state["current_equity"]))
+        self.assertEqual(Decimal(self.state["net_pnl"]),
+                         Decimal(self.state["current_equity"])-Decimal("1000"))
         self.assertEqual(self.state["completed_live_bars"], 1)
         self.assertFalse(self.state["network_orders"])
         self.assertFalse(self.state["trading_authority"])

@@ -111,10 +111,22 @@ def project_learning_checkpoint(checkpoint: dict) -> dict:
                 name: config[name]
                 for name in (
                     "fee_bps", "slippage_bps", "notional", "min_evaluation_trades",
-                    "max_observation_gap_seconds",
+                    "max_observation_gap_seconds", "outcome_horizon_seconds",
+                    "signal_lookback_seconds",
                 )
                 if type(config.get(name)) in (str, int)
             },
+        },
+        "accounting_contract": {
+            "net_identity": "net_usdt = gross_usdt - fees_usdt",
+            "gross_includes": "bid_ask_spread_and_configured_slippage",
+            "slippage_cost_is_diagnostic": True,
+            "subtract_slippage_cost_again": False,
+        },
+        "causal_split_contract": {
+            "training_cutoff_decision_sequence": cycle.get("training_cutoff"),
+            "prospective_evaluation_starts_after_training_cutoff": True,
+            "prospective_evaluation_used_for_training": False,
         },
         "request": (
             "Diagnose after-cost performance and propose bounded, falsifiable ZERO-mode "
@@ -139,6 +151,7 @@ def _write_status(path: Path, status: dict) -> None:
 def run(
     *, checkpoint_path: Path, state_dir: Path, interval_seconds: float,
     max_waves: int, max_runtime_seconds: int, stop: Event | None = None,
+    stop_file: Path | None = None, daily_reset: bool = False,
     wave_factory: Callable[[Path], object] = DurableGroqAdvisoryWave,
 ) -> dict:
     if isinstance(interval_seconds, bool) or not 5 <= interval_seconds <= 3600:
@@ -147,26 +160,49 @@ def run(
         raise ValueError("max waves must be 1..24")
     if type(max_runtime_seconds) is not int or not 60 <= max_runtime_seconds <= 604800:
         raise ValueError("max runtime must be 60..604800 seconds")
+    if type(daily_reset) is not bool:
+        raise TypeError("daily reset must be boolean")
     stop = stop or Event()
     state_dir = Path(state_dir).expanduser().resolve(strict=False)
     state_dir.mkdir(parents=True, exist_ok=True)
     status_path = state_dir / "supervisor-checkpoint.json"
     previous_digest = None
     completed = 0
+    completed_total = 0
+    quota_day = datetime.now(timezone.utc).date().isoformat()
     if status_path.exists():
         existing = json.loads(status_path.read_text(encoding="utf-8"))
         if type(existing) is not dict or existing.get("schema") != _STATUS_SCHEMA:
             raise ValueError("advisory supervisor checkpoint is invalid")
         previous_digest = existing.get("source_digest")
         completed = existing.get("completed_waves", 0)
+        completed_total = existing.get("completed_waves_total", completed)
+        existing_day = existing.get("quota_day")
         if type(completed) is not int or completed < 0:
             raise ValueError("advisory supervisor checkpoint count is invalid")
+        if type(completed_total) is not int or completed_total < completed:
+            raise ValueError("advisory supervisor total count is invalid")
+        observed_at = existing.get("observed_at")
+        same_legacy_day = (
+            existing_day is None and type(observed_at) is str
+            and observed_at.startswith(quota_day)
+        )
+        if daily_reset and existing_day != quota_day and not same_legacy_day:
+            completed = 0
     deadline = time.monotonic() + max_runtime_seconds
     runner = wave_factory(state_dir / "waves")
     last_status = "WAITING"
-    while not stop.is_set() and time.monotonic() < deadline and completed < max_waves:
+    while (not stop.is_set() and time.monotonic() < deadline
+           and (daily_reset or completed < max_waves)):
+        if stop_file is not None and stop_file.is_file():
+            stop.set()
+            break
+        current_day = datetime.now(timezone.utc).date().isoformat()
+        if daily_reset and current_day != quota_day:
+            quota_day = current_day
+            completed = 0
         checkpoint, digest = _read_json(checkpoint_path)
-        if digest != previous_digest:
+        if completed < max_waves and digest != previous_digest:
             projection = project_learning_checkpoint(checkpoint)
             result = runner.run(
                 wave_id=f"zero-{digest[:24]}", research_input=projection
@@ -175,23 +211,33 @@ def run(
             previous_digest = digest
             if result.status == "COMPLETED":
                 completed += 1
+                completed_total += 1
             _write_status(status_path, {
                 "schema": _STATUS_SCHEMA,
                 "status": last_status,
                 "completed_waves": completed,
+                "completed_waves_total": completed_total,
+                "quota_day": quota_day,
                 "source_digest": digest,
                 "wave_id": result.wave_id,
                 "observed_at": datetime.now(timezone.utc).isoformat(),
                 "network_orders": False,
                 "trading_authority": False,
             })
-        if completed < max_waves and not stop.is_set():
-            stop.wait(interval_seconds)
+        if (daily_reset or completed < max_waves) and not stop.is_set():
+            wait_deadline = time.monotonic() + interval_seconds
+            while not stop.is_set() and time.monotonic() < wait_deadline:
+                if stop_file is not None and stop_file.is_file():
+                    stop.set()
+                    break
+                stop.wait(min(1.0, max(0.0, wait_deadline - time.monotonic())))
     final = {
         "schema": _STATUS_SCHEMA,
         "status": "STOPPED_WITH_CHECKPOINT" if stop.is_set() else "COMPLETED_BOUND",
         "last_wave_status": last_status,
         "completed_waves": completed,
+        "completed_waves_total": completed_total,
+        "quota_day": quota_day,
         "max_waves": max_waves,
         "checkpoint": str(status_path),
         "network_orders": False,
@@ -209,6 +255,8 @@ def main(argv=None) -> int:
     parser.add_argument("--interval-seconds", type=float, default=300.0)
     parser.add_argument("--max-waves", type=int, default=4)
     parser.add_argument("--max-runtime-seconds", type=int, default=86400)
+    parser.add_argument("--stop-file")
+    parser.add_argument("--daily-reset", action="store_true")
     args = parser.parse_args(argv)
     stop = Event()
     for name in ("SIGINT", "SIGTERM"):
@@ -220,6 +268,8 @@ def main(argv=None) -> int:
             checkpoint_path=Path(args.checkpoint), state_dir=Path(args.state_dir),
             interval_seconds=args.interval_seconds, max_waves=args.max_waves,
             max_runtime_seconds=args.max_runtime_seconds, stop=stop,
+            stop_file=Path(args.stop_file) if args.stop_file else None,
+            daily_reset=args.daily_reset,
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
         print(f"Groq advisory supervisor blocked: {type(error).__name__}: {error}")

@@ -43,6 +43,7 @@ _SENSITIVE_OPTIONS = frozenset({
 _SAFE_ID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
 _ALLOWED_SCRIPTS = frozenset({
     "tools/run_goal_directed_attention.py",
+    "tools/run_groq_advisory_supervisor.py",
     "tools/run_whitebit_live_zero_learning.py",
     "tools/run_whitebit_public_supervisor.py",
 })

@@ -82,9 +82,14 @@ def _ordinary_directory(path: Path, label: str) -> Path:
 
 
 def _within(root: Path, candidate: Path, label: str) -> Path:
+    # Windows can hand TemporaryDirectory (and other callers) an 8.3 root
+    # while resolving a descendant expands that same root to its long form.
+    # Compare two equally canonical paths so the containment gate does not
+    # reject an identical authority root solely because of that spelling.
+    canonical_root = root.resolve(strict=False)
     resolved = candidate.resolve(strict=False)
     try:
-        resolved.relative_to(root)
+        resolved.relative_to(canonical_root)
     except ValueError as exc:
         raise ValueError(f"{label} escapes its authority root") from exc
     return resolved

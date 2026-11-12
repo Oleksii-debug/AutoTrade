@@ -25,6 +25,7 @@ from tools.historical_public_klines import HistoricalArchiveError
 from tools.screen_whitebit_technical_confluence import locked_final_screen
 from tools.screen_whitebit_trend_regime import authenticated_bars
 from tools.whitebit_historical_klines import collect_whitebit_history
+from tools.windows_power_status import running_on_battery
 
 
 SCHEMA = "autotrade-whitebit-subhour-supervisor-v1"
@@ -160,6 +161,7 @@ def main(argv=None) -> int:
     parser.add_argument("--bars", type=int, default=6000)
     parser.add_argument("--interval-seconds", type=int, default=21600)
     parser.add_argument("--stop-file", type=Path, required=True)
+    parser.add_argument("--defer-on-battery", action="store_true")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     if not 4000 <= args.bars <= 30000:
@@ -171,17 +173,40 @@ def main(argv=None) -> int:
     try: stop_file.relative_to(state_dir)
     except ValueError: parser.error("stop-file must remain inside state-dir")
     stop_file.unlink(missing_ok=True); checkpoint = state_dir / "checkpoint.json"
-    cycle_count = 0
+    value = {"schema": SCHEMA, "status": "STARTING", "cycle_count": 0,
+             "network_orders": False, "trading_authority": False,
+             "automatic_promotion": False, "paid_model_calls": 0}
     if checkpoint.is_file():
-        prior = json.loads(checkpoint.read_bytes()); cycle_count = int(prior.get("cycle_count", 0))
+        prior = json.loads(checkpoint.read_bytes())
+        if prior.get("schema") != SCHEMA:
+            raise ValueError("subhour supervisor checkpoint schema differs")
+        value.update(prior)
     while not stop_file.exists():
-        now = datetime.now(UTC); started = monotonic(); cycle_count += 1
+        now = datetime.now(UTC)
+        if args.defer_on_battery and running_on_battery():
+            if value["status"] != "WAITING_FOR_AC_POWER":
+                value.update(status="WAITING_FOR_AC_POWER", updated_at=now.isoformat())
+                atomic_write_json(checkpoint, value)
+            if args.once:
+                return 0
+            sleep(15)
+            continue
+        due_text = value.get("next_run_at")
+        due = datetime.fromisoformat(due_text) if isinstance(due_text, str) else now
+        if not args.once and now < due:
+            if value["status"] != "COOLDOWN":
+                value.update(status="COOLDOWN", updated_at=now.isoformat())
+                atomic_write_json(checkpoint, value)
+            sleep(min(15, (due - now).total_seconds()))
+            continue
+        started = monotonic()
+        cycle_count = int(value["cycle_count"]) + 1
         try:
             result = run_cycle(state_dir=state_dir, bars=args.bars, now=now)
             error = None; status = "RUNNING"
         except (HistoricalArchiveError, OSError, ValueError, TypeError,
                 KeyError, RuntimeError) as exc:
-            result = None; error = type(exc).__name__; status = "RECOVERY"
+            result = value.get("last_result"); error = type(exc).__name__; status = "RECOVERY"
         value = {"schema": SCHEMA, "status": status, "cycle_count": cycle_count,
             "last_cycle_seconds": monotonic() - started, "last_error_class": error,
             "last_result": result, "next_run_at": (now + timedelta(
@@ -194,9 +219,6 @@ def main(argv=None) -> int:
             atomic_write_json(checkpoint, {**value, "status": "STOPPED",
                 "updated_at": datetime.now(UTC).isoformat()})
             return 0 if error is None else 2
-        deadline = monotonic() + args.interval_seconds
-        while not stop_file.exists() and monotonic() < deadline:
-            sleep(min(15, max(1, deadline - monotonic())))
     atomic_write_json(checkpoint, {**value, "status": "STOPPED",
         "updated_at": datetime.now(UTC).isoformat()})
     return 0

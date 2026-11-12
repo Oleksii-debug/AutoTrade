@@ -7,11 +7,13 @@ from pathlib import Path
 from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tools.run_autotrade_process_watchdog import (
     DiagnosticLog,
     MANIFEST_SCHEMA,
     ProcessWatchdog,
+    _atomic,
     load_manifest,
     main,
 )
@@ -19,6 +21,27 @@ from research.autotrade_research.artifacts.resource_lock import ResourceLock
 
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def test_atomic_state_publish_retries_transient_windows_sharing_violation(tmp_path):
+    target = tmp_path / "state.json"
+    real_replace = os.replace
+    calls = 0
+
+    def transient(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError("temporary Windows sharing violation")
+        return real_replace(source, destination)
+
+    with patch("tools.run_autotrade_process_watchdog.os.replace", side_effect=transient), \
+            patch("tools.run_autotrade_process_watchdog.time.sleep") as sleep:
+        _atomic(target, {"phase": "RUNNING"})
+
+    assert calls == 3
+    assert json.loads(target.read_text(encoding="utf-8")) == {"phase": "RUNNING"}
+    assert sleep.call_count == 2
 
 
 def _row(*, restart_limit: int = 2, args: list[str] | None = None) -> dict:
@@ -231,6 +254,9 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_manifest_contract(self):
         self._run_with_temp(test_manifest_expands_only_bounded_paths_and_rejects_secrets)
+
+    def test_atomic_publish_retry(self):
+        self._run_with_temp(test_atomic_state_publish_retries_transient_windows_sharing_violation)
 
     def test_bounded_crash_circuit(self):
         self._run_with_temp(test_watchdog_restarts_then_opens_bounded_crash_circuit)

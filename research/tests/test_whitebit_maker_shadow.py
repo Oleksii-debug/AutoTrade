@@ -121,10 +121,24 @@ def test_filtered_wave_rejects_directional_flow_and_insufficient_spread():
     assert directional["admitted"] is False
     assert directional["reason"] == "DIRECTIONAL_FLOW"
     neutral_but_too_narrow = quote_admission(
-        book(bid="0.00000400", ask="0.000004005"), instrument(), batch(),
+        book(bid="0.00000400", ask="0.000004005"), instrument(), batch(
+            trade(2, side="buy", price="0.000004005", quantity="1000"),
+            trade(3, side="sell", price="0.00000400", quantity="1000"),
+        ),
     )
     assert neutral_but_too_narrow["admitted"] is False
     assert neutral_but_too_narrow["reason"] == "SPREAD_BELOW_HURDLE"
+
+
+def test_filtered_wave_rejects_stale_or_missing_trade_flow():
+    stale = quote_admission(
+        book(), instrument(), batch(
+            trade(2, side="buy", price="0.00000402", quantity="1000", seconds=-120),
+        ),
+    )
+    assert stale["admitted"] is False
+    assert stale["reason"] == "INSUFFICIENT_RECENT_FLOW"
+    assert stale["recent_trade_count"] == 0
 
 
 def test_failed_filtered_wave_exhausts_the_single_adaptive_trial():
@@ -135,6 +149,7 @@ def test_failed_filtered_wave_exhausts_the_single_adaptive_trial():
             target_cycles=4,
         )
     assert state["research_phase"] == "RESEARCH_ONLY"
+
 
 
 

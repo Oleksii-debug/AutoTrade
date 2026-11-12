@@ -28,7 +28,7 @@ from tools.whitebit_historical_klines import INTERVAL_SECONDS, SCHEMA, _canonica
 MAX_MANIFEST_BYTES = 1_000_000
 MAX_CSV_BYTES = 80 * 1024 * 1024
 MIN_BARS = 160
-MAX_BARS = 4096
+MAX_BARS = 20_000
 UTC = timezone.utc
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _COLUMNS = ["open_time_utc", "open", "high", "low", "close", "volume"]
@@ -247,7 +247,7 @@ def build_alpha_input(
 ) -> tuple[dict, dict]:
     """Return a deterministic Alpha payload plus authenticated selection facts."""
     if type(bars) is not int or not MIN_BARS <= bars <= MAX_BARS:
-        raise HistoricalArchiveError("Alpha history selection requires 160..4096 closes")
+        raise HistoricalArchiveError("Alpha history selection requires 160..20000 closes")
     manifest_bytes = _read_regular(manifest_path, limit=MAX_MANIFEST_BYTES, label="manifest")
     csv_path = _csv_path(manifest_path)
     csv_bytes = _read_regular(csv_path, limit=MAX_CSV_BYTES, label="normalized dataset")
@@ -391,3 +391,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

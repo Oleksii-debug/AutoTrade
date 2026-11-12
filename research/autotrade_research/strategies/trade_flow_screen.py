@@ -192,11 +192,17 @@ def screen_trade_flow(
         "FINAL": rows[development_end:],
     }
     training = [_simulate(partitions["TRAIN"], item, cost) for item in candidates()]
+    training_hold = _hold(partitions["TRAIN"], cost)
+    training_benchmark = max(Decimal(0), training_hold)
+    best_train = max(
+        training, key=lambda row: Decimal(row["net_return_fraction"]),
+        default=None,
+    )
     eligible = [row for row in training
                 if row["trade_count"] >= minimum_trades
                 and Decimal(row["maximum_drawdown_fraction"]) <= drawdown_limit
                 and Decimal(row["net_return_fraction"]) > max(
-                    Decimal(0), _hold(partitions["TRAIN"], cost))]
+                    Decimal(0), training_hold)]
     selected = None if not eligible else max(
         eligible, key=lambda row: Decimal(row["net_return_fraction"]))
     development = final = None
@@ -217,17 +223,31 @@ def screen_trade_flow(
         and Decimal(final["maximum_drawdown_fraction"]) <= drawdown_limit
         and Decimal(final["net_return_fraction"]) > max(
             Decimal(0), _hold(partitions["FINAL"], cost)))
+    train_failure_reasons: list[str] = []
+    if selected is None and best_train is not None:
+        if best_train["trade_count"] < minimum_trades:
+            train_failure_reasons.append("INSUFFICIENT_TRADES")
+        if Decimal(best_train["maximum_drawdown_fraction"]) > drawdown_limit:
+            train_failure_reasons.append("MAXIMUM_DRAWDOWN_EXCEEDED")
+        if Decimal(best_train["net_return_fraction"]) <= 0:
+            train_failure_reasons.append("NOT_POSITIVE_AFTER_COSTS")
+        if Decimal(best_train["net_return_fraction"]) <= training_benchmark:
+            train_failure_reasons.append("DID_NOT_BEAT_CASH_OR_HOLD")
     result = {
         **base, "status": "QUALIFIED" if qualified else "REJECTED",
         "partition_counts": {key: len(value) for key, value in partitions.items()},
         "candidate_count": len(training), "selected_train": selected,
+        "best_train_observed": best_train,
+        "train_hold_return_fraction": format(training_hold, "f"),
+        "train_required_return_fraction": format(training_benchmark, "f"),
+        "train_failure_reasons": train_failure_reasons,
         "development": development, "development_passed": development_passed,
         "final": final, "final_consumed": final is not None,
         "prospective_qualification": qualified,
         "automatic_promotion": False,
         "limitations": ["SPOT_PRICE_SHORT_PROXY", "FIXED_COST_MODEL",
                         "PRICE_RESPONSE_USES_CURRENT_COMPLETED_BUCKET_ONLY",
-                        "REST_RECENT_TRADE_SAMPLING", "NO_LIVE_ORDER_AUTHORITY"],
+                        "PUBLIC_WEBSOCKET_TRADE_TAPE", "NO_LIVE_ORDER_AUTHORITY"],
     }
     result["result_sha256"] = sha256(json.dumps(result, sort_keys=True,
         separators=(",", ":")).encode()).hexdigest()

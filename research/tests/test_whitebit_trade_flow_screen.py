@@ -94,6 +94,30 @@ def test_locked_final_is_consumed_only_after_train_and_development(tmp_path):
     assert rejected["development_passed"] is False
     assert rejected["final_consumed"] is False
     assert rejected["final"] is None
+    assert rejected["best_train_observed"] is not None
+    assert rejected["train_hold_return_fraction"]
+    assert rejected["train_required_return_fraction"]
+
+
+def test_rejection_explains_best_observed_after_cost_candidate(tmp_path):
+    dummy = tmp_path / "tape.sqlite3"
+    dummy.touch()
+    losing = _rows(600, correct=False)
+    with patch("autotrade_research.strategies.trade_flow_screen._read_rows",
+               return_value=losing), patch(
+               "autotrade_research.strategies.trade_flow_screen.candidates",
+               return_value=(CANDIDATE,)):
+        result = screen_trade_flow(dummy, "BTC_USDT", minimum_buckets=600,
+                                   minimum_trades=10)
+
+    assert result["status"] == "REJECTED"
+    assert result["selected_train"] is None
+    assert result["best_train_observed"]["candidate"] == {
+        "family": "MOMENTUM", "lookback": 1, "threshold": "0.2", "horizon": 1,
+    }
+    assert "NOT_POSITIVE_AFTER_COSTS" in result["train_failure_reasons"]
+    assert "DID_NOT_BEAT_CASH_OR_HOLD" in result["train_failure_reasons"]
+    assert "PUBLIC_WEBSOCKET_TRADE_TAPE" in result["limitations"]
 
 
 def test_waits_for_contiguous_causal_buckets_without_touching_final(tmp_path):

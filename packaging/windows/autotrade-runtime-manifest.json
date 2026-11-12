@@ -338,6 +338,23 @@
       "backoff_seconds": 2
     },
     {
+      "id": "whitebit-stable-fiat-triangle-shadow",
+      "script": "tools/run_whitebit_triangular_shadow.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-stable-fiat-triangle-shadow-v1-20261112",
+        "--notional", "100",
+        "--impact-reserve-bps", "2",
+        "--maximum-age-seconds", "3",
+        "--maximum-skew-seconds", "2",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-stable-fiat-triangle-shadow-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-stable-fiat-triangle-shadow-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-stable-fiat-triangle-shadow-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
       "id": "learning-fleet-diagnostics",
       "script": "tools/run_learning_fleet_diagnostics.py",
       "args": [

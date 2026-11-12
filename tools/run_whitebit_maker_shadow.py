@@ -24,7 +24,8 @@ from research.autotrade_research.integrations.whitebit_public import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 from research.autotrade_research.strategies.maker_shadow import (
-    SCHEMA, advance_evidence_wave, evaluate_quote, open_quote, quote_admission,
+    SCHEMA, advance_evidence_wave, apply_early_futility_gate, evaluate_quote,
+    open_quote, quote_admission,
 )
 
 
@@ -162,6 +163,9 @@ def main(argv=None) -> int:
                         "open_quote": None,
                     })
                 state["inventory_hedge_version"] = "IMMEDIATE_NEXT_POLL_V1"
+                state = apply_early_futility_gate(
+                    state, target_cycles=args.cycle_cycles,
+                )
             client = WhiteBitPublicClient()
             instruments = [item for item in client.instruments() if item.market == market]
             if len(instruments) != 1:

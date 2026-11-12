@@ -5,7 +5,8 @@ from research.autotrade_research.integrations.whitebit_public import (
     PublicBook, PublicInstrument, PublicTrade, PublicTradeBatch,
 )
 from research.autotrade_research.strategies.maker_shadow import (
-    advance_evidence_wave, evaluate_quote, open_quote, quote_admission,
+    advance_evidence_wave, apply_early_futility_gate, evaluate_quote,
+    open_quote, quote_admission,
 )
 
 
@@ -163,6 +164,71 @@ def test_failed_filtered_wave_exhausts_the_single_adaptive_trial():
             target_cycles=4,
         )
     assert state["research_phase"] == "RESEARCH_ONLY"
+
+
+def test_early_futility_stops_four_one_sided_losses_before_twelve():
+    state = {"research_phase": "RESEARCH_FILTERED"}
+    for _ in range(4):
+        state = advance_evidence_wave(
+            state, net_pnl_quote="-0.25", outcome="BID_ONLY_FORCED_EXIT",
+            target_cycles=12,
+        )
+    assert state["research_phase"] == "RESEARCH_ONLY"
+    analysis = state["latest_wave_analysis"]
+    assert analysis["finding"] == "EARLY_AFTER_COST_FUTILITY"
+    assert analysis["reason_code"] == "ZERO_POSITIVE_AND_TWO_SIDED_NEGATIVE_AFTER_COST"
+    assert analysis["cycles"] == 4
+    assert analysis["two_sided_fill_cycles"] == 0
+    assert analysis["saved_remaining_cycle_budget"] == 8
+    assert analysis["automatic_promotion"] is False
+
+
+def test_early_futility_is_terminal_even_during_discovery():
+    state = {"research_phase": "DISCOVERY"}
+    for _ in range(4):
+        state = advance_evidence_wave(
+            state, net_pnl_quote="-0.01", outcome="ASK_ONLY_FORCED_EXIT",
+            target_cycles=12,
+        )
+    assert state["research_phase"] == "RESEARCH_ONLY"
+    assert state["latest_wave_analysis"]["stage"] == "DISCOVERY"
+    assert state["latest_wave_analysis"]["next_research_phase"] == "RESEARCH_ONLY"
+
+
+def test_positive_or_two_sided_evidence_preserves_full_wave_budget():
+    positive = {"research_phase": "RESEARCH_FILTERED"}
+    for net, outcome in (
+        ("-0.25", "BID_ONLY_FORCED_EXIT"),
+        ("0.01", "BOTH_SIDES_FILLED"),
+        ("-0.25", "ASK_ONLY_FORCED_EXIT"),
+        ("-0.25", "BID_ONLY_FORCED_EXIT"),
+    ):
+        positive = advance_evidence_wave(
+            positive, net_pnl_quote=net, outcome=outcome, target_cycles=12,
+        )
+    assert positive["research_phase"] == "RESEARCH_FILTERED"
+    assert positive["wave_cycles"] == 4
+    assert "latest_wave_analysis" not in positive
+
+
+def test_restart_migration_applies_gate_without_erasing_lifetime_memory():
+    restored = {
+        "research_phase": "RESEARCH_FILTERED",
+        "wave_cycles": 7,
+        "wave_positive_cycles": 0,
+        "wave_net_pnl_quote": "-1.75",
+        "wave_outcomes": {"ASK_ONLY_FORCED_EXIT": 3, "BID_ONLY_FORCED_EXIT": 4},
+        "settled_cycles": 31,
+        "net_pnl_quote": "-6.2",
+        "positive_cycles": 2,
+    }
+    migrated = apply_early_futility_gate(restored, target_cycles=12)
+    assert migrated["research_phase"] == "RESEARCH_ONLY"
+    assert migrated["settled_cycles"] == 31
+    assert migrated["net_pnl_quote"] == "-6.2"
+    assert migrated["positive_cycles"] == 2
+    assert migrated["latest_wave_analysis"]["cycles"] == 7
+    assert migrated["latest_wave_analysis"]["saved_remaining_cycle_budget"] == 5
 
 
 

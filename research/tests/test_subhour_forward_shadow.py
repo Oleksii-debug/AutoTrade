@@ -214,6 +214,14 @@ def test_execution_outcomes_settle_after_restart_without_virtual_fill():
     assert Decimal(outcome["elapsed_seconds"]) == 1800
     assert Decimal("0.004") < Decimal(outcome["outcomes"]["LONG"]["net_equity_return"]) < Decimal("0.005")
     assert Decimal(outcome["outcomes"]["SHORT"]["net_equity_return"]) < 0
+    assert (outcome["exit_bid"], outcome["exit_ask"]) == ("102", "102.10")
+    for row in outcome["outcomes"].values():
+        costs = [Decimal(row[field]) for field in (
+            "spread_equity_cost", "slippage_equity_cost", "fee_equity_cost", "funding_equity_cost",
+        )]
+        assert all(cost > 0 for cost in costs)
+        reconciled = Decimal(row["gross_midpoint_equity_return"]) - sum(costs)
+        assert abs(reconciled - Decimal(row["net_equity_return"])) < Decimal("1e-28")
     assert observe(due, "103", "103.10") == []
     assert observe(due + timedelta(minutes=30), "103", "103.10", contiguous=False) == []
     assert state["execution_outcomes"]["settled_count"] == 1
@@ -246,11 +254,16 @@ def test_shared_quote_feeds_independent_market_learning(tmp_path):
         calls.append(now)
         return [SimpleNamespace(market=market, bid="100", ask="100.01",
                     received_at=now, digest=market) for market in
-                ("SOL_PERP", "BTC_PERP", "ETH_PERP")]
+                ("SOL_PERP", "BTC_PERP", "ETH_PERP", "NEAR_PERP", "SUI_PERP")]
 
     state = _initial(int(start.timestamp()) - 900, start)
     initial_quote = _quote(SimpleNamespace(futures_markets=lambda: snapshots(start)))
     assert len(calls) == 1
+    assert set(initial_quote["learning_quotes"]) == {"BTC_PERP", "ETH_PERP"}
+    assert set(initial_quote["observed_cost_quotes"]) == {"NEAR_PERP", "SUI_PERP"}
+    cost_quote = initial_quote["observed_cost_quotes"]["NEAR_PERP"]
+    assert cost_quote["source_sha256"] == "NEAR_PERP"
+    assert Decimal("0.99") < Decimal(cost_quote["spread_bps"]) < Decimal("1")
     assert _midpoint_learning_context(db, "BTC_PERP", initial_quote["learning_quotes"]["BTC_PERP"])
     result = _observe_additional_markets(state, depth_database=db, boundary=start,
         quote=initial_quote, now=start, contiguous=True)
@@ -399,10 +412,14 @@ def test_main_records_shared_portfolio_in_existing_checkpoint(tmp_path, monkeypa
                         lambda: {"decision": "ALLOW", "evidence_sha256": "news"})
     calls = []
 
+    cost_quote = {"bid": "2.5", "ask": "2.51", "spread_bps": "39.92015968",
+                  "received_at": now.isoformat(), "source_sha256": "near-book"}
+
     def quote(_):
         calls.append(now)
         return {"bid": Decimal("99.99"), "ask": Decimal("100.01"),
-                "source_sha256": "new-market-quote", "received_at": now.isoformat()}
+                "source_sha256": "new-market-quote", "received_at": now.isoformat(),
+                "observed_cost_quotes": {"NEAR_PERP": cost_quote}}
 
     monkeypatch.setattr(f"{module}._quote", quote)
     assert main(["--state-dir", str(tmp_path), "--depth-database", str(tmp_path / "depth"),
@@ -411,6 +428,7 @@ def test_main_records_shared_portfolio_in_existing_checkpoint(tmp_path, monkeypa
     record = json.loads((tmp_path / "decisions.jsonl").read_bytes())
     portfolio = saved["state"]["portfolio_observer"]
     assert len(calls) == 1
+    assert record["observed_cost_quotes"] == {"NEAR_PERP": cost_quote}
     assert portfolio["queued"] == record["portfolio_observer"]["queued"]
     assert portfolio["queued"]["action"] == "HOLD"
     assert portfolio["queued"]["planned_entry_epoch"] == int(boundary.timestamp()) + 900

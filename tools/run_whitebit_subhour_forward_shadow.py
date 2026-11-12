@@ -25,6 +25,9 @@ from research.autotrade_research.integrations.market_news_context import (
 from research.autotrade_research.integrations.whitebit_public import (
     PublicDataError, WhiteBitPublicClient,
 )
+from research.autotrade_research.learning.observed_quote_learning import (
+    HORIZON_SECONDS, propose_from_observed_outcomes, review_observed_predictions,
+)
 from research.autotrade_research.strategies.pretrade_evidence import (
     PreTradeThesis, evaluate_pretrade,
 )
@@ -40,7 +43,6 @@ STEP_SECONDS = 900
 MAX_ENTRY_DELAY = timedelta(seconds=90)
 PROSPECTIVE_WAVE_CYCLES = 5
 MAX_HOURLY_SAMPLES = 7 * 24 + 1
-OUTCOME_HORIZON_SECONDS = 2 * STEP_SECONDS
 MAX_RECENT_OUTCOMES = 96
 MAX_DECISION_JOURNAL_BYTES = 16 * 1024 * 1024
 
@@ -157,7 +159,7 @@ def _observe_execution_outcomes(
             or not timedelta(0) <= received - boundary <= MAX_ENTRY_DELAY):
         research["pending"] = [
             row for row in research["pending"]
-            if row["entry_boundary_epoch"] + OUTCOME_HORIZON_SECONDS > epoch
+            if row["entry_boundary_epoch"] + HORIZON_SECONDS > epoch
         ]
         return []
 
@@ -169,7 +171,7 @@ def _observe_execution_outcomes(
     settled = []
     pending = []
     for entry in research["pending"]:
-        due = entry["entry_boundary_epoch"] + OUTCOME_HORIZON_SECONDS
+        due = entry["entry_boundary_epoch"] + HORIZON_SECONDS
         if epoch < due:
             pending.append(entry)
             continue
@@ -187,11 +189,15 @@ def _observe_execution_outcomes(
             outcomes[label] = {"entry_price": str(entry_fill), "exit_price": str(fill),
                 "net_equity_return": str(pnl / starting_equity)}
         settled.append({
-            "outcome_id": f"{MARKET}:M15:{entry['entry_boundary_epoch']}:{OUTCOME_HORIZON_SECONDS}",
+            "outcome_id": f"{MARKET}:M15:{entry['entry_boundary_epoch']}:{HORIZON_SECONDS}",
             **entry, "exit_boundary_epoch": epoch, "exit_quote_received_at": received.isoformat(),
             "exit_quote_sha256": quote["source_sha256"], "elapsed_seconds": str(elapsed),
             "kind": "OBSERVED_FIXED_TIME_EXECUTION_OUTCOME", "outcomes": outcomes,
         })
+    research["recent"] = (research["recent"] + settled)[-MAX_RECENT_OUTCOMES:]
+    proposal = propose_from_observed_outcomes(
+        research["recent"], entry_epoch=epoch, quote_received_at=received,
+        technical=state.get("last_technical_signal"))
     pending.append({
         "entry_boundary_epoch": epoch, "quote_received_at": received.isoformat(),
         "entry_quote_sha256": quote["source_sha256"], "bid": str(quote["bid"]),
@@ -199,10 +205,12 @@ def _observe_execution_outcomes(
         "technical": state.get("last_technical_signal"),
         "news_decision": state.get("last_news_context", {}).get("decision"),
         "l2_status": state.get("last_l2_context", {}).get("status"),
+        "learner_proposal": proposal,
     })
     research["pending"] = pending
-    research["recent"] = (research["recent"] + settled)[-MAX_RECENT_OUTCOMES:]
     research["settled_count"] += len(settled)
+    if settled:
+        research["learner_evaluation"] = review_observed_predictions(research["recent"])
     return settled
 
 
@@ -518,6 +526,10 @@ def main(argv=None) -> int:
                     next_state, boundary=history[-1]["closed_at"], quote=quote, now=now,
                     contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS,
                     policy_action=action)
+                pending = next_state["execution_outcomes"]["pending"]
+                current_observation = (pending[-1] if pending and
+                    pending[-1]["entry_boundary_epoch"] == int(history[-1]["closed_at"].timestamp())
+                    else None)
                 closed = next_state["closed_cycles"]
                 review = next_state.get("wave_analysis")
                 _append_decision(state_dir / "decisions.jsonl", {
@@ -535,6 +547,7 @@ def main(argv=None) -> int:
                     "net_pnl": next_state["net_pnl"],
                     "clock_sample": clock_sample,
                     "execution_outcomes": execution_outcomes,
+                    "execution_observation": current_observation,
                     "network_orders": False, "trading_authority": False,
                 })
                 state = next_state

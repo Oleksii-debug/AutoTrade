@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from research.autotrade_research.integrations.whitebit_public import PublicDataError
+from research.autotrade_research.learning.observed_quote_learning import (
+    propose_from_observed_outcomes, review_observed_predictions,
+)
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
     PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial,
@@ -215,6 +218,38 @@ def test_execution_outcomes_settle_after_restart_without_virtual_fill():
     assert state["position"] is None
     assert state["closed_cycles"] == 0
     assert state["balance"] == "1000"
+
+
+def test_learner_uses_only_observed_prior_returns_and_scores_whole_hours():
+    start = datetime(2026, 11, 12, 12, tzinfo=UTC)
+    epoch = int(start.timestamp())
+    technical = {"features": {"atr": "1", "close": "99", "band_mid": "100"}}
+
+    def outcome(i, closed, long="0.005", short="-0.006"):
+        return {"outcome_id": str(i), "entry_boundary_epoch": epoch + (i - 1) * 1800,
+            "exit_boundary_epoch": epoch + i * 1800,
+            "exit_quote_received_at": closed.isoformat(), "technical": technical,
+            "outcomes": {"LONG": {"net_equity_return": long},
+                         "SHORT": {"net_equity_return": short}}}
+
+    history = [outcome(i, start + timedelta(minutes=30 * i)) for i in range(-7, 1)]
+    # The same exit boundary can be unavailable if its quote arrived later.
+    unavailable = {**outcome(0, start + timedelta(seconds=5), "-1", "1"),
+                   "outcome_id": "not-known-yet"}
+    proposal = propose_from_observed_outcomes(history + [unavailable],
+        entry_epoch=epoch, quote_received_at=start, technical=technical)
+    assert proposal["action"] == "LONG"
+    assert proposal["training_outcome_count"] == 8
+    assert Decimal(proposal["expected_net_equity_returns"]["LONG"]) == Decimal("0.0025")
+    assert "not-known-yet" not in proposal["training_outcome_ids"]
+    complete = review_observed_predictions([
+        {**outcome(1, start + timedelta(minutes=30)), "learner_proposal": proposal},
+        {**outcome(2, start + timedelta(hours=1)), "learner_proposal": proposal},
+    ])
+    assert complete["simulated_direction_choices"] == 2
+    assert complete["hourly"]["complete_windows"] == 1
+    assert complete["hourly"]["target_hits"] == 1
+    assert Decimal(complete["hourly"]["best_fraction"]) == Decimal("0.010025")
 
 
 def test_shadow_clock_marks_an_open_short_after_exit_costs():

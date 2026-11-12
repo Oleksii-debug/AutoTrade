@@ -288,16 +288,31 @@ class LiveCycle:
                             )[4]
                     scores[family] = score
                 family = max(scores, key=scores.get)
-                version = con.execute("SELECT MAX(version)+1 FROM models").fetchone()[0]
-                self._insert_model(con, version=version, created_at=now, parameter=family,
-                    trained=len(rows), momentum_correct=0, contrarian_correct=0)
-                state.update(phase="EVALUATING", candidate_version=version, frozen_at=now,
-                    candidate_sha256=con.execute("SELECT model_sha256 FROM models WHERE version=?", (version,)).fetchone()[0],
-                    incumbent_sha256=con.execute("SELECT model_sha256 FROM models WHERE version=?", (state["incumbent_version"],)).fetchone()[0],
-                    train_scores={k: str(v) for k,v in scores.items()}, trials=state["trials"]+1,
-                    evaluation=dict(count=0, candidate="0", incumbent="0", peak="0",
-                                    drawdown="0", no_trade="0", pending=None,
-                                    candidate_trades=0, incumbent_trades=0, invalid_gap_count=0))
+                score_projection = {key: str(value) for key, value in scores.items()}
+                if scores[family] <= 0:
+                    # A least-bad losing family is not a candidate.  Preserve
+                    # the evidence, cool down, then collect a fresh causal
+                    # wave instead of spending evaluation time on no TRAIN edge.
+                    state.update(
+                        phase="COOLDOWN",
+                        cooldown_at=now,
+                        reason="NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS",
+                        train_scores=score_projection,
+                        trials=state["trials"] + 1,
+                        candidate_version=None,
+                        champion_promotion=False,
+                    )
+                else:
+                    version = con.execute("SELECT MAX(version)+1 FROM models").fetchone()[0]
+                    self._insert_model(con, version=version, created_at=now, parameter=family,
+                        trained=len(rows), momentum_correct=0, contrarian_correct=0)
+                    state.update(phase="EVALUATING", candidate_version=version, frozen_at=now,
+                        candidate_sha256=con.execute("SELECT model_sha256 FROM models WHERE version=?", (version,)).fetchone()[0],
+                        incumbent_sha256=con.execute("SELECT model_sha256 FROM models WHERE version=?", (state["incumbent_version"],)).fetchone()[0],
+                        train_scores=score_projection, trials=state["trials"]+1,
+                        evaluation=dict(count=0, candidate="0", incumbent="0", peak="0",
+                                        drawdown="0", no_trade="0", pending=None,
+                                        candidate_trades=0, incumbent_trades=0, invalid_gap_count=0))
         elif old_phase == "EVALUATING":
             self._evaluate_shadow(con, state, current, key)
         elif old_phase == "COOLDOWN":

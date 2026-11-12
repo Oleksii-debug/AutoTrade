@@ -41,7 +41,8 @@ def _cycle_projection(value: dict) -> dict:
         projected["cost_and_horizon_config"] = {key: config.get(key) for key in (
             "fee_bps", "slippage_bps", "short_carry_bps_per_day",
             "notional", "outcome_horizon_seconds", "signal_lookback_seconds",
-            "max_observation_gap_seconds") if config.get(key) is not None}
+            "max_observation_gap_seconds", "feature_mode")
+            if config.get(key) is not None}
     evaluation = projected.get("evaluation")
     if type(evaluation) is dict and type(evaluation.get("pending")) is dict:
         pending = evaluation["pending"]

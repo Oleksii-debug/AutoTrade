@@ -176,6 +176,27 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertEqual(decision["feature_momentum"], "4.000")
             self.assertEqual(decision["prediction"], "UP")
 
+    def test_top_book_imbalance_is_separate_restart_safe_causal_feature(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(
+                root, cycle_episodes=100, feature_mode="TOP_BOOK_IMBALANCE")
+            self.assertIsNone(self.tick(learner, 1, 100)["new_decision"])
+            decision = self.tick(learner, 2, 100)["new_decision"]
+            self.assertIsNotNone(decision)
+            self.assertLess(Decimal(decision["feature_momentum"]), 0)
+            self.assertEqual(decision["prediction"], "DOWN")
+            self.assertEqual(
+                learner.status()["learning_cycle"]["config"]["feature_mode"],
+                "TOP_BOOK_IMBALANCE",
+            )
+            restarted = self.learner(
+                root, cycle_episodes=100, feature_mode="TOP_BOOK_IMBALANCE")
+            self.assertEqual(restarted.status(), learner.status())
+            with self.assertRaisesRegex(ValueError, "configuration differs"):
+                self.learner(root, cycle_episodes=100,
+                             feature_mode="MID_MOMENTUM")
+
     def test_time_bound_and_atomic_rollback_do_not_skip_an_observation(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -373,3 +394,4 @@ class LiveLearningCycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

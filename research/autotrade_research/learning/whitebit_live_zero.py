@@ -146,6 +146,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         outcome_horizon_seconds: int = 0,
         signal_lookback_seconds: int = 0,
         short_carry_bps_per_day: str = "2",
+        feature_mode: str = "MID_MOMENTUM",
     ) -> None:
         if type(state_dir) is not type(Path()):
             raise TypeError("state_dir must be an exact Path")
@@ -169,7 +170,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
                               max_drawdown_usdt, cooldown_seconds, max_trials,
                               max_observation_gap_seconds, min_evaluation_trades,
                               outcome_horizon_seconds, signal_lookback_seconds,
-                              short_carry_bps_per_day)
+                              short_carry_bps_per_day, feature_mode)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database = self.state_dir / "episode-memory.sqlite3"
         self._initialize()
@@ -414,9 +415,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
             signal_reference = self._signal_reference(connection, canonical, key)
             if (signal_reference is not None and not gap and not pending_waiting
                     and cycle["phase"] in {"RUNNING", "RESEARCH"}):
-                feature = current_mid - _decimal(
-                    signal_reference["mid"], name="signal_reference_mid"
-                )
+                feature = self._signal_feature(canonical, signal_reference)
                 model = connection.execute(
                     "SELECT * FROM models WHERE version=?", (cycle["incumbent_version"],)
                 ).fetchone()
@@ -555,3 +554,4 @@ class WhiteBitLiveZeroLearning(LiveCycle):
 
     def status(self) -> dict[str, Any]:
         return json.loads((self.state_dir / "checkpoint.json").read_text(encoding="utf-8"))
+

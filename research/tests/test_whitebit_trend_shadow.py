@@ -7,7 +7,7 @@ import unittest
 
 from research.autotrade_research.strategies.fast_screen import Costs
 from research.autotrade_research.strategies.trend_regime import TrendRegime
-from tools.run_whitebit_trend_shadow import _new_state, advance, main
+from tools.run_whitebit_trend_shadow import _execute, _new_state, advance, main
 
 
 def seed():
@@ -52,6 +52,28 @@ class WhitebitTrendShadowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "continuity gap"):
             advance(self.state, {"update_id": 1}, Decimal("100"), Decimal("101"),
                     datetime(2025, 1, 1, 2, tzinfo=UTC), self.costs, self.strategy)
+
+    def test_closed_cycle_attributes_gross_costs_and_net_for_review(self):
+        opened = _execute(self.state, "SHORT", Decimal("100"), Decimal("101"),
+                          self.costs, datetime(2025, 1, 1, tzinfo=UTC))
+        self.assertEqual(opened["action"], "SHORT")
+        self.state["financing_costs"] = "0.100000000000000000"
+        self.state["cash"] = str(
+            Decimal(self.state["cash"])-Decimal("0.100000000000000000"))
+        closed = _execute(self.state, "COVER", Decimal("89"), Decimal("90"),
+                          self.costs, datetime(2025, 1, 2, tzinfo=UTC))
+        analysis = closed["cycle_analysis"]
+        self.assertEqual(analysis["outcome"], "WIN")
+        self.assertEqual(analysis["review_status"], "PROSPECTIVE_EVIDENCE_ACCUMULATED")
+        self.assertGreater(Decimal(analysis["gross_pnl"]), 0)
+        self.assertEqual(
+            Decimal(analysis["net_pnl"]),
+            Decimal(analysis["gross_pnl"])-Decimal(analysis["fees"])
+            - Decimal(analysis["financing_costs"]),
+        )
+        self.assertFalse(analysis["automatic_strategy_update"])
+        self.assertEqual(self.state["cycle_analysis_count"], 1)
+        self.assertIsNone(self.state["position_entry"])
 
     def test_fresh_install_waits_when_research_artifacts_are_absent(self):
         with TemporaryDirectory() as directory:

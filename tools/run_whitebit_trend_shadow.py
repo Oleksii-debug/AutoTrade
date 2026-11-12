@@ -107,6 +107,8 @@ def _new_state(seed, identities, costs, strategy, qualification_sha):
         "max_drawdown_fraction": "0", "favorable_water": None,
         "holding_bars": 0, "closed_cycles": 0, "long_cycles": 0,
         "short_cycles": 0, "completed_live_bars": 0, "last_action": None,
+        "position_entry": None, "last_cycle_analysis": None,
+        "cycle_analysis_count": 0,
         "last_error": None, "updated_at": datetime.now(UTC).isoformat()}
 
 
@@ -181,6 +183,7 @@ def _execute(state, action, bid, ask, costs, observed):
     with localcontext() as context:
         context.prec = 50
         cash, quantity = decimal(state["cash"]), decimal(state["quantity"])
+        entry = state.get("position_entry")
         fee = decimal(costs.fee_bps) / 10000
         slip = decimal(costs.slippage_bps) / 10000
         fraction = decimal(costs.capital_fraction)
@@ -210,6 +213,49 @@ def _execute(state, action, bid, ask, costs, observed):
         event = {"action": action, "at": observed.isoformat(), "price": str(price),
                  "reason": state.get("last_decision", {}).get("reason"),
                  "fee": str(charge), "cash": str(cash), "quantity": str(quantity)}
+        if action in {"BUY", "SHORT"}:
+            state["position_entry"] = {
+                "side": "LONG" if action == "BUY" else "SHORT",
+                "at": observed.isoformat(), "price": str(price),
+                "quantity": str(abs(quantity)), "entry_fee": str(charge),
+                "financing_costs_at_entry": state["financing_costs"],
+                "cost_baseline_scope": "FULL_CYCLE",
+            }
+        else:
+            if type(entry) is not dict:
+                raise ArithmeticError("forward shadow exit lacks an entry record")
+            entry_price = decimal(entry["price"])
+            size = decimal(entry["quantity"])
+            gross = (size * (price-entry_price) if entry["side"] == "LONG"
+                     else size * (entry_price-price))
+            fees = decimal(entry["entry_fee"]) + charge
+            financing = (decimal(state["financing_costs"])
+                         - decimal(entry["financing_costs_at_entry"]))
+            net = gross-fees-financing
+            notional = size*entry_price
+            analysis = {
+                "schema": "autotrade-forward-cycle-analysis-v1",
+                "market": state["market"], "side": entry["side"],
+                "entry_at": entry["at"], "exit_at": observed.isoformat(),
+                "entry_price": str(entry_price), "exit_price": str(price),
+                "quantity": str(size), "gross_pnl": str(gross.quantize(unit)),
+                "fees": str(fees.quantize(unit)),
+                "financing_costs": str(financing.quantize(unit)),
+                "net_pnl": str(net.quantize(unit)),
+                "return_fraction": str((net/notional).quantize(unit)),
+                "outcome": "WIN" if net > 0 else ("LOSS" if net < 0 else "FLAT"),
+                "review_status": ("LOSS_REVIEW_REQUIRED" if net <= 0
+                                  else "PROSPECTIVE_EVIDENCE_ACCUMULATED"),
+                "automatic_strategy_update": False,
+                "cost_baseline_scope": entry.get(
+                    "cost_baseline_scope", "FULL_CYCLE"),
+                "qualification_file_sha256": state["qualification_file_sha256"],
+                "network_orders": False, "trading_authority": False,
+            }
+            state["last_cycle_analysis"] = analysis
+            state["cycle_analysis_count"] = int(state.get("cycle_analysis_count", 0))+1
+            state["position_entry"] = None
+            event["cycle_analysis"] = analysis
         state["last_action"] = event
         return event
 
@@ -309,6 +355,25 @@ def main(argv=None):
         state.setdefault("current_equity", initial)
         state.setdefault("net_pnl", "0")
         state.setdefault("return_fraction", "0")
+        state.setdefault("position_entry", None)
+        state.setdefault("last_cycle_analysis", None)
+        state.setdefault("cycle_analysis_count", 0)
+        if decimal(state.get("quantity", "0")) != 0 and state["position_entry"] is None:
+            legacy = state.get("last_action")
+            if (type(legacy) is not dict or legacy.get("action") not in {"BUY", "SHORT"}
+                    or decimal(legacy.get("quantity", "0")) == 0):
+                raise ValueError("open forward shadow position lacks entry provenance")
+            full_cycle = int(state.get("closed_cycles", 0)) == 0
+            state["position_entry"] = {
+                "side": "LONG" if legacy["action"] == "BUY" else "SHORT",
+                "at": legacy["at"], "price": legacy["price"],
+                "quantity": str(abs(decimal(legacy["quantity"]))),
+                "entry_fee": legacy["fee"],
+                "financing_costs_at_entry": (
+                    "0" if full_cycle else state["financing_costs"]),
+                "cost_baseline_scope": (
+                    "FULL_CYCLE" if full_cycle else "POST_MIGRATION_ONLY"),
+            }
     else:
         state = _new_state(seed, identities, costs, strategy, qualification_sha)
     started = monotonic()
@@ -337,6 +402,11 @@ def main(argv=None):
                 if event:
                     with (args.state_dir / "actions.jsonl").open("a", encoding="utf-8") as stream:
                         stream.write(json.dumps(event, sort_keys=True)+"\n")
+                    if "cycle_analysis" in event:
+                        with (args.state_dir / "cycle-analyses.jsonl").open(
+                                "a", encoding="utf-8") as stream:
+                            stream.write(json.dumps(
+                                event["cycle_analysis"], sort_keys=True)+"\n")
         except Exception as exc:
             state["status"] = "RECOVERY"
             state["last_error"] = f"{type(exc).__name__}: {exc}"

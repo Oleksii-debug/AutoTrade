@@ -13,6 +13,7 @@ from hashlib import sha256
 import json
 
 from .fast_screen import decimal, validate_bars
+from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 
 
 VERSION = "technical-confluence-futures-v1"
@@ -70,6 +71,7 @@ class TechnicalConfiguration:
     cooldown_bars: int = 8
     minimum_hold_bars: int = 3
     maximum_hold_bars: int = 120
+    maximum_entries_per_utc_day: int = 4
 
     def validate(self) -> None:
         if self.family not in {"EMA_RSI_TREND", "BOLLINGER_RSI_REVERSION"}:
@@ -104,6 +106,9 @@ class TechnicalConfiguration:
             raise ValueError("cooldown bars are invalid")
         if not 1 <= self.minimum_hold_bars <= self.maximum_hold_bars <= 10000:
             raise ValueError("holding bounds are invalid")
+        if (type(self.maximum_entries_per_utc_day) is not int
+                or not 1 <= self.maximum_entries_per_utc_day <= 1000):
+            raise ValueError("daily entry bound is invalid")
 
 
 def _ema(values: list[Decimal], period: int) -> Decimal:
@@ -202,9 +207,12 @@ def simulate(bars: list[dict], *, candidate: str,
         pending_reason = "CONTROL_ENTRY" if pending is not None else None
         history: list[dict] = []
         holding = closed_cycles = fill_count = signal_count = cooldown_remaining = 0
+        pretrade_holds = 0
+        pretrade_hold_reasons: dict[str, int] = {}
         fees = funding = max_drawdown = Decimal(0)
         long_cycles = short_cycles = 0
         exit_reasons: dict[str, int] = {}
+        entries_by_day: dict[str, int] = {}
         evidence = sha256()
 
         def mark(price: Decimal) -> Decimal:
@@ -219,10 +227,40 @@ def simulate(bars: list[dict], *, candidate: str,
                     reason: str | None, at: str) -> None:
             nonlocal balance, quantity, entry_price, fees, fill_count
             nonlocal closed_cycles, long_cycles, short_cycles, holding, cooldown_remaining
+            nonlocal pretrade_holds
             if direction is None:
                 return
             if direction and quantity == 0:
                 price = reference * (Decimal(1) + adverse if direction > 0 else Decimal(1) - adverse)
+                if reason == "INDICATOR_CONFLUENCE_ENTRY":
+                    entry_day = at[:10]
+                    if entries_by_day.get(entry_day, 0) >= configuration.maximum_entries_per_utc_day:
+                        pretrade_holds += 1
+                        pretrade_hold_reasons["DAILY_ENTRY_LIMIT"] = (
+                            pretrade_hold_reasons.get("DAILY_ENTRY_LIMIT", 0) + 1)
+                        return
+                    stop_distance = decimal(configuration.stop_atr) * active_atr
+                    target_distance = decimal(configuration.take_profit_atr) * active_atr
+                    gate = evaluate_pretrade(PreTradeThesis(
+                        direction="LONG" if direction > 0 else "SHORT",
+                        regime=("TREND" if configuration.family == "EMA_RSI_TREND"
+                                else "RANGE"),
+                        causal_data_complete=True, regime_confirmed=True,
+                        location_confirmed=True, trigger_confirmed=True,
+                        entry_price=price,
+                        invalidation_price=(price - stop_distance if direction > 0
+                                            else price + stop_distance),
+                        target_price=(price + target_distance if direction > 0
+                                      else price - target_distance),
+                        round_trip_cost_bps=costs.round_trip_bps,
+                        minimum_reward_risk="2",
+                        microstructure_status="NOT_AVAILABLE_HISTORICAL"))
+                    if gate["decision"] != "ENTER":
+                        pretrade_holds += 1
+                        for failure in gate["failure_reasons"]:
+                            pretrade_hold_reasons[failure] = (
+                                pretrade_hold_reasons.get(failure, 0) + 1)
+                        return
                 notional = max(Decimal(0), balance) * fraction
                 opened = (notional / price).quantize(Decimal("1e-18"), rounding=ROUND_DOWN)
                 if opened == 0:
@@ -231,6 +269,8 @@ def simulate(bars: list[dict], *, candidate: str,
                 entry_price = price
                 charge = notional * fee_ratio
                 balance -= charge; fees += charge; fill_count += 1; holding = 0
+                if reason == "INDICATOR_CONFLUENCE_ENTRY":
+                    entries_by_day[at[:10]] = entries_by_day.get(at[:10], 0) + 1
             elif direction == 0 and quantity != 0:
                 price = reference * (Decimal(1) - adverse if quantity > 0 else Decimal(1) + adverse)
                 notional = abs(quantity) * price
@@ -305,6 +345,9 @@ def simulate(bars: list[dict], *, candidate: str,
             "closed_cycles": closed_cycles, "long_cycles": long_cycles,
             "short_cycles": short_cycles, "fill_count": fill_count,
             "signal_count": signal_count, "fees": str(fees), "funding": str(funding),
+            "pretrade_holds": pretrade_holds,
+            "pretrade_hold_reasons": pretrade_hold_reasons,
             "exit_reasons": exit_reasons, "evidence_sha256": evidence.hexdigest(),
             "network_orders": False, "trading_authority": False,
         }
+

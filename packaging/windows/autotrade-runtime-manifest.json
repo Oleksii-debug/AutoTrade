@@ -243,6 +243,25 @@
       "backoff_seconds": 2
     },
     {
+      "id": "whitebit-public-trade-tape",
+      "script": "tools/run_whitebit_public_trade_tape.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-public-trade-tape-v1-20261112",
+        "--market", "BTC_USDT",
+        "--market", "ETH_USDT",
+        "--market", "SOL_USDT",
+        "--poll-seconds", "1",
+        "--bucket-seconds", "5",
+        "--retention-days", "14",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-public-trade-tape-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-public-trade-tape-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-public-trade-tape-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
       "id": "goal-attention",
       "script": "tools/run_goal_directed_attention.py",
       "args": [
@@ -352,6 +371,7 @@
     }
   ]
 }
+
 
 
 

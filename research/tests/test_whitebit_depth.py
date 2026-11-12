@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -106,3 +107,36 @@ def test_persistent_l2_pressure_confirms_only_matching_direction(tmp_path):
     assert short["status"] == "CONFLICT"
 
 
+def test_depth_archive_excludes_unsettled_windows_and_survives_raw_expiry(tmp_path):
+    path = tmp_path / "archive.sqlite3"
+    observed = DepthLocalBook("BTC_USDT", limit=5).apply(
+        parse_depth_message(frame(), market="BTC_USDT", received_at=NOW), generation=1)
+    store = WhiteBitDepthTapeStore(path, retention_days=1)
+    store.ingest(observed)
+    store.ingest(replace(observed, received_at=NOW + timedelta(seconds=299),
+                         mid_price="101", generation=2))
+    store.ingest(replace(observed, received_at=NOW + timedelta(seconds=301),
+                         mid_price="102", generation=2))
+    start = int(NOW.timestamp())
+    markets = ("BTC_USDT",)
+    assert store.archive_completed_windows(markets, now_epoch=start + 359) == 0
+    assert store.archive_completed_windows(markets, now_epoch=start + 360) == 1
+    store.close()
+
+    reopened = WhiteBitDepthTapeStore(path, retention_days=1)
+    assert reopened.archive_completed_windows(markets, now_epoch=start + 360) == 0
+    reopened.ingest(replace(observed, received_at=NOW + timedelta(days=2)))
+    assert reopened.status()["bucket_count"] == 1
+    archived = reopened.connection.execute(
+        "SELECT window_epoch,features_json FROM archived_windows").fetchall()
+    assert len(archived) == 1
+    window, payload = archived[0]
+    features = json.loads(payload)
+    assert window == start
+    assert features["observed_buckets"] == 2
+    assert features["generation_count"] == 2
+    assert features["first_bucket_epoch"] == start
+    assert features["last_bucket_epoch"] == start + 299
+    assert features["open_mid"] == "100"
+    assert features["close_mid"] == "101"
+    reopened.close()

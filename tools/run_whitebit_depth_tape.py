@@ -22,7 +22,7 @@ from research.autotrade_research.integrations.whitebit_depth import (
 )
 from research.autotrade_research.integrations.whitebit_public import _symbol
 from research.autotrade_research.learning.whitebit_depth_tape import (
-    WhiteBitDepthTapeStore,
+    ARCHIVE_SETTLE_SECONDS, ARCHIVE_WINDOW_SECONDS, WhiteBitDepthTapeStore,
 )
 
 
@@ -44,6 +44,7 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     phases = {market: "STARTING" for market in markets}
     errors: dict[str, str] = {}
     added = 0
+    last_archive_boundary = None
 
     def diagnostic(market: str, value) -> None:
         if value.code == "SUBSCRIBED":
@@ -74,6 +75,11 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                 phase = "DEGRADED"
             else:
                 phase = "STARTING" if not errors else "DEGRADED"
+            now_epoch = int(datetime.now(timezone.utc).timestamp())
+            archive_boundary = (now_epoch - ARCHIVE_SETTLE_SECONDS) // ARCHIVE_WINDOW_SECONDS
+            if archive_boundary != last_archive_boundary:
+                store.archive_completed_windows(markets, now_epoch=now_epoch)
+                last_archive_boundary = archive_boundary
             _checkpoint(checkpoint, store, phase=phase, markets=markets,
                         observations=added, errors=errors)
             added = 0
@@ -143,4 +149,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

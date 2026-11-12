@@ -9,3 +9,12 @@ A simpler comparison used standardized ridge regression, an unpenalized intercep
 Artifacts are under runtime/m5-xgboost-hourly-20261112 and runtime/m5-ridge-hourly-20261112. Each has a protocol, summary and verified model checkpoints. The ridge summary SHA-256 over its canonical content is 23a70eaf5b4853563d35dc4b7057f088bc89855b66480143891ca4b89ed7eab5. The XGBoost summary links the native weights and each individual result. Both runs use full virtual notional in the existing simulator, which differs from the frozen SOL forward shadow's 25% allocation. Neither model family qualified for promotion. The requested 1% hourly profit remains unverified.
 
 The models ran locally without paid calls. The recorded market data and native weights remain on the local runtime disk.
+
+
+## Volatility diagnostic and durable depth history
+
+A fixed filter admitted decisions when completed two-hour volatility reached the training period's 75th percentile. With the same saved XGBoost weights and cost threshold, the share of DEVELOPMENT decision rows with enough gross movement to cover modeled costs rose from 3,771/10,194 to 1,157/2,065. These one-hour outcome rows overlap. Directional results remained weak. Five of six filtered runs lost and the only positive run returned 0.01924% over its full development period with five trades. The minimum was eight. FINAL stayed closed. Receipt 965d39d95ce85be768471751ccc41415174fe756b86b9cf33e9286b2a13e4d6d is in runtime/m5-hourly-volatility-gate-20261112.
+
+The public depth collector now retains five-minute features beyond its three-day raw retention. Each archived window includes observed bucket count, first and last epochs, snapshot and generation counts, mid prices, spread, imbalance and its last source identity. The collector writes completed windows after a one-minute settling delay and resumes by market and window across restarts. Coverage fields allow later research to exclude sparse or disconnected windows. The archive uses the existing SQLite database and public collector.
+
+A live-tape backup produced 144 archived windows across BTC, ETH and SOL. The repeated pass inserted zero duplicates. Twenty-five focused tests passed, including retention and restart regression coverage.

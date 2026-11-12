@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import json
 from pathlib import Path
 import sqlite3
 
@@ -11,6 +12,8 @@ from ..integrations.whitebit_public import _symbol
 
 
 SCHEMA = "autotrade-whitebit-depth-feature-tape-v1"
+ARCHIVE_WINDOW_SECONDS = 300
+ARCHIVE_SETTLE_SECONDS = 60
 
 
 class WhiteBitDepthTapeStore:
@@ -39,6 +42,9 @@ class WhiteBitDepthTapeStore:
           PRIMARY KEY(market,bucket_epoch)) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS depth_bucket_epoch ON buckets(bucket_epoch);
         CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS archived_windows(
+          market TEXT NOT NULL,window_epoch INTEGER NOT NULL,features_json TEXT NOT NULL,
+          PRIMARY KEY(market,window_epoch)) WITHOUT ROWID;
         """)
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(buckets)")}
         if "order_flow_imbalance" not in columns:
@@ -78,6 +84,58 @@ class WhiteBitDepthTapeStore:
             self.connection.execute("INSERT OR REPLACE INTO buckets VALUES("+",".join("?" for _ in values)+")",values)
             cutoff=bucket-self.retention_days*86400
             self.connection.execute("DELETE FROM buckets WHERE bucket_epoch<?",(cutoff,))
+
+    def archive_completed_windows(self, markets: tuple[str, ...], *, now_epoch: int) -> int:
+        """Keep compact features after the raw one-second tape expires.
+
+        Wait one minute after a window closes. Store observation coverage and
+        connection generations so replay can recognize sparse windows and
+        reconnects. This is feature evidence, without inferred executable fills.
+        """
+        if type(now_epoch) is not int or now_epoch < 0:
+            raise ValueError("archive clock must be a non-negative epoch")
+        size = ARCHIVE_WINDOW_SECONDS
+        cutoff = (now_epoch - ARCHIVE_SETTLE_SECONDS) // size * size
+        added = 0
+        with self.connection:
+            for market in markets:
+                market = _symbol(market)
+                (last,) = self.connection.execute(
+                    "SELECT MAX(window_epoch) FROM archived_windows WHERE market=?", (market,)
+                ).fetchone()
+                start = 0 if last is None else last + size
+                windows = self.connection.execute("""
+                    SELECT (bucket_epoch / ?) * ? AS window_epoch, COUNT(*) AS buckets,
+                           MIN(bucket_epoch) AS first_epoch, MAX(bucket_epoch) AS last_epoch,
+                           SUM(snapshot_count) AS snapshots, COUNT(DISTINCT generation) AS generations,
+                           AVG(CAST(imbalance_top5 AS REAL)) AS mean_imbalance,
+                           AVG(CAST(max_spread_bps AS REAL)) AS mean_max_spread_bps,
+                           SUM(CAST(order_flow_imbalance AS REAL)) AS order_flow_imbalance,
+                           MAX(received_at) AS last_received_at
+                    FROM buckets WHERE market=? AND bucket_epoch>=? AND bucket_epoch<?
+                    GROUP BY window_epoch ORDER BY window_epoch
+                """, (size, size, market, start, cutoff))
+                for window, count, first, end, snapshots, generations, imbalance, spread, ofi, received in windows:
+                    open_mid, close_mid, source = self.connection.execute("""
+                        SELECT (SELECT open_mid FROM buckets WHERE market=? AND bucket_epoch=?),
+                               close_mid, source_sha256
+                        FROM buckets WHERE market=? AND bucket_epoch=?
+                    """, (market, first, market, end)).fetchone()
+                    features = {
+                        "window_seconds": size, "source_bucket_seconds": self.bucket_seconds,
+                        "observed_buckets": count, "first_bucket_epoch": first,
+                        "last_bucket_epoch": end, "snapshot_count": snapshots,
+                        "generation_count": generations, "last_received_at": received,
+                        "open_mid": open_mid, "close_mid": close_mid,
+                        "mean_imbalance": imbalance, "mean_max_spread_bps": spread,
+                        "order_flow_imbalance": ofi, "last_source_sha256": source,
+                    }
+                    self.connection.execute(
+                        "INSERT INTO archived_windows VALUES(?,?,?)",
+                        (market, window, json.dumps(features, sort_keys=True,
+                                                  separators=(",", ":"), allow_nan=False)))
+                    added += 1
+        return added
 
     def status(self) -> dict:
         count,first,last=self.connection.execute(
@@ -147,5 +205,4 @@ class WhiteBitDepthTapeStore:
             "directional_mean_score": format(mean_score, "f"),
             "directional_persistence": format(persistence, "f"),
             "latest_bucket_epoch": rows[-1][0]}
-
 

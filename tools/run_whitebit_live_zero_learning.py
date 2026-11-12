@@ -58,7 +58,8 @@ def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
         max_observation_gap_seconds: int = 180, min_evaluation_trades: int = 3,
         outcome_horizon_seconds: int = 0,
         signal_lookback_seconds: int = 0,
-        short_carry_bps_per_day: str = "2") -> dict:
+        short_carry_bps_per_day: str = "2",
+        feature_mode: str = "MID_MOMENTUM") -> dict:
     if (isinstance(interval_seconds, bool) or not isinstance(interval_seconds, (int, float))
             or not 0.1 <= float(interval_seconds) <= 3600):
         raise ValueError("poll interval must be 0.1..3600 seconds")
@@ -77,7 +78,8 @@ def run(*, supervisor_state_dir: Path, state_dir: Path, interval_seconds: float,
             min_evaluation_trades=min_evaluation_trades,
             outcome_horizon_seconds=outcome_horizon_seconds,
             signal_lookback_seconds=signal_lookback_seconds,
-            short_carry_bps_per_day=short_carry_bps_per_day)
+            short_carry_bps_per_day=short_carry_bps_per_day,
+            feature_mode=feature_mode)
         while not stop.is_set():
             if stop_file is not None and stop_file.is_file():
                 stop.set()
@@ -134,6 +136,8 @@ def main(argv=None) -> int:
     parser.add_argument("--outcome-horizon-seconds", type=int, default=0)
     parser.add_argument("--signal-lookback-seconds", type=int, default=0)
     parser.add_argument("--short-carry-bps-per-day", default="2")
+    parser.add_argument("--feature-mode", choices=("MID_MOMENTUM", "TOP_BOOK_IMBALANCE"),
+                        default="MID_MOMENTUM")
     parser.add_argument("--stop-file")
     args = parser.parse_args(argv)
     stop = Event()
@@ -158,6 +162,7 @@ def main(argv=None) -> int:
             outcome_horizon_seconds=args.outcome_horizon_seconds,
             signal_lookback_seconds=args.signal_lookback_seconds,
             short_carry_bps_per_day=args.short_carry_bps_per_day,
+            feature_mode=args.feature_mode,
         )
         print(json.dumps(result, sort_keys=True, ensure_ascii=False, indent=2))
         return 0
@@ -168,3 +173,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

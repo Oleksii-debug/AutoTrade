@@ -168,6 +168,17 @@ class AlphaEconomicDurableTests(unittest.TestCase):
             self.assertTrue(proposal["same_holdout_reuse_for_selection_prohibited"])
             self.assertTrue(proposal["engineer_review_required"])
             self.assertTrue(proposal["proposal_version"].startswith("sha256:"))
+            calibrated, calibrated_reused = evaluate(
+                alpha_state_dir=alpha_state, job_id=job["job_id"],
+                manifest_path=manifest, evaluation_state_dir=root / "calibrated-economic",
+                minimum_trades=1, maximum_drawdown_ratio="0.50",
+                calibration_alphas=("0.1", "0.2", "0.3", "0.4"))
+            self.assertFalse(calibrated_reused)
+            selection = calibrated["models"]["DLINEAR"]["calibration_policy_selection"]
+            self.assertEqual(selection["partition"], "CALIBRATION_ONLY")
+            self.assertEqual(selection["candidate_count"], 4)
+            self.assertFalse(selection["holdout_used_for_selection"])
+            self.assertIn(selection["selected_alpha"], {"0.1", "0.2", "0.3", "0.4"})
             self.assertEqual({"request.json", "trace.json", "result.json", "receipt.json"},
                              {path.name for path in directory.iterdir()})
             trace = json.loads((directory / "trace.json").read_text(encoding="utf-8"))

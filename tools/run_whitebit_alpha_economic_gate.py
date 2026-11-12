@@ -13,6 +13,7 @@ import csv
 from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
+from math import ceil
 import os
 from pathlib import Path
 import sys
@@ -140,7 +141,7 @@ def _drawdown(peak: Decimal, equity: Decimal) -> Decimal:
 def _simulate(
     *, name: str, predictions: np.ndarray, radius: Decimal, split: dict,
     source, costs, rows: list[dict[str, object]], minimum_trades: int,
-    maximum_drawdown: Decimal,
+    maximum_drawdown: Decimal, decision_indices: np.ndarray | None = None,
 ) -> tuple[dict, list[dict]]:
     """Replay one frozen forecast with non-overlapping long/short trades."""
     if predictions.shape != split["y"].shape or not np.isfinite(predictions).all():
@@ -165,7 +166,11 @@ def _simulate(
     trace: list[dict] = []
     available_to_bar = {int(value): index for index, value in enumerate(source.available_at_ms)}
     horizon = int(split["horizon"])
-    for sample_index in split["holdout"].tolist():
+    indices = split["holdout"] if decision_indices is None else decision_indices
+    if (not isinstance(indices, np.ndarray) or indices.ndim != 1
+            or indices.dtype.kind not in "iu" or len(indices) == 0):
+        raise AlphaInputError("economic replay decision partition is invalid")
+    for sample_index in indices.tolist():
         decision_ms = int(split["decision_times"][sample_index])
         if decision_ms not in available_to_bar:
             raise AlphaInputError("holdout decision is not in the authenticated series")
@@ -302,7 +307,7 @@ def _simulate(
         "net_pnl_after_costs_quote": _text(net_pnl),
         "net_return_ratio": _text(net_pnl / starting),
         "maximum_drawdown_ratio": _text(maximum_observed_drawdown),
-        "decision_count": len(split["holdout"]), "signal_count": signals,
+        "decision_count": len(indices), "signal_count": signals,
         "executed_trade_count": trades, "winning_trade_count": wins,
         "long_trade_count": long_trades, "short_trade_count": short_trades,
         "skipped_overlapping_signal_count": skipped_overlap,
@@ -479,6 +484,7 @@ def evaluate(
     *, alpha_state_dir: Path, job_id: str, manifest_path: Path,
     evaluation_state_dir: Path, minimum_trades: int = 5,
     maximum_drawdown_ratio: str = "0.10",
+    calibration_alphas: tuple[str, ...] = ("0.1",),
 ) -> tuple[dict, bool]:
     if type(job_id) is not str or not 1 <= len(job_id) <= 128:
         raise AlphaInputError("bounded job id required")
@@ -487,6 +493,14 @@ def evaluate(
     maximum_drawdown = _decimal(maximum_drawdown_ratio, "maximum drawdown")
     if maximum_drawdown > Decimal(1):
         raise AlphaInputError("maximum drawdown cannot exceed one")
+    if (type(calibration_alphas) is not tuple or not 1 <= len(calibration_alphas) <= 4
+            or len(set(calibration_alphas)) != len(calibration_alphas)):
+        raise AlphaInputError("calibration alpha grid must contain 1..4 unique values")
+    parsed_alphas = tuple(_decimal(value, "calibration alpha")
+                          for value in calibration_alphas)
+    if any(value < Decimal("0.05") or value > Decimal("0.4")
+           for value in parsed_alphas):
+        raise AlphaInputError("calibration alpha must be 0.05..0.4")
     worker = _durable_worker(alpha_state_dir)
     verified_result = worker.run(job_id)
     job = worker.jobs.get(job_id)
@@ -512,6 +526,7 @@ def evaluate(
         "training": request["training"], "costs": request["payload"]["costs"],
         "policy": {"minimum_trades": minimum_trades,
                    "maximum_drawdown_ratio": _text(maximum_drawdown),
+                   "calibration_alphas": [_text(value) for value in parsed_alphas],
                    "signal": "LOWER_CALIBRATED_BOUND_EXCEEDS_ALL_IN_COST",
                    "execution": "FIRST_ARCHIVE_OPEN_STRICTLY_AFTER_DECISION"},
         "implementation_sha256": implementation_sha,
@@ -544,11 +559,63 @@ def evaluate(
         model_report = packet["forecast"]["models"].get(name)
         if type(model_report) is not dict:
             raise AlphaInputError("frozen packet lacks model calibration evidence")
+        selected_radius = _decimal(
+            model_report["empirical_calibration_radius"], "calibration radius")
+        calibration_selection = None
+        calibration_passed = True
+        if len(parsed_alphas) > 1:
+            calibration_rows = []
+            residuals = np.abs(split["y"][split["calibration"]]
+                               - prediction[split["calibration"]])
+            for alpha in parsed_alphas:
+                rank = ceil((len(residuals) + 1) * (1 - float(alpha)))
+                if rank > len(residuals):
+                    raise AlphaInputError("too few calibration observations")
+                radius = Decimal(format(float(np.partition(
+                    residuals, rank - 1)[rank - 1]), ".17g"))
+                candidate, _ = _simulate(
+                    name=name, predictions=prediction, radius=radius,
+                    split=split, source=source, costs=costs, rows=rows,
+                    minimum_trades=minimum_trades,
+                    maximum_drawdown=maximum_drawdown,
+                    decision_indices=split["calibration"],
+                )
+                calibration_rows.append({
+                    "alpha": _text(alpha), "radius": _text(radius),
+                    "executed_trade_count": candidate["executed_trade_count"],
+                    "net_pnl_after_costs_quote": candidate["net_pnl_after_costs_quote"],
+                    "maximum_drawdown_ratio": candidate["maximum_drawdown_ratio"],
+                    "eligible": candidate["research_gate_passed"],
+                })
+            eligible = [row for row in calibration_rows if row["eligible"]]
+            calibration_passed = bool(eligible)
+            if eligible:
+                selected = max(eligible, key=lambda row: (
+                    Decimal(row["net_pnl_after_costs_quote"]),
+                    -Decimal(row["maximum_drawdown_ratio"]),
+                    -Decimal(row["alpha"])))
+                selected_radius = Decimal(selected["radius"])
+            else:
+                selected = calibration_rows[0]
+            calibration_selection = {
+                "partition": "CALIBRATION_ONLY",
+                "candidate_count": len(calibration_rows),
+                "candidates": calibration_rows,
+                "selected_alpha": selected["alpha"],
+                "selected_radius": selected["radius"],
+                "selection_passed": calibration_passed,
+                "holdout_used_for_selection": False,
+            }
         report, trace = _simulate(
             name=name, predictions=prediction,
-            radius=_decimal(model_report["empirical_calibration_radius"], "calibration radius"),
+            radius=selected_radius,
             split=split, source=source, costs=costs, rows=rows,
             minimum_trades=minimum_trades, maximum_drawdown=maximum_drawdown)
+        report["calibration_policy_selection"] = calibration_selection
+        if not calibration_passed:
+            report["research_gate_passed"] = False
+            report["rejection_reasons"].append(
+                "NO_CALIBRATION_POLICY_POSITIVE_AFTER_COSTS")
         beat_buy_hold = Decimal(report["final_equity_quote"]) > benchmark_equity
         report["beat_strict_buy_hold_after_costs"] = beat_buy_hold
         if not beat_buy_hold:

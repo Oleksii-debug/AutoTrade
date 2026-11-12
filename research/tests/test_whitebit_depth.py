@@ -28,6 +28,7 @@ def test_snapshot_and_causal_delta_build_book():
     first=parse_depth_message(frame(),market="BTC_USDT",received_at=NOW)
     observed=book.apply(first,generation=1)
     assert observed.imbalance_top5=="0.2"
+    assert (observed.bid_quantity, observed.ask_quantity) == ("3", "2")
     delta=parse_depth_message(frame(False,10,11),market="BTC_USDT",received_at=NOW)
     observed=book.apply(delta,generation=1)
     assert observed.update_id==11
@@ -73,6 +74,32 @@ def test_depth_tape_is_restart_safe_and_public_only(tmp_path):
     assert status["market_bucket_counts"] == {"BTC_USDT": 1}
     assert status["public_data_only"] is True
     assert status["trading_authority"] is False
+
+
+def test_execution_bbo_retains_exact_latest_prices_and_sizes(tmp_path):
+    path = tmp_path / "exact.sqlite3"
+    book = DepthLocalBook("BTC_USDT", limit=5)
+    initial = book.apply(parse_depth_message(frame(), market="BTC_USDT", received_at=NOW),
+                         generation=1)
+    store = WhiteBitDepthTapeStore(path)
+    store.ingest(replace(initial, bid_quantity=None, ask_quantity=None))
+    assert store.connection.execute("SELECT COUNT(*) FROM execution_bbo").fetchone() == (0,)
+    store.ingest(initial)
+    update = json.loads(frame(False, 10, 11))
+    update["params"][1]["asks"] = [["101", "0"], ["102", "4"]]
+    second = book.apply(parse_depth_message(json.dumps(update), market="BTC_USDT",
+        received_at=NOW + timedelta(milliseconds=500)), generation=1)
+    store.ingest(second)
+    store.close()
+    reopened = WhiteBitDepthTapeStore(path)
+    row = reopened.connection.execute(
+        "SELECT bid_price,ask_price,bid_quantity,ask_quantity,update_id,source_sha256 FROM execution_bbo"
+    ).fetchone()
+    assert row == ("99", "102", "3", "4", 11, second.source_sha256)
+    reopened.ingest(replace(second, received_at=NOW + timedelta(days=1, seconds=1)))
+    assert reopened.connection.execute("SELECT COUNT(*) FROM execution_bbo").fetchone() == (1,)
+    assert reopened.status()["bucket_count"] == 2
+    reopened.close()
 
 
 def test_causal_ofi_uses_best_quote_transition():

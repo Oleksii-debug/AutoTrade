@@ -71,6 +71,8 @@ class DepthBookObservation:
     ask_quantity_change: str
     order_flow_imbalance: str
     source_sha256: str
+    bid_quantity: str | None = None
+    ask_quantity: str | None = None
 
 
 def _levels(value: object, side: str) -> tuple[tuple[str, str], ...]:
@@ -224,7 +226,8 @@ class DepthLocalBook:
             format((ask - bid) / mid * Decimal(10000), "f"),
             format(bid_depth, "f"), format(ask_depth, "f"), format(imbalance, "f"),
             format(bid_change, "f"), format(ask_change, "f"),
-            format(order_flow_imbalance, "f"), update.digest)
+            format(order_flow_imbalance, "f"), update.digest,
+            bid_quantity=format(bid_quantity, "f"), ask_quantity=format(ask_quantity, "f"))
 
 
 class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):

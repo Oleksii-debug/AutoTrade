@@ -8,6 +8,7 @@ spread and slippage.  It is research-only and cannot place an order.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import UTC, timedelta
 from decimal import Decimal, ROUND_DOWN, localcontext
 from hashlib import sha256
 import json
@@ -18,11 +19,28 @@ from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 
 VERSION = "technical-confluence-futures-v1"
 CANDIDATES = ("CASH", "HOLD_LONG", "HOLD_SHORT", "TECHNICAL_CONFLUENCE")
+DAILY_RETURN_TARGETS = (Decimal("0.05"), Decimal("0.10"), Decimal("0.20"))
 
 
 def digest(value) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                              allow_nan=False).encode()).hexdigest()
+
+
+def summarize_daily_returns(returns: list[Decimal]) -> dict:
+    """Summarize full UTC days, including days without a position."""
+    return {
+        "complete_utc_days": len(returns),
+        "positive_days": sum(value > 0 for value in returns),
+        "negative_days": sum(value < 0 for value in returns),
+        "best_day_fraction": str(max(returns)) if returns else None,
+        "worst_day_fraction": str(min(returns)) if returns else None,
+        "average_day_fraction": str(sum(returns) / len(returns)) if returns else None,
+        "target_hit_days": {
+            str(target): sum(value >= target for value in returns)
+            for target in DAILY_RETURN_TARGETS
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -215,7 +233,8 @@ def technical_signal(history: list[dict],
 
 def simulate(bars: list[dict], *, candidate: str,
              costs: TechnicalCosts = TechnicalCosts(),
-             configuration: TechnicalConfiguration = TechnicalConfiguration()) -> dict:
+             configuration: TechnicalConfiguration = TechnicalConfiguration(),
+             report_daily_returns: bool = False) -> dict:
     """Run one partition with causal next-open perpetual-futures fills."""
     validate_bars(bars, require_ohlcv=True)
     costs.validate(); configuration.validate()
@@ -241,6 +260,27 @@ def simulate(bars: list[dict], *, candidate: str,
         exit_reasons: dict[str, int] = {}
         entries_by_day: dict[str, int] = {}
         evidence = sha256()
+        daily_returns: list[Decimal] = []
+        midnight = bars[0]["opened_at"].astimezone(UTC)
+        daily_baseline = (
+            (midnight, initial) if midnight == midnight.replace(
+                hour=0, minute=0, second=0, microsecond=0) else None)
+
+        def record_midnight(at, reference: Decimal) -> None:
+            nonlocal daily_baseline
+            at = at.astimezone(UTC)
+            if at != at.replace(hour=0, minute=0, second=0, microsecond=0):
+                return
+            equity = balance
+            if quantity:
+                exit_price = reference * (1 - adverse if quantity > 0 else 1 + adverse)
+                equity += quantity * (exit_price - entry_price)
+                equity -= abs(quantity) * exit_price * fee_ratio
+            if daily_baseline is not None:
+                previous_at, previous_equity = daily_baseline
+                if at - previous_at == timedelta(days=1) and previous_equity > 0:
+                    daily_returns.append((equity - previous_equity) / previous_equity)
+            daily_baseline = (at, equity)
 
         def mark(price: Decimal) -> Decimal:
             nonlocal peak, max_drawdown
@@ -329,6 +369,8 @@ def simulate(bars: list[dict], *, candidate: str,
                     raise ValueError("bar duration is outside the funding-cost envelope")
                 carry = abs(quantity) * close * funding_day * seconds / Decimal(86400)
                 balance -= carry; funding += carry; mark(close)
+            if report_daily_returns:
+                record_midnight(bar["closed_at"], close)
             history.append(bar)
             features = _features(history, configuration)
             if candidate != "TECHNICAL_CONFLUENCE" or features is None:
@@ -363,7 +405,7 @@ def simulate(bars: list[dict], *, candidate: str,
             execute(0, decimal(bars[-1]["close"]), "PARTITION_END_EXIT",
                     bars[-1]["closed_at"].isoformat())
         final = balance
-        return {
+        result = {
             "candidate": candidate, "configuration": asdict(configuration),
             "costs": asdict(costs), "round_trip_cost_bps": str(costs.round_trip_bps),
             "initial_equity": str(initial), "final_equity": str(final),
@@ -377,3 +419,6 @@ def simulate(bars: list[dict], *, candidate: str,
             "exit_reasons": exit_reasons, "evidence_sha256": evidence.hexdigest(),
             "network_orders": False, "trading_authority": False,
         }
+        if report_daily_returns:
+            result["daily_returns"] = summarize_daily_returns(daily_returns)
+        return result

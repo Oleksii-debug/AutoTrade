@@ -98,8 +98,7 @@ def collect_market_context(*, now: datetime | None = None,
                            fetch: Callable[[str], bytes] = _read,
                            macro_blackout_minutes: int = 90) -> dict:
     """Collect one point-in-time context record and return ALLOW or BLOCK."""
-    observed = now or datetime.now(timezone.utc)
-    if type(observed) is not datetime or observed.tzinfo != timezone.utc:
+    if now is not None and (type(now) is not datetime or now.tzinfo != timezone.utc):
         raise MarketContextError("UTC_TIMESTAMP_REQUIRED")
     if not 15 <= macro_blackout_minutes <= 360:
         raise MarketContextError("INVALID_MACRO_BLACKOUT")
@@ -113,6 +112,7 @@ def collect_market_context(*, now: datetime | None = None,
             payloads[name] = fetch(url)
         except (MarketContextError, OSError, TimeoutError, ValueError, TypeError) as exc:
             failures.append(f"{name.upper()}_{type(exc).__name__.upper()}")
+    observed = now or datetime.now(timezone.utc)
     reasons = list(failures)
     details: dict[str, object] = {}
     if not failures:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
@@ -36,13 +37,15 @@ from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurat
 SCHEMA = "autotrade-whitebit-subhour-forward-shadow-v1"
 MARKET = "SOL_PERP"
 STEP_SECONDS = 900
+MAX_ENTRY_DELAY = timedelta(seconds=90)
 PROSPECTIVE_WAVE_CYCLES = 5
 MAX_DECISION_JOURNAL_BYTES = 16 * 1024 * 1024
 
 
 def _bars(client: WhiteBitPublicClient, now: datetime, limit: int = 250) -> list[dict]:
-    latest = int(now.timestamp()) // STEP_SECONDS * STEP_SECONDS - STEP_SECONDS
-    batch = client.klines(MARKET, interval="15m", end=latest, limit=limit, training=True)
+    # WhiteBIT's end boundary is exclusive at the aligned candle open.
+    boundary = int(now.timestamp()) // STEP_SECONDS * STEP_SECONDS
+    batch = client.klines(MARKET, interval="15m", end=boundary, limit=limit, training=True)
     result = []
     for row in batch.candles:
         result.append({"opened_at": row.open_time,
@@ -51,6 +54,8 @@ def _bars(client: WhiteBitPublicClient, now: datetime, limit: int = 250) -> list
             "close": row.close, "volume": row.base_volume})
     if len(result) < 100:
         raise ValueError("INSUFFICIENT_LIVE_TECHNICAL_HISTORY")
+    if int(result[-1]["closed_at"].timestamp()) != boundary:
+        raise PublicDataError("LATEST_COMPLETED_CANDLE_NOT_AVAILABLE")
     return result
 
 
@@ -115,6 +120,34 @@ def _hold(state: dict, reason: str) -> None:
     state["holds"][reason] = state["holds"].get(reason, 0) + 1
 
 
+def _review_wave(state: dict) -> None:
+    cycles = state["closed_cycles"]
+    if cycles % PROSPECTIVE_WAVE_CYCLES:
+        return
+    episodes = state["episodes"][-PROSPECTIVE_WAVE_CYCLES:]
+    if len(episodes) != PROSPECTIVE_WAVE_CYCLES:
+        return
+    outcomes = [Decimal(item["net_pnl"]) for item in episodes]
+    total = sum(outcomes)
+    exit_counts: dict[str, int] = {}
+    for episode in episodes:
+        reason = episode.get("exit_reason", "UNKNOWN")
+        exit_counts[reason] = exit_counts.get(reason, 0) + 1
+    state["wave_analysis"] = {
+        "wave_number": cycles // PROSPECTIVE_WAVE_CYCLES,
+        "closed_through_cycle": cycles,
+        "status": "POSITIVE_AFTER_COSTS" if total > 0 else "NOT_POSITIVE_AFTER_COSTS",
+        "closed_cycles": len(episodes),
+        "positive_cycles": sum(outcome > 0 for outcome in outcomes),
+        "net_pnl": str(total),
+        "best_episode_net_pnl": str(max(outcomes)),
+        "worst_episode_net_pnl": str(min(outcomes)),
+        "exit_reasons": exit_counts,
+        "strategy_mutated": False,
+        "next_action": "CONTINUE_FROZEN_SHADOW_ON_NEXT_COMPLETED_BAR",
+    }
+
+
 def _append_decision(path: Path, value: dict) -> None:
     """Append one bounded decision record and retain one rotated predecessor."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,21 +171,26 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
     bar = history[-1]; epoch = int(bar["opened_at"].timestamp())
     if epoch <= state["last_bar_open_epoch"]:
         return state
-    if epoch != state["last_bar_open_epoch"] + STEP_SECONDS:
-        _hold(state, "BAR_GAP_REANCHORED")
-        state["last_bar_open_epoch"] = epoch
-        return state
+    gap = epoch != state["last_bar_open_epoch"] + STEP_SECONDS
+    position = state["position"]
     state["last_bar_open_epoch"] = epoch
     state["technical_analyses"] += 1; state["news_analyses"] += 1
-    state["l2_analyses"] += 1
-    position = state["position"]
+    state["l2_analyses"] += int(l2.get("status") != "NOT_REQUESTED")
+    state.pop("last_pretrade_thesis", None)
+    signal = technical_signal(history, config)
+    state["last_technical_signal"] = signal
+    if gap and position is None:
+        _hold(state, "BAR_GAP_REANCHORED")
+        return state
     if position is not None:
         position["holding_bars"] += 1
         close = Decimal(bar["close"]); entry = Decimal(position["entry_price"])
         direction = Decimal(position["direction"])
         move = (close - entry) * direction
         atr = Decimal(position["entry_atr"]); reason = None
-        if position["holding_bars"] >= config.maximum_hold_bars:
+        if gap:
+            reason = "DATA_GAP_RECOVERY_EXIT"
+        elif position["holding_bars"] >= config.maximum_hold_bars:
             reason = "MAX_HOLD_EXIT"
         elif position["holding_bars"] >= config.minimum_hold_bars:
             if move <= -Decimal(config.stop_atr) * atr:
@@ -160,7 +198,7 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
             elif move >= Decimal(config.take_profit_atr) * atr:
                 reason = "ATR_TAKE_PROFIT_EXIT"
             else:
-                features = technical_signal(history, config)["features"]
+                features = signal["features"]
                 middle = Decimal(features["band_mid"])
                 if (direction > 0 and close >= middle) or (direction < 0 and close <= middle):
                     reason = "BOLLINGER_MEAN_EXIT"
@@ -174,7 +212,12 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
                 position["opened_at"])).total_seconds())))
             funding = (abs(quantity) * fill * Decimal(costs.funding_bps_per_day)
                        / Decimal(10000) * elapsed / Decimal(86400))
-            balance = Decimal(state["balance"]) + quantity * (fill - entry) - fee - funding
+            prior_balance = Decimal(state["balance"])
+            balance = prior_balance + quantity * (fill - entry) - fee - funding
+            starting_equity = position.get("starting_equity")
+            if starting_equity is None:
+                entry_fee = abs(quantity) * entry * Decimal(costs.fee_bps_per_fill) / Decimal(10000)
+                starting_equity = prior_balance + entry_fee
             state["balance"] = format(balance, "f")
             state["fees"] = format(Decimal(state["fees"]) + fee, "f")
             state["funding"] = format(Decimal(state["funding"]) + funding, "f")
@@ -184,27 +227,17 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
                 "closed_at": now.isoformat(), "direction": int(direction),
                 "entry_price": position["entry_price"], "exit_price": format(fill, "f"),
                 "exit_reason": reason, "net_equity": state["balance"],
-                "net_pnl": format(balance - Decimal(position["starting_equity"]), "f"),
+                "net_pnl": format(balance - Decimal(starting_equity), "f"),
+                "holding_seconds": int(elapsed),
                 "technical_configuration_frozen": True}
             state["last_episode"] = episode
             state["episodes"].append(episode)
+            state["episodes"] = state["episodes"][-PROSPECTIVE_WAVE_CYCLES:]
             state["position"] = None
-            if state["closed_cycles"] >= PROSPECTIVE_WAVE_CYCLES:
-                positive = sum(Decimal(item["net_pnl"]) > 0 for item in state["episodes"])
-                state["wave_analysis"] = {
-                    "status": "POSITIVE_AFTER_COSTS" if Decimal(state["net_pnl"]) > 0
-                              else "NOT_POSITIVE_AFTER_COSTS",
-                    "closed_cycles": state["closed_cycles"],
-                    "positive_cycles": positive,
-                    "net_pnl": state["net_pnl"],
-                    "strategy_mutated": False,
-                    "next_action": "INDEPENDENT_REVIEW_BEFORE_ANY_NEW_WAVE",
-                }
+            _review_wave(state)
         return state
-    signal = technical_signal(history, config)
-    state["last_technical_signal"] = signal
-    if state["closed_cycles"] >= PROSPECTIVE_WAVE_CYCLES:
-        _hold(state, "PROSPECTIVE_WAVE_COMPLETE")
+    if not timedelta(0) <= now - bar["closed_at"] <= MAX_ENTRY_DELAY:
+        _hold(state, "COMPLETED_CANDLE_OUTSIDE_ENTRY_WINDOW")
         return state
     day = now.date().isoformat()
     if state["entries_by_utc_day"].get(day, 0) >= config.maximum_entries_per_utc_day:
@@ -272,37 +305,48 @@ def main(argv=None) -> int:
     while not stop.exists():
         now = datetime.now(UTC); started = monotonic(); error = None
         try:
-            history = _bars(client, now)
+            expected_epoch = int(now.timestamp()) // STEP_SECONDS * STEP_SECONDS - STEP_SECONDS
             if state is None:
+                history = _bars(client, now)
                 state = _initial(int(history[-1]["opened_at"].timestamp()), now)
                 status = "OBSERVING_FROM_NEXT_COMPLETED_BAR"
-            elif int(history[-1]["opened_at"].timestamp()) > state["last_bar_open_epoch"]:
+            elif expected_epoch > state["last_bar_open_epoch"]:
+                history = _bars(client, now)
                 previous_epoch = state["last_bar_open_epoch"]
-                quote = _quote(client)
                 try:
-                    news = collect_market_context(now=now)
+                    news = collect_market_context()
                 except (MarketContextError, ValueError, TypeError) as exc:
                     news = {"decision": "BLOCK", "reasons": [type(exc).__name__],
                         "evidence_sha256": "UNAVAILABLE", "trading_authority": False}
+                quote = _quote(client)
+                now = datetime.now(UTC)
                 direction = technical_signal(history, configurations()[0])["direction"]
                 l2 = (_l2_confirmation(args.depth_database, "LONG" if direction >= 0 else "SHORT",
                                         int(now.timestamp())) if direction else
                       {"status": "NOT_REQUESTED", "reasons": ["NO_TECHNICAL_SETUP"]})
-                state = process_completed_bar(state, history, quote=quote, news=news,
+                prior_cycles = state["closed_cycles"]
+                next_state = process_completed_bar(deepcopy(state), history, quote=quote, news=news,
                     l2=l2, now=now)
-                state["last_news_context"] = news; state["last_l2_context"] = l2
+                next_state["last_news_context"] = news
+                next_state["last_l2_context"] = l2
+                closed = next_state["closed_cycles"]
+                review = next_state.get("wave_analysis")
                 _append_decision(state_dir / "decisions.jsonl", {
                     "schema": SCHEMA, "observed_at": now.isoformat(),
                     "previous_bar_open_epoch": previous_epoch,
-                    "processed_bar_open_epoch": state["last_bar_open_epoch"],
-                    "technical": state.get("last_technical_signal"),
+                    "processed_bar_open_epoch": next_state["last_bar_open_epoch"],
+                    "technical": next_state.get("last_technical_signal"),
                     "news": news, "l2": l2,
-                    "pretrade": state.get("last_pretrade_thesis"),
-                    "position_open": state["position"] is not None,
-                    "closed_cycles": state["closed_cycles"],
-                    "net_pnl": state["net_pnl"],
+                    "pretrade": next_state.get("last_pretrade_thesis"),
+                    "position_open": next_state["position"] is not None,
+                    "closed_cycles": closed,
+                    "episode": next_state.get("last_episode") if closed > prior_cycles else None,
+                    "wave_analysis": (review if closed > prior_cycles and review
+                                      and review.get("closed_through_cycle") == closed else None),
+                    "net_pnl": next_state["net_pnl"],
                     "network_orders": False, "trading_authority": False,
                 })
+                state = next_state
                 status = "RUNNING"
             else:
                 status = "WAITING_FOR_COMPLETED_15M_BAR"

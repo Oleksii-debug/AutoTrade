@@ -26,6 +26,7 @@ SCHEMA = "autotrade-whitebit-rolling-native-alpha-v1"
 MARKETS = ("BTC_USDT", "ETH_USDT", "SOL_USDT")
 INTERVAL_SECONDS = 3600
 FUNDING_BORROW_BPS_PER_HOUR = "0.083333333333333333"
+CALIBRATION_ALPHAS = ("0.1", "0.2", "0.3", "0.4")
 
 
 def completed_window(now: datetime, bars: int) -> tuple[int, int]:
@@ -54,6 +55,11 @@ def compact_evaluation(result: dict) -> dict:
             "short_trade_count", "winning_trade_count", "net_pnl_after_costs_quote",
             "net_return_ratio", "maximum_drawdown_ratio", "research_gate_passed",
             "rejection_reasons")}
+        selection = report.get("calibration_policy_selection")
+        projected[name]["calibration_selected_alpha"] = (
+            selection.get("selected_alpha") if type(selection) is dict else None)
+        projected[name]["calibration_selection_passed"] = (
+            selection.get("selection_passed") if type(selection) is dict else None)
     return {
         "market": result.get("market"),
         "evaluation_id": result.get("evaluation_id"),
@@ -97,6 +103,7 @@ def run_cycle(*, state_dir: Path, bars: int, steps: int, now: datetime) -> dict:
             manifest_path=manifest_path,
             evaluation_state_dir=evaluation_root / market.lower(),
             minimum_trades=5, maximum_drawdown_ratio="0.10",
+            calibration_alphas=CALIBRATION_ALPHAS,
         )
         reports[market] = {
             "job_id": job["job_id"], "job_created": created,

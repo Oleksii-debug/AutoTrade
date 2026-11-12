@@ -23,10 +23,15 @@ class RollingAlphaSupervisorTests(unittest.TestCase):
                 "winning_trade_count": 1, "net_pnl_after_costs_quote": "1.2",
                 "net_return_ratio": "0.0012", "maximum_drawdown_ratio": "0.01",
                 "research_gate_passed": False, "rejection_reasons": ["TEST"],
+                "calibration_policy_selection": {
+                    "selected_alpha": "0.3", "selection_passed": True,
+                },
                 "private": "excluded",
             }},
         })
         self.assertEqual(value["models"]["XGBOOST"]["short_trade_count"], 1)
+        self.assertEqual(value["models"]["XGBOOST"]["calibration_selected_alpha"], "0.3")
+        self.assertTrue(value["models"]["XGBOOST"]["calibration_selection_passed"])
         self.assertNotIn("private", value["models"]["XGBOOST"])
         self.assertFalse(value["live_authority"])
         self.assertFalse(value["financial_operation_executed"])

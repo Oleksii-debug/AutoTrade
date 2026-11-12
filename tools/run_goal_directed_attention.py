@@ -85,6 +85,9 @@ def _learning_fleet_summary(path: Path) -> dict[str, object]:
             "phase": phase,
             "episodes": int(learner.get("episode_count", 0)),
             "model_versions": int(learner.get("model_version_count", 0)),
+            "feature_mode": (
+                cycle.get("cost_and_horizon_config") or cycle.get("config") or {}
+            ).get("feature_mode"),
             "candidate_version": cycle.get("candidate_version"),
             "champion_promotion": cycle.get("champion_promotion") is True,
         })
@@ -185,11 +188,79 @@ def _rolling_alpha_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _opportunity_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != "autotrade-whitebit-opportunity-supervisor-v1"
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or document.get("automatic_promotion") is not False):
+        raise ValueError("opportunity checkpoint authority or schema differs")
+    result = document.get("last_result")
+    markets = []
+    if result is not None:
+        if type(result) is not dict or type(result.get("markets")) is not dict:
+            raise ValueError("opportunity checkpoint result is malformed")
+        if (result.get("network_orders") is not False
+                or result.get("trading_authority") is not False):
+            raise ValueError("opportunity result authority differs")
+        for market, record in sorted(result["markets"].items()):
+            if type(record) is not dict:
+                raise ValueError("opportunity market result is malformed")
+            screen = record.get("screen")
+            if screen is not None and (type(screen) is not dict
+                                       or screen.get("network_orders") is not False
+                                       or screen.get("trading_authority") is not False):
+                raise ValueError("opportunity screen authority differs")
+            markets.append({
+                "market": market,
+                "status": record.get("status"),
+                "rank": record.get("rank"),
+                "quote_volume_24h": record.get("quote_volume_24h"),
+                "prospective_qualification": (
+                    False if screen is None
+                    else screen.get("prospective_qualification") is True
+                ),
+                "train_survivor_count": (
+                    0 if screen is None else int(screen.get("train_survivor_count", 0))
+                ),
+                "development_survivor_count": (
+                    0 if screen is None
+                    else int(screen.get("development_survivor_count", 0))
+                ),
+                "final_consumed": False if screen is None else screen.get("final_consumed") is True,
+                "rejection_reasons": (
+                    None if screen is None else screen.get("final_rejection_reasons")
+                ),
+            })
+    return {
+        "status": str(document.get("status", "UNKNOWN")),
+        "updated_at": document.get("updated_at"),
+        "cycle_count": int(document.get("cycle_count", 0)),
+        "next_run_at": document.get("next_run_at"),
+        "selected_market_count": (
+            0 if result is None else int(result.get("selected_market_count", 0))
+        ),
+        "qualified_market_count": (
+            0 if result is None else int(result.get("qualified_market_count", 0))
+        ),
+        "rejected_data_count": sum(row["status"] == "REJECTED_DATA" for row in markets),
+        "markets": markets,
+        "paid_model_calls": 0 if result is None else int(result.get("paid_model_calls", 0)),
+        "network_orders": False,
+        "trading_authority": False,
+        "automatic_promotion": False,
+    }
+
+
 def run_cycle(*, organism_root: Path, market_snapshot: Path,
               now: datetime | None = None,
               learning_fleet_checkpoint: Path | None = None,
               forward_shadow_checkpoint: Path | None = None,
-              rolling_alpha_checkpoint: Path | None = None) -> dict[str, object]:
+              rolling_alpha_checkpoint: Path | None = None,
+              opportunity_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -286,6 +357,9 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     rolling_path = rolling_alpha_checkpoint or (
         runtime_root / "rolling-native-alpha-v1-20261112" / "checkpoint.json"
     )
+    opportunity_path = opportunity_checkpoint or (
+        runtime_root / "whitebit-opportunity-screen-v1-20261112" / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -299,6 +373,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
             "learning_fleet": _learning_fleet_summary(fleet_path),
             "forward_shadow": _forward_shadow_summary(shadow_path),
             "rolling_native_alpha": _rolling_alpha_summary(rolling_path),
+            "opportunity_screen": _opportunity_summary(opportunity_path),
         },
         "network_orders": False,
         "trading_authority": False,

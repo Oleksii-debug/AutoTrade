@@ -256,7 +256,7 @@
       "id": "groq-advisory",
       "script": "tools/run_groq_advisory_supervisor.py",
       "args": [
-        "--checkpoint", "${RUNTIME_ROOT}/whitebit-live-zero-learning-fast-v3-20261111/checkpoint.json",
+        "--checkpoint", "${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json",
         "--state-dir", "${RUNTIME_ROOT}/groq-advisory-btc-v1-20261111",
         "--interval-seconds", "300",
         "--max-waves", "4",

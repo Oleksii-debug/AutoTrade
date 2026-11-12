@@ -478,4 +478,3 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
         if clock is not None:
             result["clock_window_returns"] = clock.report()
         return result
-

@@ -294,6 +294,7 @@
         "--source", "btc-horizon-signal=${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json",
         "--source", "btc-imbalance=${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-v1-20261112/checkpoint.json",
         "--source", "btc-imbalance-fast=${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-fast-v1-20261112/checkpoint.json",
+        "--source", "btc-imbalance-replay=${RUNTIME_ROOT}/whitebit-bbo-replay-imbalance-h60-v1-20261112/checkpoint.json",
         "--source", "eth-fast=${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111/checkpoint.json",
         "--source", "sol-fast=${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111/checkpoint.json",
         "--state-dir", "${RUNTIME_ROOT}/learning-fleet-diagnostics-v1-20261112",

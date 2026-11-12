@@ -23,6 +23,10 @@ from research.autotrade_research.integrations.whitebit_public import (
 from tools.historical_public_klines import HistoricalArchiveError
 from tools.screen_whitebit_trend_grid import default_grid, locked_final_grid_screen
 from tools.screen_whitebit_trend_regime import authenticated_bars
+from tools.screen_whitebit_volatility_grid import (
+    default_grid as volatility_grid,
+    locked_final_grid_screen as volatility_screen,
+)
 from tools.whitebit_historical_klines import collect_whitebit_history
 
 
@@ -32,6 +36,13 @@ CORE_MARKETS = frozenset({"BTC_USDT", "ETH_USDT", "SOL_USDT"})
 STABLE_BASES = frozenset({
     "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD", "EUR", "USD",
 })
+
+
+def fast_volatility_grid() -> tuple:
+    """Span the full grid with 16 deterministic configurations."""
+    full = tuple(volatility_grid())
+    indices = tuple(round(index * (len(full) - 1) / 15) for index in range(16))
+    return tuple(full[index] for index in indices)
 
 
 def completed_window(now: datetime, bars: int) -> tuple[int, int]:
@@ -72,7 +83,7 @@ def rank_markets(markets: tuple[dict, ...], tickers: tuple, *, limit: int,
     return ranked[:limit]
 
 
-def _compact(result: dict) -> dict:
+def _compact_trend(result: dict) -> dict:
     selected = None
     if result["selected_configuration_sha256"] is not None:
         selected = next(row for row in result["screened"]
@@ -90,6 +101,24 @@ def _compact(result: dict) -> dict:
         "selected_development_net_pnl": (
             None if selected is None or selected["development"] is None
             else selected["development"]["net_pnl"]),
+        "final_consumed": result["final_consumed"],
+        "prospective_qualification": result["prospective_qualification"],
+        "final_rejection_reasons": result["final_rejection_reasons"],
+        "network_orders": False,
+        "trading_authority": False,
+    }
+
+
+def _compact_volatility(result: dict) -> dict:
+    return {
+        "dataset_identity_sha256": result["dataset_sha256"],
+        "configuration_count": result["configuration_count"],
+        "train_survivor_count": sum(not row["train_rejection_reasons"]
+                                    for row in result["screened"]),
+        "development_survivor_count": sum(
+            row["development"] is not None and not row["development_rejection_reasons"]
+            for row in result["screened"]),
+        "selected_configuration_sha256": result["selected_configuration_sha256"],
         "final_consumed": result["final_consumed"],
         "prospective_qualification": result["prospective_qualification"],
         "final_rejection_reasons": result["final_rejection_reasons"],
@@ -118,19 +147,51 @@ def run_cycle(*, state_dir: Path, bars: int, market_limit: int,
             manifest_path = (history_root / "spot" / market / "1h" /
                              f"{start}-{end}.manifest.json")
             candle_rows, dataset, _ = authenticated_bars(manifest_path)
-            result = locked_final_grid_screen(
+            trend = locked_final_grid_screen(
                 candle_rows, train_count=train_count,
                 development_count=development_count,
                 dataset_sha256=dataset, configurations=default_grid(),
             )
-            result_path = result_root / market.lower() / f"{result['result_sha256']}.json"
+            fast_volatility = volatility_screen(
+                candle_rows, train_count=train_count,
+                development_count=development_count,
+                dataset_sha256=dataset, configurations=fast_volatility_grid(),
+            )
+            fast_train_survivors = sum(not row["train_rejection_reasons"]
+                                       for row in fast_volatility["screened"])
+            volatility = fast_volatility
+            volatility_stage = "FAST_16"
+            if fast_train_survivors:
+                volatility = volatility_screen(
+                    candle_rows, train_count=train_count,
+                    development_count=development_count,
+                    dataset_sha256=dataset, configurations=volatility_grid(),
+                )
+                volatility_stage = "FULL_96_AFTER_FAST_TRAIN_SURVIVOR"
+            result_path = result_root / market.lower() / f"{trend['result_sha256']}.json"
+            volatility_path = (result_root / market.lower() /
+                               f"{volatility['result_sha256']}.volatility.json")
             atomic_write_json(result_path, {
                 "market": market, "rank": rank, "quote_volume_24h": row["quote_volume_24h"],
                 "manifest": str(manifest_path), "manifest_identity": manifest["dataset_identity_sha256"],
-                "result": result,
+                "family": "LONG_SHORT_TREND", "result": trend,
             })
+            atomic_write_json(volatility_path, {
+                "market": market, "rank": rank, "quote_volume_24h": row["quote_volume_24h"],
+                "manifest": str(manifest_path), "manifest_identity": manifest["dataset_identity_sha256"],
+                "family": "LONG_VOLATILITY_EXPANSION", "stage": volatility_stage,
+                "fast_train_survivor_count": fast_train_survivors,
+                "result": volatility,
+            })
+            family_qualified = (trend["prospective_qualification"] or
+                                volatility["prospective_qualification"])
             reports[market] = {**row, "rank": rank, "status": "SCREENED",
-                               "result_path": str(result_path), "screen": _compact(result)}
+                               "prospective_qualification": family_qualified,
+                               "trend_result_path": str(result_path),
+                               "volatility_result_path": str(volatility_path),
+                               "trend": _compact_trend(trend),
+                               "volatility_stage": volatility_stage,
+                               "volatility": _compact_volatility(volatility)}
         except (HistoricalArchiveError, PublicDataError, OSError, ValueError,
                 TypeError, KeyError, RuntimeError) as exc:
             reports[market] = {**row, "rank": rank, "status": "REJECTED_DATA",
@@ -139,7 +200,7 @@ def run_cycle(*, state_dir: Path, bars: int, market_limit: int,
         "window": {"start_open_epoch": start, "end_open_epoch": end, "bars": bars},
         "selected_market_count": len(selected), "markets": reports,
         "qualified_market_count": sum(
-            report.get("screen", {}).get("prospective_qualification") is True
+            report.get("prospective_qualification") is True
             for report in reports.values()),
         "network_orders": False, "trading_authority": False,
         "automatic_promotion": False, "paid_model_calls": 0,

@@ -14,6 +14,7 @@ from ..integrations.whitebit_public import _symbol
 SCHEMA = "autotrade-whitebit-depth-feature-tape-v1"
 ARCHIVE_WINDOW_SECONDS = 300
 ARCHIVE_SETTLE_SECONDS = 60
+EXECUTION_BBO_RETENTION_SECONDS = 86400
 
 
 class WhiteBitDepthTapeStore:
@@ -41,6 +42,13 @@ class WhiteBitDepthTapeStore:
           order_flow_imbalance TEXT NOT NULL DEFAULT '0',
           PRIMARY KEY(market,bucket_epoch)) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS depth_bucket_epoch ON buckets(bucket_epoch);
+        CREATE TABLE IF NOT EXISTS execution_bbo(
+          market TEXT NOT NULL,bucket_epoch INTEGER NOT NULL,received_at TEXT NOT NULL,
+          bid_price TEXT NOT NULL,ask_price TEXT NOT NULL,
+          bid_quantity TEXT NOT NULL,ask_quantity TEXT NOT NULL,
+          generation INTEGER NOT NULL,update_id INTEGER NOT NULL,source_sha256 TEXT NOT NULL,
+          PRIMARY KEY(market,bucket_epoch)) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS execution_bbo_epoch ON execution_bbo(bucket_epoch);
         CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS archived_windows(
           market TEXT NOT NULL,window_epoch INTEGER NOT NULL,features_json TEXT NOT NULL,
@@ -82,6 +90,22 @@ class WhiteBitDepthTapeStore:
             values=tuple(r)
         with self.connection:
             self.connection.execute("INSERT OR REPLACE INTO buckets VALUES("+",".join("?" for _ in values)+")",values)
+            if value.bid_quantity is not None and value.ask_quantity is not None:
+                received_at = value.received_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+                self.connection.execute("""
+                    INSERT INTO execution_bbo VALUES(?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(market,bucket_epoch) DO UPDATE SET
+                        received_at=excluded.received_at,
+                        bid_price=excluded.bid_price,ask_price=excluded.ask_price,
+                        bid_quantity=excluded.bid_quantity,ask_quantity=excluded.ask_quantity,
+                        generation=excluded.generation,update_id=excluded.update_id,
+                        source_sha256=excluded.source_sha256
+                    WHERE excluded.received_at >= execution_bbo.received_at
+                """, (market, bucket, received_at,
+                      value.bid_price, value.ask_price, value.bid_quantity, value.ask_quantity,
+                      value.generation, value.update_id, value.source_sha256))
+                self.connection.execute("DELETE FROM execution_bbo WHERE bucket_epoch<?",
+                                        (bucket - EXECUTION_BBO_RETENTION_SECONDS,))
             cutoff=bucket-self.retention_days*86400
             self.connection.execute("DELETE FROM buckets WHERE bucket_epoch<?",(cutoff,))
 

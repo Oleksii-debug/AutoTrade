@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from research.autotrade_research.strategies.technical_confluence import (
-    TechnicalConfiguration, TechnicalCosts, simulate,
+    TechnicalConfiguration, TechnicalCosts, simulate, summarize_hour_windows,
 )
 from tools.screen_whitebit_technical_confluence import (
     default_grid, intraday_trend_configuration, locked_final_screen,
@@ -34,6 +34,17 @@ def flat_bars(count=900):
 
 
 class TechnicalConfluenceTests(unittest.TestCase):
+    def test_owner_hourly_target_counts_after_cost_equity_at_one_percent(self):
+        report = summarize_hour_windows(
+            [Decimal("-0.01"), Decimal("0"), Decimal("0.0099"),
+             Decimal("0.01"), Decimal("0.0101")], 1)
+        self.assertEqual(report["target_fraction"], "0.01")
+        self.assertEqual(report["complete_windows"], 5)
+        self.assertEqual(report["target_hits"], 2)
+        self.assertEqual(summarize_hour_windows([], 4)["target_fraction"], "0.04")
+        self.assertEqual(summarize_hour_windows([], 8)["target_fraction"], "0.08")
+
+
     def test_cost_envelope_is_whitebit_futures_fifteen_bps(self):
         self.assertEqual(TechnicalCosts().round_trip_bps, Decimal("15.0"))
 

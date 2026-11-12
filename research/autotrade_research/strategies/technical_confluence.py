@@ -22,7 +22,8 @@ from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 VERSION = "technical-confluence-futures-v1"
 CANDIDATES = ("CASH", "HOLD_LONG", "HOLD_SHORT", "TECHNICAL_CONFLUENCE")
 DAILY_RETURN_TARGETS = (Decimal("0.05"), Decimal("0.10"), Decimal("0.20"))
-HOURLY_TARGET = Decimal("0.0051")
+# Owner target, 2026-11-12: net account-equity gain per complete UTC hour.
+HOURLY_TARGET = Decimal("0.01")
 HOURLY_WINDOWS = (1, 4, 8)
 
 

@@ -343,6 +343,12 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
                 "market": "PEPE_USDT", "settled_cycles": 2,
                 "positive_cycles": 1, "net_pnl_quote": "-0.15",
+                "research_phase": "RESEARCH_FILTERED", "wave_cycles": 1,
+                "wave_positive_cycles": 0, "wave_net_pnl_quote": "-0.25",
+                "last_quote_admission": {
+                    "admitted": False, "reason": "DIRECTIONAL_FLOW",
+                    "network_orders": False, "trading_authority": False,
+                },
                 "open_quote": {
                     "status": "OPEN", "age_seconds": 12,
                     "bid_filled": True, "ask_filled": False,
@@ -401,6 +407,11 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             self.assertEqual(maker_summary["settled_cycles"], 2)
             self.assertEqual(maker_summary["positive_cycles"], 1)
             self.assertEqual(maker_summary["net_pnl_quote"], "-0.15")
+            self.assertEqual(maker_summary["research_phase"], "RESEARCH_FILTERED")
+            self.assertEqual(maker_summary["wave_cycles"], 1)
+            self.assertEqual(
+                maker_summary["last_quote_admission"]["reason"], "DIRECTIONAL_FLOW"
+            )
             self.assertTrue(maker_summary["open_quote"]["bid_filled"])
             self.assertEqual(
                 maker_summary["last_settled"]["outcome"], "BID_ONLY_FORCED_EXIT"
@@ -492,6 +503,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

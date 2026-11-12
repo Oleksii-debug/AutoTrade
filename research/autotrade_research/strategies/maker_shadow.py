@@ -211,7 +211,7 @@ def evaluate_quote(
     bid_filled = sell_volume >= bid_required
     ask_filled = buy_volume >= ask_required
     expired = age >= maximum_age_seconds
-    if not expired and not (bid_filled and ask_filled):
+    if not expired and not (bid_filled or ask_filled):
         return {
             **quote, "status": "OPEN", "age_seconds": age,
             "sell_volume_at_or_below_bid": format(sell_volume, "f"),
@@ -255,6 +255,7 @@ def evaluate_quote(
         "fees_quote": format(fees, "f"),
         "net_pnl_quote": format(net, "f"),
         "forced_exit_impact_bps": format(impact * 10000, "f"),
+        "inventory_hedge_policy": "IMMEDIATE_NEXT_POLL",
         "latest_book_sha256": book.digest,
         "latest_trade_batch_sha256": batch.digest,
         "limitations": ["REST_TRADE_SAMPLING", "QUEUE_AHEAD_STATIC_AT_ENTRY",
@@ -265,6 +266,7 @@ def evaluate_quote(
         result, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     return result
+
 
 
 

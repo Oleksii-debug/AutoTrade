@@ -184,10 +184,13 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-public-eth", "learning-btc-imbalance",
         "learning-btc-imbalance-fast", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "goal-attention",
-        "sol-trend-forward-shadow", "learning-fleet-diagnostics",
-        "groq-advisory", "rolling-native-alpha", "whitebit-opportunity-screen",
+        "learning-fleet-diagnostics", "groq-advisory", "rolling-native-alpha",
+        "whitebit-opportunity-screen",
         "whitebit-funding-carry-shadow",
     ]
+    assert "sol-trend-forward-shadow" not in {
+        row["id"] for row in manifest["processes"]
+    }
     serialized = json.dumps(manifest).lower()
     assert "api-key" not in serialized
     assert "password" not in serialized
@@ -272,6 +275,7 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
+
 
 
 

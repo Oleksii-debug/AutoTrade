@@ -333,31 +333,62 @@ def _flow_research_summary(path: Path) -> dict[str, object]:
         cycle_seconds = format(cycle_seconds_decimal, "f")
     last = document.get("last_result")
     last_summary = None
+    migration_pending = False
     if last is not None:
-        count_fields = (
+        base_count_fields = (
             "volatility_qualified_count",
             "lead_lag_qualified_count",
             "isolated_error_count",
         )
+        medium_count_fields = (
+            "medium_horizon_qualified_count",
+            "medium_horizon_waiting_count",
+            "medium_horizon_rejected_count",
+            "medium_horizon_error_count",
+        )
         digest = None if type(last) is not dict else last.get("result_sha256")
         if (type(last) is not dict
                 or any(type(last.get(field)) is not int or last[field] < 0
-                       for field in count_fields)
+                       for field in base_count_fields)
                 or type(digest) is not str
                 or len(digest) != 64
                 or any(character not in "0123456789abcdefABCDEF"
                        for character in digest)):
             raise ValueError("flow-research last result is malformed")
+        medium_presence = tuple(field in last for field in medium_count_fields)
+        if any(medium_presence) and not all(medium_presence):
+            raise ValueError("flow-research medium-horizon result is incomplete")
+        migration_pending = not any(medium_presence)
+        if not migration_pending and any(
+            type(last.get(field)) is not int or last[field] < 0
+            for field in medium_count_fields
+        ):
+            raise ValueError("flow-research medium-horizon result is malformed")
         last_summary = {
             "result_sha256": digest.lower(),
             "volatility_qualified_count": last["volatility_qualified_count"],
             "lead_lag_qualified_count": last["lead_lag_qualified_count"],
+            "medium_horizon_qualified_count": last.get(
+                "medium_horizon_qualified_count"
+            ),
+            "medium_horizon_waiting_count": last.get(
+                "medium_horizon_waiting_count"
+            ),
+            "medium_horizon_rejected_count": last.get(
+                "medium_horizon_rejected_count"
+            ),
+            "medium_horizon_error_count": last.get(
+                "medium_horizon_error_count"
+            ),
             "isolated_error_count": last["isolated_error_count"],
         }
     if cycle_count > 0 and last_summary is None:
         raise ValueError("flow-research completed cycle lacks result")
     return {
-        "status": str(document.get("status", "UNKNOWN")),
+        "status": (
+            "MIGRATION_PENDING" if migration_pending
+            else str(document.get("status", "UNKNOWN"))
+        ),
         "updated_at": document.get("updated_at"),
         "next_run_at": document.get("next_run_at"),
         "cycle_count": cycle_count,

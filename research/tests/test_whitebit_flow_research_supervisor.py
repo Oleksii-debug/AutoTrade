@@ -32,6 +32,9 @@ def test_cycle_persists_digest_bound_bounded_authority_free_evidence(tmp_path):
         "tools.run_whitebit_flow_research_supervisor.screen_flow_volatility",
         side_effect=lambda _p, market, **_kw: _flow(market),
     ), patch(
+        "tools.run_whitebit_flow_research_supervisor.screen_medium_horizon_flow",
+        side_effect=lambda _p, market, **_kw: _flow(market),
+    ) as medium_screen, patch(
         "tools.run_whitebit_flow_research_supervisor.run_lead_lag",
         return_value=_lead(),
     ):
@@ -43,6 +46,15 @@ def test_cycle_persists_digest_bound_bounded_authority_free_evidence(tmp_path):
         )
     assert report["volatility"]["qualified_count"] == 0
     assert report["lead_lag"]["qualified_pair_count"] == 0
+    assert report["medium_horizon"]["minimum_buckets"] == 900
+    assert report["medium_horizon"]["round_trip_cost_bps"] == "26"
+    assert report["medium_horizon"]["qualified_count"] == 0
+    assert report["medium_horizon"]["rejected_count"] == 2
+    assert all(
+        call.kwargs["minimum_buckets"] == 900
+        and call.kwargs["round_trip_cost_bps"] == "26"
+        for call in medium_screen.call_args_list
+    )
     assert report["network_requests"] == 0
     assert report["network_orders"] is False
     assert report["trading_authority"] is False
@@ -53,6 +65,9 @@ def test_cycle_persists_digest_bound_bounded_authority_free_evidence(tmp_path):
     # A later run keeps the requested bounded evidence count.
     with patch(
         "tools.run_whitebit_flow_research_supervisor.screen_flow_volatility",
+        side_effect=lambda _p, market, **_kw: _flow(market),
+    ), patch(
+        "tools.run_whitebit_flow_research_supervisor.screen_medium_horizon_flow",
         side_effect=lambda _p, market, **_kw: _flow(market),
     ), patch(
         "tools.run_whitebit_flow_research_supervisor.run_lead_lag",
@@ -76,6 +91,13 @@ def test_once_writes_restart_checkpoint_without_promoting(tmp_path):
             "result_sha256": "a" * 64,
             "volatility": {"qualified_count": 0, "errors": []},
             "lead_lag": {"qualified_pair_count": 0, "errors": []},
+            "medium_horizon": {
+                "qualified_count": 0, "waiting_count": 1,
+                "rejected_count": 0,
+                "errors": [{
+                    "market": "ETH_USDT", "error_class": "ValueError",
+                }],
+            },
         },
     ):
         assert main([
@@ -87,6 +109,11 @@ def test_once_writes_restart_checkpoint_without_promoting(tmp_path):
     assert checkpoint["status"] == "RUNNING"
     assert checkpoint["cycle_count"] == 1
     assert checkpoint["last_result"]["volatility_qualified_count"] == 0
+    assert checkpoint["last_result"]["medium_horizon_qualified_count"] == 0
+    assert checkpoint["last_result"]["medium_horizon_waiting_count"] == 1
+    assert checkpoint["last_result"]["medium_horizon_rejected_count"] == 0
+    assert checkpoint["last_result"]["medium_horizon_error_count"] == 1
+    assert checkpoint["last_result"]["isolated_error_count"] == 1
     assert checkpoint["paid_model_calls"] == 0
     assert checkpoint["network_requests"] == 0
     assert checkpoint["network_orders"] is False

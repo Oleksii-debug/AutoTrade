@@ -20,7 +20,11 @@ class LiveCycle:
     def _configure_cycle(self, episodes, seconds, evaluation, drawdown, cooldown, trials,
                          max_gap, min_trades, outcome_horizon, signal_lookback,
                          short_carry_bps_per_day, feature_mode):
-        if feature_mode not in {"MID_MOMENTUM", "TOP_BOOK_IMBALANCE"}:
+        if feature_mode not in {
+            "MID_MOMENTUM",
+            "TOP_BOOK_IMBALANCE",
+            "TOP_BOOK_IMBALANCE_PERSISTENCE",
+        }:
             raise ValueError("feature mode is unsupported")
         for name, value in (("outcome horizon", outcome_horizon),
                             ("signal lookback", signal_lookback)):
@@ -168,6 +172,20 @@ class LiveCycle:
                 or bid_quantity + ask_quantity <= 0):
             raise ValueError("top-book quantities are invalid")
         imbalance = (bid_quantity - ask_quantity) / (bid_quantity + ask_quantity)
+        if self.cycle_config["feature_mode"] == "TOP_BOOK_IMBALANCE_PERSISTENCE":
+            prior = json.loads(reference["snapshot_json"])
+            if type(prior) is not dict:
+                raise ValueError("prior top-book snapshot is malformed")
+            prior_bid = Decimal(prior["bid_quantity"])
+            prior_ask = Decimal(prior["ask_quantity"])
+            if (not prior_bid.is_finite() or not prior_ask.is_finite()
+                    or min(prior_bid, prior_ask) < 0
+                    or prior_bid + prior_ask <= 0):
+                raise ValueError("prior top-book quantities are invalid")
+            prior_imbalance = (prior_bid - prior_ask) / (prior_bid + prior_ask)
+            if imbalance * prior_imbalance <= 0:
+                return Decimal("0")
+            imbalance = (imbalance + prior_imbalance) / Decimal("2")
         # A preregistered 1% price-equivalent scale lets the existing exact
         # cost hurdle decide whether an imbalance is large enough to test.
         return mid * imbalance / Decimal(100)
@@ -176,7 +194,7 @@ class LiveCycle:
         lookback = self.cycle_config["signal_lookback_seconds"]
         if lookback == 0:
             return con.execute(
-                "SELECT mid,available_at FROM observations "
+                "SELECT mid,available_at,snapshot_json FROM observations "
                 "WHERE observation_key != ? ORDER BY available_at DESC LIMIT 1",
                 (key,),
             ).fetchone()
@@ -184,7 +202,7 @@ class LiveCycle:
             seconds=lookback
         )
         reference = con.execute(
-            "SELECT mid,available_at FROM observations WHERE observation_key != ? "
+            "SELECT mid,available_at,snapshot_json FROM observations WHERE observation_key != ? "
             "AND available_at <= ? ORDER BY available_at DESC LIMIT 1",
             (key, cutoff.isoformat()),
         ).fetchone()

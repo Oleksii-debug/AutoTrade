@@ -6,7 +6,9 @@ from unittest.mock import patch
 from research.autotrade_research.strategies.technical_confluence import (
     TechnicalConfiguration, TechnicalCosts, simulate,
 )
-from tools.screen_whitebit_technical_confluence import default_grid, locked_final_screen
+from tools.screen_whitebit_technical_confluence import (
+    default_grid, intraday_trend_configuration, locked_final_screen,
+)
 
 
 def bars(count=900, *, falling=False):
@@ -34,6 +36,13 @@ def flat_bars(count=900):
 class TechnicalConfluenceTests(unittest.TestCase):
     def test_cost_envelope_is_whitebit_futures_fifteen_bps(self):
         self.assertEqual(TechnicalCosts().round_trip_bps, Decimal("15.0"))
+
+    def test_screen_configs_can_clear_the_pretrade_reward_gate(self):
+        for config in (*default_grid(), intraday_trend_configuration()):
+            self.assertGreater(Decimal(config.take_profit_atr) / Decimal(config.stop_atr), 2)
+        intraday = intraday_trend_configuration()
+        self.assertEqual((intraday.minimum_hold_bars, intraday.maximum_hold_bars), (2, 4))
+        self.assertEqual(intraday.maximum_entries_per_utc_day, 1)
 
     def test_signal_uses_next_open_and_has_no_order_authority(self):
         result = simulate(bars(), candidate="TECHNICAL_CONFLUENCE",

@@ -251,6 +251,7 @@
         "--market", "ETH_USDT",
         "--market", "SOL_USDT",
         "--market", "PEPE_USDT",
+        "--market", "ENA_USDT",
         "--poll-seconds", "1",
         "--bucket-seconds", "5",
         "--retention-days", "14",
@@ -272,6 +273,7 @@
         "--market", "ETH_USDT",
         "--market", "SOL_USDT",
         "--market", "PEPE_USDT",
+        "--market", "ENA_USDT",
         "--minimum-buckets", "2160",
         "--interval-seconds", "900",
         "--stop-file", "${RUNTIME_ROOT}/whitebit-trade-flow-screen-v1-20261112/managed.stop.json"
@@ -430,6 +432,7 @@
     }
   ]
 }
+
 
 
 

@@ -270,7 +270,9 @@ def build_alpha_input(
         "row_count": bars, "availability_policy": "FIRST_MILLISECOND_AFTER_CANDLE_CLOSE",
     }
     selection_digest = sha256(_canonical_json(selection)).hexdigest()
-    quote = manifest["market"].split("_")[-1]
+    # WhiteBIT names perpetuals BASE_PERP although their economics are settled
+    # in USDT.  Keep the cost budget denominated in the actual settlement unit.
+    quote = "USDT" if manifest["market"].endswith("_PERP") else manifest["market"].split("_")[-1]
     cost_source = "HYPOTHETICAL_NOT_ACCOUNT_FEES:WHITEBIT_ALPHA_BRIDGE_V1"
     payload = {
         "series": {

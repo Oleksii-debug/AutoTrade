@@ -28,7 +28,7 @@ def _utc(epoch):
     return datetime.fromtimestamp(epoch, UTC).isoformat().replace("+00:00", "Z")
 
 
-def fixture(root: Path, *, rows=200) -> Path:
+def fixture(root: Path, *, rows=200, market="BTC_USDT") -> Path:
     stream = StringIO()
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(["open_time_utc", "open", "high", "low", "close", "volume"])
@@ -40,14 +40,14 @@ def fixture(root: Path, *, rows=200) -> Path:
     end = START + (rows - 1) * STEP
     page = {
         "index": 0, "start": START, "end": end + STEP, "limit": rows,
-        "source_uri": ("https://whitebit.com/api/v1/public/kline?market=BTC_USDT"
+        "source_uri": (f"https://whitebit.com/api/v1/public/kline?market={market}"
                        f"&end={end + STEP}&interval=1h&limit={rows}"),
         "received_at_utc": _utc(end + 2 * STEP), "raw_sha256": "a" * 64,
         "row_count": rows, "first_open_time_utc": _utc(START),
         "last_open_time_utc": _utc(end),
     }
     identity = {
-        "schema": SCHEMA, "provider": "WHITEBIT", "market": "BTC_USDT",
+        "schema": SCHEMA, "provider": "WHITEBIT", "market": market,
         "interval": "1h", "start_open_epoch": START, "end_open_epoch": end,
         "cutoff_utc": _utc(end + 2 * STEP),
         "normalized_csv_sha256": sha256(csv_bytes).hexdigest(),
@@ -94,6 +94,13 @@ class WhiteBitHistoricalAlphaTests(unittest.TestCase):
             self.assertEqual(first["costs"]["source_ref"],
                              "HYPOTHETICAL_NOT_ACCOUNT_FEES:WHITEBIT_ALPHA_BRIDGE_V1")
             self.assertEqual(first["costs"]["model_cost_quote"], "0")
+
+    def test_perpetual_alpha_costs_are_usdt_settled_not_perp_labeled(self):
+        with TemporaryDirectory() as tmp:
+            manifest = fixture(Path(tmp), market="BTC_PERP")
+            payload, _selection = build_alpha_input(manifest, bars=160)
+            self.assertEqual(payload["series"]["market"], "BTC_PERP")
+            self.assertEqual(payload["costs"]["quote_currency"], "USDT")
 
     def test_tampered_csv_and_manifest_identity_fail_closed(self):
         with TemporaryDirectory() as tmp:

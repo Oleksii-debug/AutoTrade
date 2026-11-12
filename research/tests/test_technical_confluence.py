@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
 
 from research.autotrade_research.strategies.technical_confluence import (
     TechnicalConfiguration, TechnicalCosts, simulate,
@@ -58,6 +59,43 @@ class TechnicalConfluenceTests(unittest.TestCase):
         self.assertGreater(Decimal(result["net_pnl"]), 0)
         self.assertEqual(result["short_cycles"], 1)
 
+    def test_hourly_execution_attribution_reconciles_net_return_for_both_sides(self):
+        for side in ("LONG", "SHORT"):
+            with self.subTest(side=side):
+                result = simulate(bars(count=65, falling=side == "SHORT"),
+                                  candidate=f"HOLD_{side}", report_hourly_returns=True)
+                receipt = result["execution_attribution"]
+                direction = receipt["by_direction"][side]
+                self.assertEqual(direction, receipt["by_exit_reason"]["PARTITION_END_EXIT"])
+                self.assertEqual(direction["cycles"], 1)
+                self.assertEqual(Decimal(direction["net_pnl"]), Decimal(result["net_pnl"]))
+                self.assertGreater(Decimal(direction["spread_slippage_cost"]), 0)
+                self.assertEqual(Decimal(direction["fees"]), Decimal(result["fees"]))
+                self.assertEqual(Decimal(direction["funding"]), Decimal(result["funding"]))
+                reconciled = (Decimal(direction["gross_pnl_at_reference"])
+                              - Decimal(direction["spread_slippage_cost"])
+                              - Decimal(direction["fees"]) - Decimal(direction["funding"]))
+                self.assertAlmostEqual(reconciled, Decimal(result["net_pnl"]), places=24)
+
+    def test_hourly_context_requires_warmup_and_rejects_a_countertrend_entry(self):
+        values = bars(410)
+        for index, bar in enumerate(values):
+            opened_at = values[0]["opened_at"] + timedelta(minutes=15 * index)
+            close = Decimal(bar["close"])
+            bar.update(opened_at=opened_at, closed_at=opened_at + timedelta(minutes=15),
+                       high=str(close * Decimal("1.02")), low=str(close * Decimal("0.98")))
+        cfg = TechnicalConfiguration(fast_ema=8, slow_ema=32, stop_atr="1",
+                                     take_profit_atr="4", maximum_hold_bars=4)
+        with patch("research.autotrade_research.strategies.technical_confluence._entry",
+                   return_value=-1):
+            baseline = simulate(values, candidate="TECHNICAL_CONFLUENCE", configuration=cfg)
+            gated = simulate(values, candidate="TECHNICAL_CONFLUENCE", configuration=cfg,
+                             require_hourly_trend_alignment=True)
+        self.assertGreater(baseline["closed_cycles"], 0)
+        self.assertEqual(gated["closed_cycles"], 0)
+        self.assertGreater(gated["pretrade_hold_reasons"]["HOURLY_TREND_WARMUP"], 0)
+        self.assertGreater(gated["pretrade_hold_reasons"]["HOURLY_TREND_CONFLICT"], 0)
+
     def test_flat_market_does_not_create_phantom_pending_entries(self):
         result = simulate(flat_bars(), candidate="TECHNICAL_CONFLUENCE")
         self.assertEqual(result["closed_cycles"], 0)
@@ -83,4 +121,3 @@ class TechnicalConfluenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

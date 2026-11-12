@@ -7,6 +7,7 @@ spread and slippage.  It is research-only and cannot place an order.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, ROUND_DOWN, localcontext
@@ -289,12 +290,19 @@ def simulate(bars: list[dict], *, candidate: str,
              costs: TechnicalCosts = TechnicalCosts(),
              configuration: TechnicalConfiguration = TechnicalConfiguration(),
              report_daily_returns: bool = False,
-             report_hourly_returns: bool = False) -> dict:
+             report_hourly_returns: bool = False,
+             require_hourly_trend_alignment: bool = False) -> dict:
     """Run one partition with causal next-open perpetual-futures fills."""
     validate_bars(bars, require_ohlcv=True)
     costs.validate(); configuration.validate()
     if candidate not in CANDIDATES:
         raise ValueError("unknown technical candidate")
+    if require_hourly_trend_alignment and (
+            candidate != "TECHNICAL_CONFLUENCE"
+            or any((bar["closed_at"] - bar["opened_at"]) != timedelta(minutes=15)
+                   or bar["opened_at"].timestamp() % 900 != 0
+                   for bar in bars)):
+        raise ValueError("hourly alignment requires a technical candidate on M15 bars")
     with localcontext() as context:
         context.prec = 50
         balance = initial = peak = decimal(costs.initial_equity)
@@ -315,6 +323,10 @@ def simulate(bars: list[dict], *, candidate: str,
         exit_reasons: dict[str, int] = {}
         entries_by_day: dict[str, int] = {}
         evidence = sha256()
+        hourly_closes = deque(maxlen=configuration.slow_ema * 3)
+        cycle_start = None
+        by_direction: dict[str, dict] = {}
+        by_exit: dict[str, dict] = {}
         window_hours = ((HOURLY_WINDOWS if report_hourly_returns else ())
                         + ((24,) if report_daily_returns else ()))
         window_returns: dict[int, list[Decimal]] = {hours: [] for hours in window_hours}
@@ -361,7 +373,7 @@ def simulate(bars: list[dict], *, candidate: str,
                     reason: str | None, at: str) -> None:
             nonlocal balance, quantity, entry_price, fees, fill_count
             nonlocal closed_cycles, long_cycles, short_cycles, holding, cooldown_remaining
-            nonlocal pretrade_holds
+            nonlocal pretrade_holds, cycle_start
             if direction is None:
                 return
             if direction and quantity == 0:
@@ -399,6 +411,8 @@ def simulate(bars: list[dict], *, candidate: str,
                 opened = (notional / price).quantize(Decimal("1e-18"), rounding=ROUND_DOWN)
                 if opened == 0:
                     return
+                if report_hourly_returns:
+                    cycle_start = (balance, fees, funding, reference)
                 quantity = opened if direction > 0 else -opened
                 entry_price = price
                 charge = notional * fee_ratio
@@ -409,12 +423,29 @@ def simulate(bars: list[dict], *, candidate: str,
                 price = reference * (Decimal(1) - adverse if quantity > 0 else Decimal(1) + adverse)
                 notional = abs(quantity) * price
                 charge = notional * fee_ratio
-                balance += quantity * (price - entry_price) - charge
+                executed_pnl = quantity * (price - entry_price)
+                balance += executed_pnl - charge
                 fees += charge; fill_count += 1; closed_cycles += 1
                 long_cycles += int(quantity > 0); short_cycles += int(quantity < 0)
+                exit_reason = reason or "UNSPECIFIED_EXIT"
+                if cycle_start is not None:
+                    start_balance, start_fees, start_funding, entry_reference = cycle_start
+                    reference_pnl = quantity * (reference - entry_reference)
+                    cycle = {"gross_pnl_at_reference": reference_pnl,
+                             "spread_slippage_cost": reference_pnl - executed_pnl,
+                             "fees": fees - start_fees,
+                             "funding": funding - start_funding,
+                             "net_pnl": balance - start_balance}
+                    for group, key in ((by_direction, "LONG" if quantity > 0 else "SHORT"),
+                                       (by_exit, exit_reason)):
+                        totals = group.setdefault(key, {"cycles": 0})
+                        totals["cycles"] += 1
+                        for field, value in cycle.items():
+                            totals[field] = totals.get(field, Decimal(0)) + value
+                    cycle_start = None
                 quantity = entry_price = Decimal(0); holding = 0
                 cooldown_remaining = configuration.cooldown_bars
-                exit_reasons[reason or "UNSPECIFIED_EXIT"] = exit_reasons.get(reason or "UNSPECIFIED_EXIT", 0) + 1
+                exit_reasons[exit_reason] = exit_reasons.get(exit_reason, 0) + 1
             else:
                 return
             evidence.update(json.dumps({"at": at, "direction": direction,
@@ -439,6 +470,10 @@ def simulate(bars: list[dict], *, candidate: str,
                 balance -= carry; funding += carry; mark(close)
             if window_hours:
                 record_boundary(bar["closed_at"], close)
+            if require_hourly_trend_alignment:
+                utc_close = bar["closed_at"].astimezone(UTC)
+                if not (utc_close.minute or utc_close.second or utc_close.microsecond):
+                    hourly_closes.append(close)
             history.append(bar)
             features = _features(history, configuration)
             if candidate != "TECHNICAL_CONFLUENCE" or features is None:
@@ -447,6 +482,18 @@ def simulate(bars: list[dict], *, candidate: str,
                 if cooldown_remaining:
                     continue
                 direction = _entry(features, configuration)
+                if direction and require_hourly_trend_alignment:
+                    if len(hourly_closes) != hourly_closes.maxlen:
+                        failure = "HOURLY_TREND_WARMUP"
+                    else:
+                        completed = list(hourly_closes)
+                        fast = _ema(completed[-configuration.fast_ema * 3:], configuration.fast_ema)
+                        slow = _ema(completed, configuration.slow_ema)
+                        failure = None if direction * (fast - slow) > 0 else "HOURLY_TREND_CONFLICT"
+                    if failure:
+                        pretrade_holds += 1
+                        pretrade_hold_reasons[failure] = pretrade_hold_reasons.get(failure, 0) + 1
+                        continue
                 if direction:
                     pending = direction; pending_reason = "INDICATOR_CONFLUENCE_ENTRY"
                     active_atr = features["atr"]; signal_count += 1
@@ -489,10 +536,18 @@ def simulate(bars: list[dict], *, candidate: str,
         }
         if report_daily_returns:
             result["daily_returns"] = summarize_daily_returns(window_returns[24])
+        if require_hourly_trend_alignment:
+            result["entry_context"] = "COMPLETED_H1_EMA_ALIGNMENT"
         if report_hourly_returns:
             result["clock_window_returns"] = {
                 str(hours): summarize_hour_windows(window_returns[hours], hours)
                 for hours in HOURLY_WINDOWS
             }
             result["one_hour_with_exposure"] = summarize_hour_windows(exposed_hour_returns, 1)
+            result["execution_attribution"] = {
+                name: {key: {field: str(value) if isinstance(value, Decimal) else value
+                             for field, value in totals.items()}
+                       for key, totals in groups.items()}
+                for name, groups in (("by_direction", by_direction), ("by_exit_reason", by_exit))
+            }
         return result

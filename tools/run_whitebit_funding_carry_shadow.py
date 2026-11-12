@@ -195,12 +195,16 @@ def screen_once(*, client: WhiteBitPublicClient, notional: Decimal,
 
 def run(*, state_dir: Path, interval_seconds: int, notional: Decimal,
         horizon_days: int, basis_stress_bps: Decimal, candidate_limit: int,
-        once: bool = False, stop: Event | None = None) -> dict:
+        once: bool = False, stop: Event | None = None,
+        stop_file: Path | None = None) -> dict:
     state_dir.mkdir(parents=True, exist_ok=True)
     stop = stop or Event()
     client = WhiteBitPublicClient()
     last = {}
     while not stop.is_set():
+        if stop_file is not None and stop_file.is_file():
+            stop.set()
+            break
         started = time.monotonic()
         try:
             last = screen_once(client=client, notional=notional,
@@ -226,7 +230,13 @@ def run(*, state_dir: Path, interval_seconds: int, notional: Decimal,
         })
         if once:
             return last
-        stop.wait(max(1.0, interval_seconds - (time.monotonic() - started)))
+        remaining = max(1.0, interval_seconds - (time.monotonic() - started))
+        deadline = time.monotonic() + remaining
+        while not stop.is_set() and time.monotonic() < deadline:
+            if stop_file is not None and stop_file.is_file():
+                stop.set()
+                break
+            stop.wait(min(5.0, deadline - time.monotonic()))
     last["worker_status"] = "STOPPED"
     atomic_write_json(state_dir / "checkpoint.json", last)
     return last
@@ -240,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--horizon-days", type=int, default=14)
     parser.add_argument("--basis-stress-bps", default="25")
     parser.add_argument("--candidate-limit", type=int, default=8)
+    parser.add_argument("--stop-file", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     if not 300 <= args.interval_seconds <= 86400:
@@ -255,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run(state_dir=args.state_dir, interval_seconds=args.interval_seconds,
                  notional=notional, horizon_days=args.horizon_days,
                  basis_stress_bps=stress, candidate_limit=args.candidate_limit,
-                 once=args.once, stop=stop)
+                 once=args.once, stop=stop, stop_file=args.stop_file)
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
     return 0 if report.get("worker_status") != "DEGRADED" else 2
 

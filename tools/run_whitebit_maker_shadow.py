@@ -24,7 +24,7 @@ from research.autotrade_research.integrations.whitebit_public import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 from research.autotrade_research.strategies.maker_shadow import (
-    SCHEMA, evaluate_quote, open_quote,
+    SCHEMA, advance_evidence_wave, evaluate_quote, open_quote,
 )
 
 
@@ -48,6 +48,7 @@ def main(argv=None) -> int:
     parser.add_argument("--maximum-quote-seconds", type=int, default=60)
     parser.add_argument("--notional-quote", default="100")
     parser.add_argument("--forced-exit-impact-bps", default="5")
+    parser.add_argument("--cycle-cycles", type=int, default=12)
     parser.add_argument("--stop-file", type=Path, required=True)
     args = parser.parse_args(argv)
     market = _symbol(args.market)
@@ -77,6 +78,9 @@ def main(argv=None) -> int:
                 "schema": SCHEMA, "phase": "STARTING", "market": market,
                 "open_quote": None, "settled_cycles": 0,
                 "net_pnl_quote": "0", "positive_cycles": 0,
+                "research_phase": "DISCOVERY", "wave_cycles": 0,
+                "wave_positive_cycles": 0, "wave_net_pnl_quote": "0",
+                "wave_outcomes": {},
                 "network_orders": False, "trading_authority": False,
                 "paid_model_calls": 0,
             }
@@ -87,13 +91,31 @@ def main(argv=None) -> int:
                         or restored.get("network_orders") is not False
                         or restored.get("trading_authority") is not False):
                     raise ValueError("maker shadow checkpoint differs")
+                legacy_wave = "research_phase" not in restored
                 state.update(restored)
+                if legacy_wave:
+                    state.update({
+                        "research_phase": "DISCOVERY",
+                        "wave_cycles": int(restored.get("settled_cycles", 0)),
+                        "wave_positive_cycles": int(restored.get("positive_cycles", 0)),
+                        "wave_net_pnl_quote": str(restored.get("net_pnl_quote", "0")),
+                        "wave_outcomes": {},
+                    })
             client = WhiteBitPublicClient()
             instruments = [item for item in client.instruments() if item.market == market]
             if len(instruments) != 1:
                 raise ValueError("maker shadow instrument is unavailable")
             instrument = instruments[0]
             while not stopped.is_set() and not stop_file.exists():
+                if state.get("research_phase") == "RESEARCH_ONLY":
+                    state.update({
+                        "phase": "RUNNING",
+                        "checkpointed_at": datetime.now(timezone.utc).isoformat(),
+                        "automatic_promotion": False,
+                    })
+                    atomic_write_json(checkpoint_path, state)
+                    stopped.wait(max(args.interval_seconds, 60))
+                    continue
                 try:
                     book = client.instrument_orderbook(market)
                     book.assert_fresh(datetime.now(timezone.utc), maximum_age_seconds=30)
@@ -119,10 +141,16 @@ def main(argv=None) -> int:
                             state["positive_cycles"] = int(state["positive_cycles"]) + int(
                                 Decimal(net) > 0
                             )
+                            state = advance_evidence_wave(
+                                state, net_pnl_quote=net,
+                                outcome=str(evaluated["outcome"]),
+                                target_cycles=args.cycle_cycles,
+                            )
                             state["last_settled"] = evaluated
-                            state["open_quote"] = open_quote(
-                                book, instrument, batch,
-                                notional_quote=args.notional_quote,
+                            state["open_quote"] = (
+                                None if state["research_phase"] == "RESEARCH_ONLY"
+                                else open_quote(book, instrument, batch,
+                                                notional_quote=args.notional_quote)
                             )
                         else:
                             state["open_quote"] = evaluated
@@ -132,6 +160,7 @@ def main(argv=None) -> int:
                         "maker_fee_rate": instrument.maker_fee_rate,
                         "taker_fee_rate": instrument.taker_fee_rate,
                         "errors": {}, "profit_guaranteed": False,
+                        "automatic_promotion": False,
                     })
                 except PublicDataError as error:
                     state.update({
@@ -154,4 +183,5 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

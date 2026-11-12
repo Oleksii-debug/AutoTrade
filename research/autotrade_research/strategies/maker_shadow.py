@@ -12,6 +12,44 @@ from ..integrations.whitebit_public import PublicBook, PublicInstrument, PublicT
 SCHEMA = "autotrade-whitebit-maker-shadow-v1"
 
 
+def quote_admission(
+    book: PublicBook, instrument: PublicInstrument, batch: PublicTradeBatch,
+    *, maximum_absolute_flow_imbalance: str = "0.20",
+    adverse_selection_reserve_bps: str = "5",
+) -> dict[str, object]:
+    if (type(book) is not PublicBook or type(instrument) is not PublicInstrument
+            or type(batch) is not PublicTradeBatch):
+        raise TypeError("canonical public inputs are required")
+    if not (book.market == instrument.market == batch.market):
+        raise ValueError("maker admission market differs")
+    limit = _decimal(maximum_absolute_flow_imbalance, name="flow_imbalance_limit")
+    reserve = _decimal(adverse_selection_reserve_bps, name="reserve_bps")
+    if not Decimal(0) <= limit <= 1 or reserve < 0:
+        raise ValueError("maker admission economics are invalid")
+    buy = sum((_decimal(t.quote_quantity, name="trade_quote_quantity")
+               for t in batch.trades if t.side == "buy"), Decimal(0))
+    sell = sum((_decimal(t.quote_quantity, name="trade_quote_quantity")
+                for t in batch.trades if t.side == "sell"), Decimal(0))
+    total = buy + sell
+    imbalance = Decimal(0) if total == 0 else (buy - sell) / total
+    bid, ask = Decimal(book.bids[0][0]), Decimal(book.asks[0][0])
+    spread_bps = (ask - bid) / ((ask + bid) / 2) * Decimal(10000)
+    fee_hurdle = _decimal(instrument.maker_fee_rate, name="maker_fee_rate") * 20000
+    required = fee_hurdle + reserve
+    admitted = abs(imbalance) <= limit and spread_bps >= required
+    return {
+        "admitted": admitted,
+        "flow_imbalance": format(imbalance, "f"),
+        "maximum_absolute_flow_imbalance": format(limit, "f"),
+        "spread_bps": format(spread_bps, "f"),
+        "required_spread_bps": format(required, "f"),
+        "reason": "ADMITTED" if admitted else (
+            "DIRECTIONAL_FLOW" if abs(imbalance) > limit else "SPREAD_BELOW_HURDLE"
+        ),
+        "network_orders": False, "trading_authority": False,
+    }
+
+
 def advance_evidence_wave(
     state: dict[str, object], *, net_pnl_quote: str, outcome: str,
     target_cycles: int,
@@ -20,7 +58,10 @@ def advance_evidence_wave(
     if type(state) is not dict or type(target_cycles) is not int or not 4 <= target_cycles <= 1000:
         raise ValueError("maker evidence wave configuration is invalid")
     phase = str(state.get("research_phase", "DISCOVERY"))
-    if phase not in {"DISCOVERY", "EVALUATING", "QUALIFIED_SHADOW"}:
+    if phase not in {
+        "DISCOVERY", "EVALUATING", "RESEARCH_FILTERED",
+        "EVALUATING_FILTERED", "QUALIFIED_SHADOW",
+    }:
         raise ValueError("maker evidence wave is not active")
     net = _decimal(net_pnl_quote, name="net_pnl_quote")
     cycles = int(state.get("wave_cycles", 0)) + 1
@@ -36,19 +77,24 @@ def advance_evidence_wave(
     if cycles < target_cycles:
         return updated
     passed = wave_net > 0 and positive >= max(2, target_cycles // 3)
-    next_phase = (
-        "EVALUATING" if phase == "DISCOVERY" and passed else
-        "QUALIFIED_SHADOW" if phase in {"EVALUATING", "QUALIFIED_SHADOW"} and passed else
-        "RESEARCH_ONLY"
-    )
+    if phase == "DISCOVERY":
+        next_phase = "EVALUATING" if passed else "RESEARCH_FILTERED"
+    elif phase == "EVALUATING":
+        next_phase = "QUALIFIED_SHADOW" if passed else "RESEARCH_FILTERED"
+    elif phase == "RESEARCH_FILTERED":
+        next_phase = "EVALUATING_FILTERED" if passed else "RESEARCH_ONLY"
+    else:
+        next_phase = "QUALIFIED_SHADOW" if passed else "RESEARCH_ONLY"
     analysis = {
         "stage": phase, "cycles": cycles, "positive_cycles": positive,
         "net_pnl_quote": format(wave_net, "f"), "outcomes": dict(sorted(outcomes.items())),
         "passed_after_cost_gate": passed, "next_research_phase": next_phase,
         "finding": ("PROSPECTIVE_AFTER_COST_EDGE_REQUIRES_NEXT_WAVE"
-                    if next_phase == "EVALUATING" else
+                    if next_phase in {"EVALUATING", "EVALUATING_FILTERED"} else
                     "PROSPECTIVE_AFTER_COST_EDGE_REPEATED"
                     if next_phase == "QUALIFIED_SHADOW" else
+                    "TRY_ONE_PREREGISTERED_NEUTRAL_FLOW_FILTER"
+                    if next_phase == "RESEARCH_FILTERED" else
                     "NO_REPEATABLE_AFTER_COST_MAKER_EDGE"),
         "automatic_promotion": False, "network_orders": False,
         "trading_authority": False,
@@ -206,5 +252,6 @@ def evaluate_quote(
         result, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     return result
+
 
 

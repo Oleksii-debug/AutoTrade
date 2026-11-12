@@ -205,7 +205,9 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
             args[index + 1] for index, value in enumerate(args[:-1])
             if value == "--market"
         ]
-        assert markets == ["BTC_USDT", "ETH_USDT", "SOL_USDT", "PEPE_USDT"]
+        assert markets == [
+            "BTC_USDT", "ETH_USDT", "SOL_USDT", "PEPE_USDT", "ENA_USDT",
+        ]
     groq = next(row for row in manifest["processes"] if row["id"] == "groq-advisory")
     checkpoint_index = groq["args"].index("--checkpoint") + 1
     assert groq["args"][checkpoint_index].endswith(

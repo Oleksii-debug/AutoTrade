@@ -255,12 +255,59 @@ def _opportunity_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _trade_flow_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != "autotrade-whitebit-trade-flow-supervisor-v1"
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or int(document.get("paid_model_calls", -1)) != 0
+            or type(document.get("results")) is not dict):
+        raise ValueError("trade-flow checkpoint authority or schema differs")
+    markets = []
+    qualified = 0
+    final_consumed = 0
+    for market, result in sorted(document["results"].items()):
+        if type(result) is not dict:
+            raise ValueError("trade-flow market result is malformed")
+        is_qualified = result.get("prospective_qualification") is True
+        consumed = result.get("final_consumed") is True
+        qualified += is_qualified
+        final_consumed += consumed
+        markets.append({
+            "market": market,
+            "status": str(result.get("status", "UNKNOWN")),
+            "available_causal_buckets": int(
+                result.get("available_causal_buckets", 0)
+            ),
+            "prospective_qualification": is_qualified,
+            "final_consumed": consumed,
+            "result_sha256": result.get("result_sha256"),
+        })
+    return {
+        "status": str(document.get("phase", "UNKNOWN")),
+        "checkpointed_at": document.get("checkpointed_at"),
+        "minimum_buckets": int(document.get("minimum_buckets", 0)),
+        "market_count": len(markets),
+        "qualified_market_count": qualified,
+        "final_consumed_market_count": final_consumed,
+        "markets": markets,
+        "paid_model_calls": 0,
+        "network_orders": False,
+        "trading_authority": False,
+        "automatic_promotion": False,
+    }
+
+
 def run_cycle(*, organism_root: Path, market_snapshot: Path,
               now: datetime | None = None,
               learning_fleet_checkpoint: Path | None = None,
               forward_shadow_checkpoint: Path | None = None,
               rolling_alpha_checkpoint: Path | None = None,
-              opportunity_checkpoint: Path | None = None) -> dict[str, object]:
+              opportunity_checkpoint: Path | None = None,
+              trade_flow_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -360,6 +407,9 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     opportunity_path = opportunity_checkpoint or (
         runtime_root / "whitebit-opportunity-screen-v1-20261112" / "checkpoint.json"
     )
+    trade_flow_path = trade_flow_checkpoint or (
+        runtime_root / "whitebit-trade-flow-screen-v1-20261112" / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -374,6 +424,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
             "forward_shadow": _forward_shadow_summary(shadow_path),
             "rolling_native_alpha": _rolling_alpha_summary(rolling_path),
             "opportunity_screen": _opportunity_summary(opportunity_path),
+            "trade_flow_screen": _trade_flow_summary(trade_flow_path),
         },
         "network_orders": False,
         "trading_authority": False,
@@ -444,4 +495,5 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

@@ -59,6 +59,7 @@ def test_depth_tape_is_restart_safe_and_public_only(tmp_path):
         mid_price="100", spread_bps="200", bid_depth_top5="3",
         ask_depth_top5="2", imbalance_top5="0.2",
         bid_quantity_change="0", ask_quantity_change="0",
+        order_flow_imbalance="2",
         source_sha256="sha256:" + "a" * 64,
     )
     first = WhiteBitDepthTapeStore(path, bucket_seconds=1, retention_days=3)
@@ -71,5 +72,37 @@ def test_depth_tape_is_restart_safe_and_public_only(tmp_path):
     assert status["market_bucket_counts"] == {"BTC_USDT": 1}
     assert status["public_data_only"] is True
     assert status["trading_authority"] is False
+
+
+def test_causal_ofi_uses_best_quote_transition():
+    book = DepthLocalBook("BTC_USDT", limit=5)
+    book.apply(parse_depth_message(frame(), market="BTC_USDT", received_at=NOW),
+               generation=1)
+    raw = json.loads(frame(False, 10, 11))
+    raw["params"][1]["bids"] = [["99", "5"]]
+    raw["params"][1]["asks"] = [["101", "1"]]
+    observed = book.apply(parse_depth_message(json.dumps(raw), market="BTC_USDT",
+        received_at=NOW), generation=1)
+    assert observed.order_flow_imbalance == "3"
+
+
+def test_persistent_l2_pressure_confirms_only_matching_direction(tmp_path):
+    path = tmp_path / "pressure.sqlite3"
+    store = WhiteBitDepthTapeStore(path, bucket_seconds=1, retention_days=3)
+    for offset in range(10):
+        store.ingest(DepthBookObservation(
+            market="BTC_USDT", received_at=NOW.replace(second=offset), generation=1,
+            update_id=offset + 1, past_update_id=offset or None,
+            snapshot=offset == 0, bid_price="99", ask_price="99.01",
+            mid_price="99.005", spread_bps="1", bid_depth_top5="6",
+            ask_depth_top5="4", imbalance_top5="0.2",
+            bid_quantity_change="1", ask_quantity_change="-1",
+            order_flow_imbalance="2", source_sha256="sha256:" + "b" * 64))
+    now_epoch = int(NOW.replace(second=9).timestamp())
+    long = store.microstructure_confirmation("BTC_USDT", "LONG", now_epoch=now_epoch)
+    short = store.microstructure_confirmation("BTC_USDT", "SHORT", now_epoch=now_epoch)
+    store.close()
+    assert long["status"] == "CONFIRMED"
+    assert short["status"] == "CONFLICT"
 
 

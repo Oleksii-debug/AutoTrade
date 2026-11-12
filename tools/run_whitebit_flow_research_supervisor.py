@@ -51,7 +51,9 @@ def _bounded_runs(path: Path, maximum: int) -> None:
 
 def execute_cycle(*, trade_tape: Path, state_dir: Path, markets: list[str],
                   minimum_buckets: int, round_trip_cost_bps: str,
-                  maximum_runs: int, now: datetime) -> dict:
+                  maximum_runs: int, now: datetime,
+                  medium_minimum_buckets: int = MEDIUM_MINIMUM_BUCKETS,
+                  medium_round_trip_cost_bps: str = MEDIUM_ROUND_TRIP_COST_BPS) -> dict:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("flow-research clock must be timezone-aware")
     volatility = {}
@@ -77,9 +79,9 @@ def execute_cycle(*, trade_tape: Path, state_dir: Path, markets: list[str],
         try:
             row = screen_medium_horizon_flow(
                 trade_tape, market,
-                minimum_buckets=MEDIUM_MINIMUM_BUCKETS,
+                minimum_buckets=medium_minimum_buckets,
                 minimum_trades=2,
-                round_trip_cost_bps=MEDIUM_ROUND_TRIP_COST_BPS,
+                round_trip_cost_bps=medium_round_trip_cost_bps,
             )
             medium_horizon[row["market"]] = row
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
@@ -104,8 +106,8 @@ def execute_cycle(*, trade_tape: Path, state_dir: Path, markets: list[str],
         },
         "lead_lag": lead_lag,
         "medium_horizon": {
-            "minimum_buckets": MEDIUM_MINIMUM_BUCKETS,
-            "round_trip_cost_bps": MEDIUM_ROUND_TRIP_COST_BPS,
+            "minimum_buckets": medium_minimum_buckets,
+            "round_trip_cost_bps": medium_round_trip_cost_bps,
             "market_count": len(medium_horizon),
             "qualified_count": sum(
                 bool(row["prospective_qualification"])
@@ -150,6 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--market", action="append", dest="markets")
     parser.add_argument("--minimum-buckets", type=int, default=300)
     parser.add_argument("--round-trip-cost-bps", default="26")
+    parser.add_argument(
+        "--medium-minimum-buckets", type=int, default=MEDIUM_MINIMUM_BUCKETS,
+    )
+    parser.add_argument(
+        "--medium-round-trip-cost-bps", default=MEDIUM_ROUND_TRIP_COST_BPS,
+    )
     parser.add_argument("--interval-seconds", type=int, default=1800)
     parser.add_argument("--maximum-runs", type=int, default=48)
     parser.add_argument("--stop-file", type=Path, required=True)
@@ -160,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("at least two unique markets are required")
     if args.minimum_buckets < 300:
         parser.error("minimum-buckets must be at least 300")
+    if args.medium_minimum_buckets < 300:
+        parser.error("medium-minimum-buckets must be at least 300")
     if not 300 <= args.interval_seconds <= 604800:
         parser.error("interval-seconds must be 300..604800")
     if not 1 <= args.maximum_runs <= 336:
@@ -222,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
                         markets=markets, minimum_buckets=args.minimum_buckets,
                         round_trip_cost_bps=args.round_trip_cost_bps,
                         maximum_runs=args.maximum_runs, now=now,
+                        medium_minimum_buckets=args.medium_minimum_buckets,
+                        medium_round_trip_cost_bps=args.medium_round_trip_cost_bps,
                     )
                     result = {
                         "result_sha256": report["result_sha256"],

@@ -16,7 +16,8 @@ from urllib.error import URLError
 from autotrade_research.integrations.whitebit_public import (
     BASE, KLINE_BASE, MAX_BYTES, MAX_CANDLES, WS, PublicDataError,
     WhiteBitPublicClient, _NoRedirect, _kline_query, _public_url, decode_public_json,
-    parse_klines, parse_market_activity, parse_orderbook, parse_spot_markets,
+    parse_funding_history, parse_klines, parse_market_activity, parse_orderbook,
+    parse_public_futures, parse_public_instruments, parse_spot_markets,
     plan_kline_windows,
 )
 
@@ -25,7 +26,8 @@ BOOK = {"ticker_id": "BTC_USDT", "timestamp": int(NOW.timestamp()),
         "bids": [["100", "2"], ["99", "3"]], "asks": [["101", "4"], ["102", "5"]]}
 MARKET = {"name": "BTC_USDT", "stock": "BTC", "money": "USDT", "stockPrec": "8",
           "moneyPrec": "2", "minAmount": "0.00001", "minTotal": "5",
-          "type": "spot", "tradesEnabled": True, "delistedAt": None}
+          "type": "spot", "tradesEnabled": True, "delistedAt": None,
+          "makerFee": "0.1", "takerFee": "0.1", "tickSize": "0.01", "stepSize": "0.00001"}
 TICKER = {"base_id": 1, "quote_id": 825, "last_price": "9164.09",
           "quote_volume": "43341942.90416876", "base_volume": "4723.286463",
           "isFrozen": False, "change": "-0.57"}
@@ -162,6 +164,50 @@ class MarketTests(unittest.TestCase):
     def test_invalid_precision(self):
         with self.assertRaisesRegex(PublicDataError, "PRECISION"):
             parse_spot_markets(raw([dict(MARKET, stockPrec="99")]))
+
+    def test_public_instruments_convert_percent_fees_to_rates(self):
+        future = dict(MARKET, name="BTC_PERP", money="USDT", type="futures",
+                      makerFee="0.01", takerFee="0.055")
+        rows = parse_public_instruments(raw([MARKET, future]))
+        self.assertEqual([(r.market, r.taker_fee_rate) for r in rows], [
+            ("BTC_PERP", "0.00055"), ("BTC_USDT", "0.001"),
+        ])
+
+
+class FuturesTests(unittest.TestCase):
+    future = {
+        "ticker_id": "BTC_PERP", "stock_currency": "BTC", "money_currency": "USDT",
+        "last_price": "100", "bid": "99.9", "ask": "100.1", "mark_price": "100.02",
+        "index_price": "100", "money_volume": "1000000", "open_interest": "500000",
+        "funding_rate": "0.0001", "funding_interval_minutes": 480,
+        "max_leverage": 50, "product_type": "Perpetual",
+    }
+
+    def test_futures_and_funding_are_exact_and_provenanced(self):
+        body = raw({"success": True, "message": None, "result": [self.future]})
+        future = parse_public_futures(body, NOW)[0]
+        self.assertEqual((future.market, future.funding_rate), ("BTC_PERP", "0.0001"))
+        rows = [
+            {"fundingTime": str(int(NOW.timestamp()) - 3600), "fundingRate": "0.0001",
+             "market": "BTC_PERP", "settlementPrice": "100",
+             "rateCalculatedTime": str(int(NOW.timestamp()) - 7200)},
+            {"fundingTime": str(int(NOW.timestamp()) - 10800), "fundingRate": "-0.00005",
+             "market": "BTC_PERP", "settlementPrice": "99",
+             "rateCalculatedTime": str(int(NOW.timestamp()) - 14400)},
+        ]
+        history = parse_funding_history(raw(rows), "BTC_PERP", NOW, limit=2, offset=0)
+        self.assertEqual([r.funding_rate for r in history.records], ["0.0001", "-0.00005"])
+        self.assertEqual(history.source_uri, BASE + "funding-history/BTC_PERP?limit=2&offset=0")
+
+    def test_funding_order_market_and_bounds_are_enforced(self):
+        row = {"fundingTime": str(int(NOW.timestamp()) - 3600), "fundingRate": "0.0001",
+               "market": "BTC_PERP", "settlementPrice": "100",
+               "rateCalculatedTime": str(int(NOW.timestamp()) - 7200)}
+        with self.assertRaisesRegex(PublicDataError, "ORDER"):
+            parse_funding_history(raw([row, row]), "BTC_PERP", NOW, limit=2, offset=0)
+        with self.assertRaisesRegex(PublicDataError, "RECORD"):
+            parse_funding_history(raw([dict(row, market="ETH_PERP")]), "BTC_PERP", NOW,
+                                  limit=2, offset=0)
 
 
 class ActivityTests(unittest.TestCase):
@@ -381,3 +427,4 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -29,6 +29,7 @@ ACTIVITY_KLINE_ADAPTER_VERSION = "whitebit-public-activity-kline-v1"
 MAX_BYTES = 1_048_576
 MAX_DEPTH = 16
 MAX_CANDLES = 1440
+MAX_FUNDING_RECORDS = 100
 SYMBOL = re.compile(r"[A-Z0-9]{1,20}_[A-Z0-9]{1,20}\Z")
 NUMBER = re.compile(r"(?:0|[1-9][0-9]{0,35})(?:\.[0-9]{1,24})?\Z")
 SIGNED_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]{0,35})(?:\.[0-9]{1,24})?\Z")
@@ -292,6 +293,67 @@ class PublicBook:
         )
 
 
+@dataclass(frozen=True)
+class PublicInstrument:
+    market: str
+    base_asset: str
+    quote_asset: str
+    instrument_type: str
+    maker_fee_rate: str
+    taker_fee_rate: str
+    minimum_quantity: str
+    minimum_notional: str
+    tick_size: str
+    step_size: str
+    trades_enabled: bool
+
+
+@dataclass(frozen=True)
+class PublicFutureMarket:
+    market: str
+    base_asset: str
+    quote_asset: str
+    received_at: datetime
+    last_price: str
+    bid: str
+    ask: str
+    mark_price: str
+    index_price: str
+    quote_volume: str
+    open_interest: str
+    funding_rate: str
+    funding_interval_minutes: int
+    max_leverage: int
+    raw: bytes = field(repr=False)
+    source_uri: str = BASE + "futures"
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + sha256(self.raw).hexdigest()
+
+
+@dataclass(frozen=True)
+class PublicFundingRecord:
+    market: str
+    funding_time: datetime
+    rate_calculated_time: datetime
+    funding_rate: str
+    settlement_price: str
+
+
+@dataclass(frozen=True)
+class PublicFundingHistory:
+    market: str
+    received_at: datetime
+    records: tuple[PublicFundingRecord, ...]
+    raw: bytes = field(repr=False)
+    source_uri: str
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + sha256(self.raw).hexdigest()
+
+
 def parse_orderbook(raw: bytes, market: str, received_at: datetime) -> PublicBook:
     market, received_at = _symbol(market), _utc(received_at)
     data = decode_public_json(raw)
@@ -368,6 +430,149 @@ def parse_spot_markets(raw: bytes) -> tuple[dict[str, Any], ...]:
             "market_environment": "PRODUCTION_PUBLIC", "execution_environment": "SIMULATION_ONLY",
         })
     return tuple(result)
+
+
+def parse_public_instruments(raw: bytes) -> tuple[PublicInstrument, ...]:
+    """Parse the public instrument catalogue, including exact published fees.
+
+    WhiteBIT publishes fee values as percentages (``0.1`` means 0.1%).  The
+    canonical objects expose decimal rates (``0.001``) so cost arithmetic
+    cannot accidentally treat a percentage as a multiplier.
+    """
+    data = decode_public_json(raw)
+    if type(data) is not list or not 1 <= len(data) <= 10000:
+        raise PublicDataError("INVALID_MARKET_LIST")
+    result, seen = [], set()
+    with localcontext() as context:
+        context.prec = 80
+        for row in data:
+            if type(row) is not dict or row.get("type") not in ("spot", "futures"):
+                continue
+            market = _symbol(row.get("name"))
+            if market in seen:
+                raise PublicDataError("DUPLICATE_MARKET")
+            seen.add(market)
+            base, quote = row.get("stock"), row.get("money")
+            expected_market = f"{base}_{quote}" if row["type"] == "spot" else f"{base}_PERP"
+            if (type(base) is not str or type(quote) is not str
+                    or market != expected_market):
+                raise PublicDataError("ASSET_ID_MISMATCH")
+            enabled = row.get("tradesEnabled")
+            if type(enabled) is not bool:
+                raise PublicDataError("UNKNOWN_TRADING_STATUS")
+            if not enabled or row.get("delistedAt") is not None:
+                continue
+            maker = _decimal(row.get("makerFee")) / Decimal(100)
+            taker = _decimal(row.get("takerFee")) / Decimal(100)
+            result.append(PublicInstrument(
+                market=market,
+                base_asset=base,
+                quote_asset=quote,
+                instrument_type=row["type"],
+                maker_fee_rate=format(maker, "f"),
+                taker_fee_rate=format(taker, "f"),
+                minimum_quantity=format(_decimal(row.get("minAmount"), positive=True), "f"),
+                minimum_notional=format(_decimal(row.get("minTotal"), positive=True), "f"),
+                tick_size=format(_decimal(row.get("tickSize"), positive=True), "f"),
+                step_size=format(_decimal(row.get("stepSize"), positive=True), "f"),
+                trades_enabled=enabled,
+            ))
+    return tuple(sorted(result, key=lambda item: item.market))
+
+
+def parse_public_futures(raw: bytes, received_at: datetime) -> tuple[PublicFutureMarket, ...]:
+    received_at = _utc(received_at)
+    data = decode_public_json(raw)
+    if (type(data) is not dict or data.get("success") is not True
+            or data.get("message") not in (None, "")):
+        raise PublicDataError("INVALID_FUTURES_RESPONSE")
+    rows = data.get("result")
+    if type(rows) is not list or not 1 <= len(rows) <= 5000:
+        raise PublicDataError("INVALID_FUTURES_RESPONSE")
+    result, seen = [], set()
+    for row in rows:
+        if type(row) is not dict or row.get("product_type") != "Perpetual":
+            raise PublicDataError("INVALID_FUTURES_RECORD")
+        market = _symbol(row.get("ticker_id"))
+        if market in seen:
+            raise PublicDataError("DUPLICATE_MARKET")
+        seen.add(market)
+        base, quote = row.get("stock_currency"), row.get("money_currency")
+        if (type(base) is not str or type(quote) is not str
+                or market != f"{base}_PERP"):
+            raise PublicDataError("ASSET_ID_MISMATCH")
+        bid, ask = _decimal(row.get("bid"), positive=True), _decimal(row.get("ask"), positive=True)
+        if bid >= ask:
+            raise PublicDataError("CROSSED_OR_LOCKED_FUTURES_QUOTE")
+        interval, leverage = row.get("funding_interval_minutes"), row.get("max_leverage")
+        if (type(interval) is not int or not 1 <= interval <= 10080
+                or type(leverage) is not int or not 1 <= leverage <= 1000):
+            raise PublicDataError("INVALID_FUTURES_LIMIT")
+        result.append(PublicFutureMarket(
+            market=market,
+            base_asset=base,
+            quote_asset=quote,
+            received_at=received_at,
+            last_price=format(_decimal(row.get("last_price"), positive=True), "f"),
+            bid=format(bid, "f"), ask=format(ask, "f"),
+            mark_price=format(_decimal(row.get("mark_price"), positive=True), "f"),
+            index_price=format(_decimal(row.get("index_price"), positive=True), "f"),
+            quote_volume=format(_decimal(row.get("money_volume")), "f"),
+            open_interest=format(_decimal(row.get("open_interest")), "f"),
+            funding_rate=format(_signed_decimal(row.get("funding_rate")), "f"),
+            funding_interval_minutes=interval,
+            max_leverage=leverage,
+            raw=raw,
+        ))
+    return tuple(sorted(result, key=lambda item: item.market))
+
+
+def _provider_epoch_string(value: Any) -> datetime:
+    if type(value) is not str or re.fullmatch(r"[0-9]{10}", value) is None:
+        raise PublicDataError("EXPECTED_EPOCH_SECONDS")
+    try:
+        return datetime.fromtimestamp(int(value), timezone.utc)
+    except (OSError, ValueError, OverflowError):
+        raise PublicDataError("INVALID_SOURCE_TIME") from None
+
+
+def parse_funding_history(
+    raw: bytes, market: str, received_at: datetime, *, limit: int, offset: int,
+) -> PublicFundingHistory:
+    market, received_at = _symbol(market), _utc(received_at)
+    if type(limit) is not int or not 1 <= limit <= MAX_FUNDING_RECORDS:
+        raise PublicDataError("INVALID_FUNDING_LIMIT")
+    if type(offset) is not int or not 0 <= offset <= 1_000_000:
+        raise PublicDataError("INVALID_FUNDING_OFFSET")
+    data = decode_public_json(raw)
+    if type(data) is not list or len(data) > limit:
+        raise PublicDataError("INVALID_FUNDING_RESPONSE")
+    records, previous = [], None
+    for row in data:
+        if type(row) is not dict or row.get("market") != market:
+            raise PublicDataError("INVALID_FUNDING_RECORD")
+        funding_time = _provider_epoch_string(row.get("fundingTime"))
+        calculated = _provider_epoch_string(row.get("rateCalculatedTime"))
+        if funding_time > received_at or calculated > funding_time:
+            raise PublicDataError("INVALID_FUNDING_TIME")
+        if previous is not None and funding_time >= previous:
+            raise PublicDataError("OUT_OF_ORDER_OR_DUPLICATE_FUNDING")
+        previous = funding_time
+        records.append(PublicFundingRecord(
+            market=market,
+            funding_time=funding_time,
+            rate_calculated_time=calculated,
+            funding_rate=format(_signed_decimal(row.get("fundingRate")), "f"),
+            settlement_price=format(_decimal(row.get("settlementPrice"), positive=True), "f"),
+        ))
+    query = (("limit", str(limit)), ("offset", str(offset)))
+    return PublicFundingHistory(
+        market=market,
+        received_at=received_at,
+        records=tuple(records),
+        raw=raw,
+        source_uri=_public_url("funding-history/" + market, query),
+    )
 
 
 def parse_market_activity(raw: bytes, received_at: datetime) -> tuple[PublicTicker, ...]:
@@ -535,10 +740,12 @@ def plan_kline_windows(
 def _public_url(endpoint: str, query: tuple[tuple[str, str], ...] = ()) -> str:
     if type(endpoint) is not str or type(query) is not tuple:
         raise PublicDataError("PUBLIC_ENDPOINT_NOT_ALLOWED")
-    if endpoint in ("markets", "ticker"):
+    if endpoint in ("markets", "ticker", "futures"):
         allowed, root = (), BASE
     elif re.fullmatch(r"orderbook/[A-Z0-9]{1,20}_[A-Z0-9]{1,20}", endpoint):
         allowed, root = ("limit", "level"), BASE
+    elif re.fullmatch(r"funding-history/[A-Z0-9]{1,20}_PERP", endpoint):
+        allowed, root = ("limit", "offset"), BASE
     elif endpoint == "kline":
         allowed, root = ("market", "start", "end", "interval", "limit"), KLINE_BASE
     else:
@@ -554,10 +761,20 @@ def _public_url(endpoint: str, query: tuple[tuple[str, str], ...] = ()) -> str:
         raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
     if keys != tuple(key for key in allowed if key in keys):
         raise PublicDataError("NON_CANONICAL_PUBLIC_QUERY")
-    if endpoint in ("markets", "ticker") and query:
+    if endpoint in ("markets", "ticker", "futures") and query:
         raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
     if endpoint.startswith("orderbook/") and query != (("limit", "100"), ("level", "0")):
         raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
+    if endpoint.startswith("funding-history/"):
+        expected = (("limit", query[0][1]), ("offset", query[1][1])) if len(query) == 2 else ()
+        if query != expected:
+            raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
+        try:
+            limit, offset = int(query[0][1]), int(query[1][1])
+        except (ValueError, IndexError):
+            raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED") from None
+        if not 1 <= limit <= MAX_FUNDING_RECORDS or not 0 <= offset <= 1_000_000:
+            raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
     suffix = "?" + urlencode(query) if query else ""
     return root + endpoint + suffix
 
@@ -625,6 +842,35 @@ class WhiteBitPublicClient:
     def markets(self) -> tuple[dict[str, Any], ...]:
         raw, _ = self._read("markets")
         return parse_spot_markets(raw)
+
+    def instruments(self) -> tuple[PublicInstrument, ...]:
+        raw, _ = self._read("markets")
+        return parse_public_instruments(raw)
+
+    def futures_markets(self) -> tuple[PublicFutureMarket, ...]:
+        raw, received = self._read("futures")
+        return parse_public_futures(raw, received)
+
+    def funding_history(
+        self, market: str, *, limit: int = MAX_FUNDING_RECORDS, offset: int = 0,
+    ) -> PublicFundingHistory:
+        market = _symbol(market)
+        if not market.endswith("_PERP"):
+            raise PublicDataError("FUNDING_REQUIRES_PERPETUAL")
+        if type(limit) is not int or not 1 <= limit <= MAX_FUNDING_RECORDS:
+            raise PublicDataError("INVALID_FUNDING_LIMIT")
+        if type(offset) is not int or not 0 <= offset <= 1_000_000:
+            raise PublicDataError("INVALID_FUNDING_OFFSET")
+        query = (("limit", str(limit)), ("offset", str(offset)))
+        raw, received = self._read("funding-history/" + market, query)
+        return parse_funding_history(raw, market, received, limit=limit, offset=offset)
+
+    def instrument_orderbook(self, market: str) -> PublicBook:
+        """Read a public spot or perpetual book without granting order authority."""
+        market = _symbol(market)
+        query = (("limit", "100"), ("level", "0"))
+        raw, received = self._read("orderbook/" + market, query)
+        return parse_orderbook(raw, market, received)
 
     def spot_market_snapshot(
         self, market: str,

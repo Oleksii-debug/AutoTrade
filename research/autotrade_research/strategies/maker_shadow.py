@@ -88,6 +88,7 @@ def advance_evidence_wave(
     analysis = {
         "stage": phase, "cycles": cycles, "positive_cycles": positive,
         "net_pnl_quote": format(wave_net, "f"), "outcomes": dict(sorted(outcomes.items())),
+        "unclassified_outcome_count": max(0, cycles - sum(outcomes.values())),
         "passed_after_cost_gate": passed, "next_research_phase": next_phase,
         "finding": ("PROSPECTIVE_AFTER_COST_EDGE_REQUIRES_NEXT_WAVE"
                     if next_phase in {"EVALUATING", "EVALUATING_FILTERED"} else
@@ -252,6 +253,7 @@ def evaluate_quote(
         result, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     return result
+
 
 
 

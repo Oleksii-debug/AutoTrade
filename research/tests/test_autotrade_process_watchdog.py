@@ -197,6 +197,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-opportunity-screen",
         "whitebit-funding-carry-shadow",
         "whitebit-course-research",
+        "whitebit-depth-tape",
     ]
     assert "sol-trend-forward-shadow" not in {
         row["id"] for row in manifest["processes"]
@@ -251,6 +252,15 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert groq["args"][checkpoint_index].endswith(
         "whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json"
     )
+    depth = processes["whitebit-depth-tape"]
+    depth_markets = [
+        depth["args"][index + 1]
+        for index, value in enumerate(depth["args"][:-1]) if value == "--market"
+    ]
+    assert depth_markets == [
+        "BTC_USDT", "ETH_USDT", "SOL_USDT",
+        "BTC_PERP", "ETH_PERP", "SOL_PERP",
+    ]
 
 
 def test_duplicate_watchdog_does_not_start_or_consume_owner_stop(tmp_path):
@@ -326,6 +336,7 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
+
 
 
 

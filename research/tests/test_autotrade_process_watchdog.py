@@ -188,6 +188,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-pepe-maker-shadow",
         "whitebit-ena-maker-shadow",
         "whitebit-stable-fiat-triangle-shadow",
+        "whitebit-maker-universe-screen",
         "learning-fleet-diagnostics", "groq-advisory", "rolling-native-alpha",
         "whitebit-opportunity-screen",
         "whitebit-funding-carry-shadow",

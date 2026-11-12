@@ -37,11 +37,21 @@ class TechnicalConfluenceTests(unittest.TestCase):
     def test_signal_uses_next_open_and_has_no_order_authority(self):
         result = simulate(bars(), candidate="TECHNICAL_CONFLUENCE",
             configuration=TechnicalConfiguration(rsi_long_max="100",
-                minimum_expected_move_fraction="0.001", maximum_hold_bars=30))
+                minimum_expected_move_fraction="0.001", maximum_hold_bars=30,
+                stop_atr="0.10", take_profit_atr="3"))
         self.assertGreater(result["closed_cycles"], 0)
         self.assertEqual(result["round_trip_cost_bps"], "15.0")
         self.assertFalse(result["network_orders"])
         self.assertFalse(result["trading_authority"])
+
+    def test_sub_two_to_one_thesis_is_hold_before_entry(self):
+        result = simulate(bars(), candidate="TECHNICAL_CONFLUENCE",
+            configuration=TechnicalConfiguration(rsi_long_max="100",
+                minimum_expected_move_fraction="0.001", maximum_hold_bars=30,
+                stop_atr="2", take_profit_atr="3"))
+        self.assertEqual(result["closed_cycles"], 0)
+        self.assertGreater(result["pretrade_holds"], 0)
+        self.assertIn("GROSS_REWARD_RISK", result["pretrade_hold_reasons"])
 
     def test_short_control_profits_in_falling_market(self):
         result = simulate(bars(falling=True), candidate="HOLD_SHORT")
@@ -73,3 +83,4 @@ class TechnicalConfluenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

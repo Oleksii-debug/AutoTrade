@@ -80,7 +80,8 @@ def _perfect_timing_benchmark(rows: list[dict], hold_cap: int) -> dict:
 def _compare_variant(cut: list[dict], hold_cap: int) -> dict:
     result = simulate(cut, candidate="TECHNICAL_CONFLUENCE",
                       configuration=replace(configurations()[0], maximum_hold_bars=hold_cap),
-                      report_daily_returns=True, report_hourly_returns=True)
+                      report_daily_returns=True, report_hourly_returns=True,
+                      protective_stop_intrabar=True)
     result["perfect_timing_benchmark"] = _perfect_timing_benchmark(cut, hold_cap)
     return result
 
@@ -118,7 +119,8 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
         value = locked_final_screen(rows, train_count=train,
             development_count=development, dataset_sha256=identity,
             configurations=configurations(), minimum_cycles=5,
-            gate_policy="POSITIVE_AFTER_COSTS")
+            gate_policy="POSITIVE_AFTER_COSTS", report_hourly_returns=True,
+            protective_stop_intrabar=True)
         full_path = state_dir / "runs" / market.lower() / f"{value['result_sha256']}.json"
         atomic_write_json(full_path, value)
         horizons = compare_horizons(rows, train_count=train, development_count=development)
@@ -128,6 +130,7 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
         horizon_path = full_path.parent / f"{horizons['report_sha256']}.horizons.json"
         atomic_write_json(horizon_path, horizons)
         results[market] = {"dataset_identity_sha256": identity,
+            "execution_model": value["execution_model"],
             "selected_configuration": value["selected_configuration"],
             "final_consumed": value["final_consumed"],
             "prospective_qualification": value["prospective_qualification"],

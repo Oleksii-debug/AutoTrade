@@ -74,7 +74,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
         configurations: tuple[TechnicalConfiguration, ...],
         costs: TechnicalCosts = TechnicalCosts(), minimum_cycles: int = 10,
         maximum_drawdown_fraction: str = "0.20",
-        gate_policy: str = "BEAT_ALL_CONTROLS", report_hourly_returns: bool = False) -> dict:
+        gate_policy: str = "BEAT_ALL_CONTROLS", report_hourly_returns: bool = False,
+        protective_stop_intrabar: bool = False) -> dict:
     validate_bars(bars, require_ohlcv=True); costs.validate()
     if not 1 <= len(configurations) <= 128:
         raise ValueError("technical grid must contain 1..128 configurations")
@@ -103,7 +104,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
     screened = []
     for identity, config in sorted(unique.items()):
         train = simulate(parts["TRAIN"], candidate=CANDIDATES[-1], costs=costs,
-                         configuration=config, report_hourly_returns=report_hourly_returns)
+                         configuration=config, report_hourly_returns=report_hourly_returns,
+                         protective_stop_intrabar=protective_stop_intrabar)
         train_reasons = _reasons(train, controls["TRAIN"], stage="TRAIN",
             minimum_cycles=minimum_cycles, maximum_drawdown=maximum,
             gate_policy=gate_policy)
@@ -111,7 +113,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
         if not train_reasons:
             development = simulate(parts["DEVELOPMENT"], candidate=CANDIDATES[-1],
                                    costs=costs, configuration=config,
-                                   report_hourly_returns=report_hourly_returns)
+                                   report_hourly_returns=report_hourly_returns,
+                                   protective_stop_intrabar=protective_stop_intrabar)
             development_reasons = _reasons(development, controls["DEVELOPMENT"],
                 stage="DEVELOPMENT", minimum_cycles=minimum_cycles,
                 maximum_drawdown=maximum, gate_policy=gate_policy)
@@ -132,7 +135,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
         config = TechnicalConfiguration(**selected["configuration"])
         final = [simulate(parts["FINAL"], candidate=name, costs=costs,
                           configuration=config,
-                          report_hourly_returns=report_hourly_returns and name == CANDIDATES[-1])
+                          report_hourly_returns=report_hourly_returns and name == CANDIDATES[-1],
+                          protective_stop_intrabar=protective_stop_intrabar and name == CANDIDATES[-1])
                  for name in CANDIDATES]
         candidate = final[-1]
         final_reasons = _reasons(candidate, final[:-1], stage="FINAL",
@@ -160,6 +164,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
             "rules_are_formal_not_discretionary": True},
         "canonical_qualification": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
+    if protective_stop_intrabar:
+        result["execution_model"] = screened[0]["train"]["execution_model"]
     result["result_sha256"] = digest(result)
     return result
 

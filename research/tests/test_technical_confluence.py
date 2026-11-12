@@ -105,6 +105,59 @@ class TechnicalConfluenceTests(unittest.TestCase):
         self.assertGreater(gated["pretrade_hold_reasons"]["HOURLY_TREND_WARMUP"], 0)
         self.assertGreater(gated["pretrade_hold_reasons"]["HOURLY_TREND_CONFLICT"], 0)
 
+    def test_protective_stop_precedes_minimum_hold_and_accounts_for_gaps(self):
+        for side in (1, -1):
+            for gap in (False, True):
+                with self.subTest(side=side, gap=gap):
+                    values = flat_bars(5)
+                    if gap and side > 0:
+                        values[2].update(open="95", low="94")
+                    elif gap:
+                        values[2].update(open="105", high="106")
+                    elif side > 0:
+                        values[1]["low"] = "98"
+                    else:
+                        values[1]["high"] = "102"
+                    costs = TechnicalCosts(fee_bps_per_fill="0", spread_bps="0",
+                        slippage_bps_per_fill="0", funding_bps_per_day="0", capital_fraction="1")
+                    cfg = TechnicalConfiguration(family="BOLLINGER_RSI_REVERSION",
+                        stop_atr="1", take_profit_atr="4", minimum_hold_bars=2, maximum_hold_bars=4)
+                    results = []
+                    for enabled in (False, True):
+                        with (
+                            patch("research.autotrade_research.strategies.technical_confluence._features",
+                                  return_value={"atr": Decimal("1"), "band_mid": Decimal("100")}),
+                            patch("research.autotrade_research.strategies.technical_confluence._entry",
+                                  side_effect=[side, 0, 0, 0, 0]),
+                        ):
+                            results.append(simulate(values, candidate="TECHNICAL_CONFLUENCE",
+                                costs=costs, configuration=cfg, protective_stop_intrabar=enabled))
+                    baseline, protected = results
+                    self.assertEqual(Decimal(baseline["net_pnl"]), 0)
+                    self.assertEqual(Decimal(protected["net_pnl"]), -50 if gap else -10)
+                    reason = "ATR_PROTECTIVE_GAP" if gap else "ATR_PROTECTIVE_TOUCH"
+                    self.assertEqual(protected["exit_reasons"], {reason: 1})
+                    self.assertEqual(protected["closed_cycles"], 1)
+
+    def test_protective_stop_is_triggered_by_executable_side(self):
+        values = flat_bars(4)
+        values[1]["low"] = "99.15"  # Reference stays above 99.10; its bid crosses it.
+        costs = TechnicalCosts(fee_bps_per_fill="0", spread_bps="20",
+            slippage_bps_per_fill="0", funding_bps_per_day="0", capital_fraction="1")
+        cfg = TechnicalConfiguration(family="BOLLINGER_RSI_REVERSION",
+            stop_atr="1", take_profit_atr="4", minimum_hold_bars=2, maximum_hold_bars=4)
+        with (
+            patch("research.autotrade_research.strategies.technical_confluence._features",
+                  return_value={"atr": Decimal("1"), "band_mid": Decimal("100")}),
+            patch("research.autotrade_research.strategies.technical_confluence._entry",
+                  side_effect=[1, 0, 0, 0]),
+        ):
+            result = simulate(values, candidate="TECHNICAL_CONFLUENCE", costs=costs,
+                configuration=cfg, protective_stop_intrabar=True)
+        self.assertEqual(result["exit_reasons"], {"ATR_PROTECTIVE_TOUCH": 1})
+        self.assertAlmostEqual(Decimal(result["net_pnl"]), -Decimal("1000") / Decimal("100.1"),
+                               places=17)
+
     def test_flat_market_does_not_create_phantom_pending_entries(self):
         result = simulate(flat_bars(), candidate="TECHNICAL_CONFLUENCE")
         self.assertEqual(result["closed_cycles"], 0)

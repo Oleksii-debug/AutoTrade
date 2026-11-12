@@ -185,6 +185,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "learning-btc-imbalance-fast", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "whitebit-public-trade-tape",
         "whitebit-trade-flow-screen", "whitebit-trade-flow-fast-screen",
+        "whitebit-flow-research-screen",
         "goal-attention",
         "whitebit-pepe-maker-shadow",
         "whitebit-ena-maker-shadow",

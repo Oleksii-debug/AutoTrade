@@ -61,6 +61,15 @@ class TechnicalConfluenceTests(unittest.TestCase):
         self.assertEqual(value["selected_candidate"], "CASH")
         self.assertFalse(value["network_orders"])
 
+    def test_absolute_profit_gate_is_explicit_and_preserves_controls(self):
+        value = locked_final_screen(bars(1200), train_count=700,
+            development_count=300, dataset_sha256="b" * 64,
+            configurations=default_grid()[:2], minimum_cycles=3,
+            gate_policy="POSITIVE_AFTER_COSTS")
+        self.assertEqual(value["gate_policy"], "POSITIVE_AFTER_COSTS")
+        self.assertEqual(set(value["controls"]), {"TRAIN", "DEVELOPMENT"})
+        self.assertFalse(value["canonical_qualification"])
+
 
 if __name__ == "__main__":
     unittest.main()

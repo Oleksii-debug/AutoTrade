@@ -203,6 +203,11 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert "password" not in serialized
     assert "secret" not in serialized
     processes = {row["id"]: row for row in manifest["processes"]}
+    goal_args = processes["goal-attention"]["args"]
+    flow_checkpoint_index = goal_args.index("--flow-research-checkpoint") + 1
+    assert goal_args[flow_checkpoint_index].endswith(
+        "whitebit-flow-research-screen-v1-20261112/checkpoint.json"
+    )
     for process_id in (
         "whitebit-public-trade-tape",
         "whitebit-trade-flow-screen",

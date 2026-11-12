@@ -301,6 +301,77 @@ def _trade_flow_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _flow_research_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=1_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != (
+                "autotrade-whitebit-flow-research-supervisor-v1"
+            )
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or document.get("automatic_promotion") is not False
+            or type(document.get("network_requests")) is not int
+            or document.get("network_requests") != 0
+            or type(document.get("paid_model_calls")) is not int
+            or document.get("paid_model_calls") != 0):
+        raise ValueError("flow-research checkpoint authority or schema differs")
+    cycle_count = document.get("cycle_count")
+    if type(cycle_count) is not int or cycle_count < 0:
+        raise ValueError("flow-research cycle counter is malformed")
+    seconds_raw = document.get("last_cycle_seconds")
+    if seconds_raw is None:
+        cycle_seconds = None
+    else:
+        try:
+            cycle_seconds_decimal = Decimal(str(seconds_raw))
+        except InvalidOperation as exc:
+            raise ValueError("flow-research cycle duration is malformed") from exc
+        if not cycle_seconds_decimal.is_finite() or cycle_seconds_decimal < 0:
+            raise ValueError("flow-research cycle duration is malformed")
+        cycle_seconds = format(cycle_seconds_decimal, "f")
+    last = document.get("last_result")
+    last_summary = None
+    if last is not None:
+        count_fields = (
+            "volatility_qualified_count",
+            "lead_lag_qualified_count",
+            "isolated_error_count",
+        )
+        digest = None if type(last) is not dict else last.get("result_sha256")
+        if (type(last) is not dict
+                or any(type(last.get(field)) is not int or last[field] < 0
+                       for field in count_fields)
+                or type(digest) is not str
+                or len(digest) != 64
+                or any(character not in "0123456789abcdefABCDEF"
+                       for character in digest)):
+            raise ValueError("flow-research last result is malformed")
+        last_summary = {
+            "result_sha256": digest.lower(),
+            "volatility_qualified_count": last["volatility_qualified_count"],
+            "lead_lag_qualified_count": last["lead_lag_qualified_count"],
+            "isolated_error_count": last["isolated_error_count"],
+        }
+    if cycle_count > 0 and last_summary is None:
+        raise ValueError("flow-research completed cycle lacks result")
+    return {
+        "status": str(document.get("status", "UNKNOWN")),
+        "updated_at": document.get("updated_at"),
+        "next_run_at": document.get("next_run_at"),
+        "cycle_count": cycle_count,
+        "last_cycle_seconds": cycle_seconds,
+        "last_error_class": document.get("last_error_class"),
+        "last_result": last_summary,
+        "paid_model_calls": 0,
+        "network_requests": 0,
+        "network_orders": False,
+        "trading_authority": False,
+        "automatic_promotion": False,
+    }
+
+
 def _maker_shadow_summary(path: Path) -> dict[str, object]:
     if not path.exists():
         return {"status": "NOT_AVAILABLE"}
@@ -434,6 +505,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
               rolling_alpha_checkpoint: Path | None = None,
               opportunity_checkpoint: Path | None = None,
               trade_flow_checkpoint: Path | None = None,
+              flow_research_checkpoint: Path | None = None,
               maker_shadow_checkpoint: Path | None = None,
               ena_maker_shadow_checkpoint: Path | None = None,
               triangular_shadow_checkpoint: Path | None = None) -> dict[str, object]:
@@ -539,6 +611,10 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     trade_flow_path = trade_flow_checkpoint or (
         runtime_root / "whitebit-trade-flow-screen-v1-20261112" / "checkpoint.json"
     )
+    flow_research_path = flow_research_checkpoint or (
+        runtime_root / "whitebit-flow-research-screen-v1-20261112"
+        / "checkpoint.json"
+    )
     maker_shadow_path = maker_shadow_checkpoint or (
         runtime_root / "whitebit-pepe-maker-shadow-v1-20261112" / "checkpoint.json"
     )
@@ -564,6 +640,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
             "rolling_native_alpha": _rolling_alpha_summary(rolling_path),
             "opportunity_screen": _opportunity_summary(opportunity_path),
             "trade_flow_screen": _trade_flow_summary(trade_flow_path),
+            "flow_research_screen": _flow_research_summary(flow_research_path),
             "maker_shadow": _maker_shadow_summary(maker_shadow_path),
             "ena_maker_shadow": _maker_shadow_summary(ena_maker_shadow_path),
             "stable_fiat_triangular_shadow": _triangular_shadow_summary(
@@ -588,6 +665,7 @@ def main(argv=None) -> int:
         help="0 runs one cycle; >=5 keeps the zero-model monitor active",
     )
     parser.add_argument("--stop-file")
+    parser.add_argument("--flow-research-checkpoint")
     args = parser.parse_args(argv)
     if args.poll_seconds != 0 and args.poll_seconds < 5:
         print(json.dumps({
@@ -611,6 +689,10 @@ def main(argv=None) -> int:
             report = run_cycle(
                 organism_root=Path(args.organism_root),
                 market_snapshot=Path(args.market_snapshot),
+                flow_research_checkpoint=(
+                    None if args.flow_research_checkpoint is None
+                    else Path(args.flow_research_checkpoint)
+                ),
             )
             if args.poll_seconds == 0:
                 break

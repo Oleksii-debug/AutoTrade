@@ -60,6 +60,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([trade.trade_id for trade in batch.trades], [12, 11])
         self.assertFalse(batch.trades[1].rpi)
 
+    def test_bounded_venue_clock_skew_is_accepted_but_distant_future_is_not(self):
+        batch = parse_trade_stream_message(
+            update(seconds=NOW.timestamp() + 2),
+            markets=MARKETS, received_at=NOW,
+        )
+        self.assertEqual(batch.trades[0].trade_at.timestamp(), NOW.timestamp() + 2)
+        with self.assertRaises(PublicDataError):
+            parse_trade_stream_message(
+                update(seconds=NOW.timestamp() + 6),
+                markets=MARKETS, received_at=NOW,
+            )
+
     def test_rejects_unsubscribed_future_duplicate_and_unknown_fields(self):
         duplicate = json.loads(update())
         duplicate["params"][1].append(dict(duplicate["params"][1][0]))
@@ -67,7 +79,7 @@ class ParserTests(unittest.TestCase):
         unknown["params"][1][0]["secret"] = "not allowed"
         variants = [
             update("SOL_USDT"),
-            update(seconds=NOW.timestamp() + 1),
+            update(seconds=NOW.timestamp() + 6),
             encoded(duplicate),
             encoded(unknown),
         ]

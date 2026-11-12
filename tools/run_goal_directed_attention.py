@@ -130,10 +130,66 @@ def _forward_shadow_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _rolling_alpha_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != "autotrade-whitebit-rolling-native-alpha-v1"
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or document.get("automatic_promotion") is not False):
+        raise ValueError("rolling Alpha checkpoint authority or schema differs")
+    result = document.get("last_result")
+    markets = []
+    passed = 0
+    if result is not None:
+        if type(result) is not dict or type(result.get("markets")) is not dict:
+            raise ValueError("rolling Alpha checkpoint result is malformed")
+        for market, record in sorted(result["markets"].items()):
+            evaluation = record.get("evaluation") if type(record) is dict else None
+            models = evaluation.get("models") if type(evaluation) is dict else None
+            if type(models) is not dict:
+                raise ValueError("rolling Alpha market evaluation is malformed")
+            model_rows = []
+            for name, report in sorted(models.items()):
+                if type(report) is not dict:
+                    raise ValueError("rolling Alpha model report is malformed")
+                qualified = report.get("research_gate_passed") is True
+                passed += qualified
+                model_rows.append({
+                    "model": name,
+                    "trades": int(report.get("executed_trade_count") or 0),
+                    "long": int(report.get("long_trade_count") or 0),
+                    "short": int(report.get("short_trade_count") or 0),
+                    "net_pnl_after_costs_quote": report.get("net_pnl_after_costs_quote"),
+                    "research_gate_passed": qualified,
+                    "rejection_reasons": report.get("rejection_reasons"),
+                })
+            markets.append({
+                "market": market,
+                "dataset_identity_sha256": evaluation.get("dataset_identity_sha256"),
+                "models": model_rows,
+            })
+    return {
+        "status": str(document.get("status", "UNKNOWN")),
+        "updated_at": document.get("updated_at"),
+        "cycle_count": int(document.get("cycle_count", 0)),
+        "cycles_today": int(document.get("cycles_today", 0)),
+        "next_run_at": document.get("next_run_at"),
+        "passed_model_count": passed,
+        "markets": markets,
+        "network_orders": False,
+        "trading_authority": False,
+        "automatic_promotion": False,
+    }
+
+
 def run_cycle(*, organism_root: Path, market_snapshot: Path,
               now: datetime | None = None,
               learning_fleet_checkpoint: Path | None = None,
-              forward_shadow_checkpoint: Path | None = None) -> dict[str, object]:
+              forward_shadow_checkpoint: Path | None = None,
+              rolling_alpha_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -227,6 +283,9 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     shadow_path = forward_shadow_checkpoint or (
         runtime_root / "whitebit-sol-trend-shadow-v1-20261111" / "checkpoint.json"
     )
+    rolling_path = rolling_alpha_checkpoint or (
+        runtime_root / "rolling-native-alpha-v1-20261112" / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -239,6 +298,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
         "organism_evidence": {
             "learning_fleet": _learning_fleet_summary(fleet_path),
             "forward_shadow": _forward_shadow_summary(shadow_path),
+            "rolling_native_alpha": _rolling_alpha_summary(rolling_path),
         },
         "network_orders": False,
         "trading_authority": False,
@@ -309,3 +369,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

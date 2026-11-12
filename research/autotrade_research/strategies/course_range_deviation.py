@@ -28,6 +28,8 @@ def _text(value: Decimal) -> str:
 
 @dataclass(frozen=True)
 class RangeDeviationConfiguration:
+    require_boundary_retest: bool = False
+    retest_expiry_bars: int = 4
     range_lookback: int = 96
     atr_period: int = 14
     minimum_shift_confirmation_bars: int = 3
@@ -50,6 +52,10 @@ class RangeDeviationConfiguration:
     cooldown_bars: int = 16
 
     def validate(self) -> None:
+        if type(self.require_boundary_retest) is not bool:
+            raise ValueError("require_boundary_retest must be boolean")
+        if type(self.retest_expiry_bars) is not int or not 1 <= self.retest_expiry_bars <= 16:
+            raise ValueError("retest_expiry_bars outside [1,16]")
         if type(self.range_lookback) is not int or not 24 <= self.range_lookback <= 5000:
             raise ValueError("range_lookback is outside its bounded range")
         if type(self.atr_period) is not int or not 2 <= self.atr_period < self.range_lookback:
@@ -336,11 +342,32 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                     pending_setup = None
                     continue
                 pending_setup["age"] += 1
+                if "retest_age" in pending_setup:
+                    pending_setup["retest_age"] += 1
+                    boundary = decimal(pending_setup["range_lower"]
+                        if pending_setup["direction"] > 0 else pending_setup["range_upper"])
+                    retested = (low <= boundary < close if pending_setup["direction"] > 0
+                                else high >= boundary > close)
+                    if retested:
+                        pending_entry = {**pending_setup,
+                            "retest_confirmed_at": bar["closed_at"].isoformat()}
+                        signals += 1
+                        pending_setup = None
+                    elif pending_setup["retest_age"] >= configuration.retest_expiry_bars:
+                        confirmation_rejections["RETEST_EXPIRED"] = (
+                            confirmation_rejections.get("RETEST_EXPIRED", 0) + 1)
+                        pending_setup = None
+                    continue
                 confirmed = (close > decimal(pending_setup["shift_level"])
                     if pending_setup["direction"] > 0
                     else close < decimal(pending_setup["shift_level"]))
                 if confirmed:
                     if pending_setup["age"] >= configuration.minimum_shift_confirmation_bars:
+                        if configuration.require_boundary_retest:
+                            pending_setup.update(retest_age=0,
+                                deviation_to_shift_bars=pending_setup["age"],
+                                shift_confirmed_at=bar["closed_at"].isoformat())
+                            continue
                         pending_entry = {**pending_setup,
                             "deviation_to_shift_bars": pending_setup["age"],
                             "shift_confirmed_at": bar["closed_at"].isoformat()}

@@ -10,6 +10,7 @@ from research.autotrade_research.integrations.whitebit_public import (
     PublicBook, PublicInstrument, PublicTicker, PublicTrade, PublicTradeBatch,
 )
 from research.autotrade_research.strategies.maker_universe import evaluate_market, rank_candidates
+from tools.run_whitebit_maker_universe_supervisor import execute_cycle
 from tools.screen_whitebit_maker_universe import main, screen
 
 
@@ -114,6 +115,25 @@ class MakerUniverseTests(unittest.TestCase):
             saved = json.loads((Path(temporary) / "checkpoint.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["schema"], "autotrade-whitebit-maker-universe-screen-v1")
             self.assertFalse(saved["network_orders"])
+
+    def test_supervisor_cycle_persists_hash_bound_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            result = execute_cycle(
+                state_dir=state_dir,
+                now=NOW,
+                notional_quote="100",
+                minimum_quote_volume_24h="100000",
+                prefilter_limit=2,
+                candidate_limit=1,
+                client=FakeClient(moment=NOW),
+            )
+            evidence = Path(result["evidence_path"])
+            self.assertTrue(evidence.is_file())
+            self.assertEqual(evidence.stem, result["result_sha256"])
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertFalse(result["automatic_promotion"])
+            self.assertFalse(result["network_orders"])
 
 
 if __name__ == "__main__":

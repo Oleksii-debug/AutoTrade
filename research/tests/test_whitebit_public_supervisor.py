@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
     ArtifactStore,
     _manifest_integrity_hash,
 )
@@ -281,6 +282,93 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b'"connection_code":"CONNECTION_LOST"', diagnostics)
             self.assertNotIn(b"credential=hidden", diagnostics)
             self.assertNotIn(b"provider secret", diagnostics)
+
+    async def test_live_admission_reuses_the_authenticated_frame_snapshot(self):
+        with TemporaryDirectory() as directory:
+            root = (Path(directory) / "state").resolve()
+            connector = Connector([FakeSocket([_subscription(), _ticker(42)])])
+            stop = asyncio.Event()
+            authenticated = []
+            real_read = ArtifactStore.read_authenticated_snapshot
+
+            def count_authenticated_read(store, artifact_id):
+                authenticated.append(artifact_id)
+                return real_read(store, artifact_id)
+
+            def stop_after_snapshot(path, value):
+                _atomic_write_json_with_reader_retry(path, value)
+                if path == root / "latest-market.json":
+                    stop.set()
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                new=count_authenticated_read,
+            ), patch(
+                "tools.run_whitebit_public_supervisor."
+                "_atomic_write_json_with_reader_retry",
+                side_effect=stop_after_snapshot,
+            ):
+                outcome = await asyncio.wait_for(
+                    supervise(
+                        market="BTC_USDT",
+                        state_dir=root,
+                        connector=connector,
+                        stop=stop,
+                        install_signals=False,
+                        max_artifacts=1,
+                    ),
+                    timeout=15,
+                )
+
+            evidence_id = outcome["latest_evidence_ref"]["artifact_id"]
+            self.assertEqual(authenticated, [evidence_id])
+            self.assertEqual(outcome["observation_count"], 1)
+            self.assertTrue(
+                (root / "artifacts" / "manifests" / (evidence_id + ".json")).is_file()
+            )
+
+    async def test_injected_clock_mutation_gets_strict_admission(self):
+        with TemporaryDirectory() as directory:
+            root = (Path(directory) / "state").resolve()
+            connector = Connector([FakeSocket([_subscription(), _ticker(42)])])
+            store = ArtifactStore(root / "artifacts")
+            tampered = []
+
+            def hostile_clock():
+                latest_path = root / "latest-market.json"
+                if latest_path.is_file() and not tampered:
+                    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+                    artifact_id = latest["raw_evidence_ref"]["artifact_id"]
+                    manifest = store.load_manifest(artifact_id)
+                    object_path = store._object_path(
+                        manifest["sha256"].removeprefix("sha256:")
+                    )
+                    original = object_path.read_bytes()
+                    object_path.write_bytes(
+                        bytes((original[0] ^ 1,)) + original[1:]
+                    )
+                    tampered.append(artifact_id)
+                return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+            with self.assertRaises(ArtifactIntegrityError):
+                await asyncio.wait_for(
+                    supervise(
+                        market="BTC_USDT",
+                        state_dir=root,
+                        connector=connector,
+                        install_signals=False,
+                        heartbeat_seconds=60,
+                        clock=hostile_clock,
+                    ),
+                    timeout=15,
+                )
+
+            self.assertEqual(len(tampered), 1)
+            state = json.loads(
+                (root / "supervisor-state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], "FAILED")
 
     async def test_single_owner_resource_lock_rejects_second_supervisor(self):
         with TemporaryDirectory() as directory:

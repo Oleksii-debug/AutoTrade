@@ -791,7 +791,16 @@ class WhiteBitWebSocketMarketFeed:
         self.artifacts = artifacts
         self.queue_size = queue_size
 
-    def _commit(self, observation: WhiteBitStreamObservation):
+    def _commit_with_authenticated_manifest(
+        self,
+        observation: WhiteBitStreamObservation,
+    ):
+        """Persist one frame and return its already-authenticated manifest.
+
+        The supervisor uses the manifest to update its bounded-retention index
+        without reopening and hashing the same immutable object a second time.
+        """
+
         ticker = observation.ticker
         artifact_id = str(uuid4())
         manifest = self.artifacts.publish_bytes(
@@ -816,23 +825,36 @@ class WhiteBitWebSocketMarketFeed:
                 "stream_generation": str(observation.generation),
             },
         )
+        authenticated_manifest, authenticated_raw = (
+            ArtifactStore.read_authenticated_snapshot(self.artifacts, artifact_id)
+        )
         if (
-            manifest["sha256"] != ticker.digest
-            or ArtifactStore.read_bytes(self.artifacts, artifact_id) != ticker.raw
+            manifest != authenticated_manifest
+            or authenticated_manifest["sha256"] != ticker.digest
+            or authenticated_raw != ticker.raw
         ):
             raise ArtifactIntegrityError("WhiteBIT WebSocket evidence mismatch")
         evidence = {
             "artifact_id": artifact_id,
-            "sha256": manifest["sha256"],
+            "sha256": authenticated_manifest["sha256"],
             "source_uri": SOURCE_URI,
             "observed_at": ticker.received_at.isoformat().replace("+00:00", "Z"),
             "rights_id": "whitebit-public-websocket-internal-v1",
         }
-        return ticker.to_raw_market_update(
-            evidence,
-            now=datetime.now(timezone.utc),
-            stream_generation=observation.generation,
+        return (
+            ticker.to_raw_market_update(
+                evidence,
+                now=datetime.now(timezone.utc),
+                stream_generation=observation.generation,
+            ),
+            authenticated_manifest,
         )
+
+    def _commit(self, observation: WhiteBitStreamObservation):
+        update, _authenticated_manifest = self._commit_with_authenticated_manifest(
+            observation
+        )
+        return update
 
     async def run(
         self,

@@ -62,6 +62,10 @@ _EVIDENCE_FIELDS = frozenset({
 })
 
 
+def _system_clock() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _utc(clock: Callable[[], datetime]) -> datetime:
     value = clock()
     if type(value) is not datetime or value.tzinfo is None:
@@ -542,6 +546,24 @@ class WhiteBitArtifactQuota:
 
     def _entry(self, artifact_id: str) -> tuple[str, str, str]:
         manifest, _raw = self.artifacts.read_authenticated_snapshot(artifact_id)
+        return self._entry_from_validated_manifest(manifest)
+
+    def _entry_from_authenticated_manifest(
+        self,
+        manifest: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        """Index a manifest whose object was authenticated by this collector."""
+
+        if type(manifest) is not dict:
+            raise TypeError("artifact quota requires an authenticated manifest")
+        _verify_manifest_integrity(manifest, required=True)
+        ArtifactStore._validate_manifest_contract(manifest, authenticated=True)
+        return self._entry_from_validated_manifest(manifest)
+
+    def _entry_from_validated_manifest(
+        self,
+        manifest: dict[str, Any],
+    ) -> tuple[str, str, str]:
         metadata = manifest.get("metadata")
         if (
             manifest.get("media_type") != "application/json"
@@ -551,7 +573,11 @@ class WhiteBitArtifactQuota:
             or metadata.get("market") != self.market
         ):
             raise ValueError("artifact quota encountered foreign evidence")
-        return manifest["created_at"], artifact_id, manifest["sha256"]
+        return (
+            manifest["created_at"],
+            manifest["artifact_id"],
+            manifest["sha256"],
+        )
 
     def _prepared_crash_orphan(
         self,
@@ -642,11 +668,26 @@ class WhiteBitArtifactQuota:
             if artifact_id in {item[1] for item in self._entries}:
                 raise ValueError("artifact quota received a duplicate identity")
             self._entries.append(self._entry(artifact_id))
-            if len(self._entries) <= self.maximum:
-                return
-            removed = self._entries.pop(0)
-            self._remove_manifest(removed)
-            self._remove_object_if_unreferenced(removed[2])
+            self._evict_one_if_needed()
+
+    def admit_authenticated(self, manifest: dict[str, Any]) -> None:
+        """Admit a frame just authenticated by the owning market-data feed."""
+
+        entry = self._entry_from_authenticated_manifest(manifest)
+        with ResourceLock(self.artifacts.lock_path):
+            if entry[1] in {item[1] for item in self._entries}:
+                raise ValueError("artifact quota received a duplicate identity")
+            self._entries.append(entry)
+            self._evict_one_if_needed()
+
+    def _evict_one_if_needed(self) -> None:
+        """Apply the cap while the caller holds the artifact-store lock."""
+
+        if len(self._entries) <= self.maximum:
+            return
+        removed = self._entries.pop(0)
+        self._remove_manifest(removed)
+        self._remove_object_if_unreferenced(removed[2])
 
 
 async def supervise(
@@ -662,7 +703,7 @@ async def supervise(
     checkpoint_seconds: float = 30.0,
     max_artifacts: int = 4096,
     stop_file: Path | None = None,
-    clock=lambda: datetime.now(timezone.utc),
+    clock=_system_clock,
 ) -> dict[str, Any]:
     """Collect until stopped and leave a durable terminal checkpoint."""
     if type(state_dir) is not type(Path()):
@@ -747,7 +788,7 @@ async def supervise(
                 artifacts=artifacts,
             )
 
-            def publish(update: Any) -> None:
+            def publish(update: Any, authenticated_manifest: dict[str, Any]) -> None:
                 nonlocal latest, observations
                 candidate = _snapshot(update)
                 _atomic_write_json_with_reader_retry(
@@ -764,7 +805,22 @@ async def supervise(
                     latest=latest,
                     clock=clock,
                 )
-                artifact_quota.admit(latest["raw_evidence_ref"]["artifact_id"])
+                if (
+                    authenticated_manifest.get("artifact_id")
+                    != latest["raw_evidence_ref"]["artifact_id"]
+                ):
+                    raise ArtifactIntegrityError(
+                        "WhiteBIT evidence identity changed before retention"
+                    )
+                if clock is _system_clock:
+                    artifact_quota.admit_authenticated(authenticated_manifest)
+                else:
+                    # Injected clocks execute after the artifact identity is
+                    # published. Preserve the original strict disk check for
+                    # that externally extensible/test path.
+                    artifact_quota.admit(
+                        latest["raw_evidence_ref"]["artifact_id"]
+                    )
 
             async def periodic_checkpoint() -> None:
                 while not stop_event.is_set():
@@ -784,7 +840,10 @@ async def supervise(
 
             async def collect_sequentially() -> None:
                 async for observation in transport.observations(stop_event):
-                    publish(feed._commit(observation))
+                    update, authenticated_manifest = (
+                        feed._commit_with_authenticated_manifest(observation)
+                    )
+                    publish(update, authenticated_manifest)
 
             async def watch_stop_file() -> None:
                 if stop_file is None:

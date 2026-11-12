@@ -363,6 +363,18 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "profit_guaranteed": False, "paid_model_calls": 0,
                 "network_orders": False, "trading_authority": False,
             }), encoding="utf-8")
+            maker_ena = root / "maker-ena.json"
+            maker_ena.write_text(json.dumps({
+                "schema": "autotrade-whitebit-maker-shadow-v1",
+                "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
+                "market": "ENA_USDT", "settled_cycles": 0,
+                "positive_cycles": 0, "net_pnl_quote": "0",
+                "research_phase": "DISCOVERY", "wave_cycles": 0,
+                "wave_positive_cycles": 0, "wave_net_pnl_quote": "0",
+                "open_quote": None, "last_settled": None,
+                "profit_guaranteed": False, "paid_model_calls": 0,
+                "network_orders": False, "trading_authority": False,
+            }), encoding="utf-8")
             enriched = run_cycle(
                 organism_root=organism,
                 market_snapshot=market,
@@ -373,6 +385,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 opportunity_checkpoint=opportunity,
                 trade_flow_checkpoint=trade_flow,
                 maker_shadow_checkpoint=maker,
+                ena_maker_shadow_checkpoint=maker_ena,
             )
             evidence = enriched["organism_evidence"]
             self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
@@ -417,6 +430,10 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 maker_summary["last_settled"]["outcome"], "BID_ONLY_FORCED_EXIT"
             )
             self.assertFalse(maker_summary["automatic_promotion"])
+            ena_summary = evidence["ena_maker_shadow"]
+            self.assertEqual(ena_summary["market"], "ENA_USDT")
+            self.assertEqual(ena_summary["research_phase"], "DISCOVERY")
+            self.assertEqual(ena_summary["net_pnl_quote"], "0")
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -503,6 +520,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

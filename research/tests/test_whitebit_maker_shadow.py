@@ -92,6 +92,7 @@ def test_negative_discovery_wave_stops_new_research_actions():
     assert state["research_phase"] == "RESEARCH_FILTERED"
     assert state["latest_wave_analysis"]["passed_after_cost_gate"] is False
     assert state["latest_wave_analysis"]["automatic_promotion"] is False
+    assert state["latest_wave_analysis"]["unclassified_outcome_count"] == 0
 
 
 def test_positive_discovery_requires_separate_positive_evaluation_wave():
@@ -134,6 +135,7 @@ def test_failed_filtered_wave_exhausts_the_single_adaptive_trial():
             target_cycles=4,
         )
     assert state["research_phase"] == "RESEARCH_ONLY"
+
 
 
 

@@ -186,7 +186,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-public-sol", "learning-sol-fast", "goal-attention",
         "sol-trend-forward-shadow", "learning-fleet-diagnostics",
         "groq-advisory", "rolling-native-alpha", "whitebit-opportunity-screen",
-        "whitebit-funding-carry-shadow",
+        "whitebit-funding-carry-shadow", "ohlcv-sol-h24-forward-shadow",
     ]
     serialized = json.dumps(manifest).lower()
     assert "api-key" not in serialized
@@ -272,4 +272,5 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
+
 

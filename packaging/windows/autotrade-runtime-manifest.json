@@ -305,6 +305,37 @@
       "backoff_seconds": 2
     },
     {
+      "id": "whitebit-trade-flow-fast-screen",
+      "script": "tools/run_whitebit_trade_flow_supervisor.py",
+      "args": [
+        "--trade-tape", "${RUNTIME_ROOT}/whitebit-public-trade-tape-v1-20261112/trade-tape.sqlite3",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-trade-flow-fast-screen-v1-20261112",
+        "--market", "BTC_USDT",
+        "--market", "ETH_USDT",
+        "--market", "SOL_USDT",
+        "--market", "PEPE_USDT",
+        "--market", "ENA_USDT",
+        "--market", "WBT_USDT",
+        "--market", "XRP_USDT",
+        "--market", "NEAR_USDT",
+        "--market", "ZEC_USDT",
+        "--market", "UNI_USDT",
+        "--market", "SUI_USDT",
+        "--market", "DOGE_USDT",
+        "--market", "TRX_USDT",
+        "--market", "TAO_USDT",
+        "--market", "HYPE_USDT",
+        "--minimum-buckets", "300",
+        "--interval-seconds", "300",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-trade-flow-fast-screen-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-trade-flow-fast-screen-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-trade-flow-fast-screen-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
       "id": "goal-attention",
       "script": "tools/run_goal_directed_attention.py",
       "args": [

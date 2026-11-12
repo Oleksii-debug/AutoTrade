@@ -184,7 +184,8 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-public-eth", "learning-btc-imbalance",
         "learning-btc-imbalance-fast", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "whitebit-public-trade-tape",
-        "whitebit-trade-flow-screen", "goal-attention",
+        "whitebit-trade-flow-screen", "whitebit-trade-flow-fast-screen",
+        "goal-attention",
         "whitebit-pepe-maker-shadow",
         "whitebit-ena-maker-shadow",
         "whitebit-stable-fiat-triangle-shadow",
@@ -201,7 +202,11 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert "password" not in serialized
     assert "secret" not in serialized
     processes = {row["id"]: row for row in manifest["processes"]}
-    for process_id in ("whitebit-public-trade-tape", "whitebit-trade-flow-screen"):
+    for process_id in (
+        "whitebit-public-trade-tape",
+        "whitebit-trade-flow-screen",
+        "whitebit-trade-flow-fast-screen",
+    ):
         args = processes[process_id]["args"]
         markets = [
             args[index + 1] for index, value in enumerate(args[:-1])

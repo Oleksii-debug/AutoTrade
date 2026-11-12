@@ -12,8 +12,14 @@ import argparse
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+import sys
 from time import monotonic, sleep
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.strategies.course_quasimodo import CourseConfiguration
@@ -58,8 +64,22 @@ def _compact(result: dict) -> dict:
         return {key: value.get(key) for key in (
             "market_count", "closed_cycles", "wins", "losses", "win_rate",
             "net_pnl", "fees", "funding")}
+    review = result.get("train_process_review")
+    review_projection = None
+    if type(review) is dict:
+        review_projection = {key: review.get(key) for key in (
+            "schema", "source_partition", "phase", "episode_count",
+            "market_count", "journal_complete", "incomplete_journal_count",
+            "maximum_observed_consecutive_losses", "pause_reasons",
+            "resume_condition", "same_frozen_strategy_required",
+            "review_sha256")}
+        review_projection["loss_streak_pause_event_count"] = len(
+            review.get("loss_streak_pause_events", []))
+        review_projection["daily_process_event_count"] = len(
+            review.get("daily_process_events", []))
     return {"strategy_schema": result.get("strategy_schema"),
         "train": part("train"), "train_rejection_reasons": result.get("train_rejection_reasons"),
+        "train_process_review": review_projection,
         "development": part("development"),
         "development_rejection_reasons": result.get("development_rejection_reasons"),
         "final": part("final"), "final_rejection_reasons": result.get("final_rejection_reasons"),
@@ -69,6 +89,18 @@ def _compact(result: dict) -> dict:
         "result_sha256": result.get("result_sha256"),
         "automatic_promotion": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
+
+
+def _append_session_event(path: Path, *, phase: str, cycle_count: int,
+                          observed_at: datetime, cycle_sha256: str | None = None) -> None:
+    value = {"schema": "autotrade-course-session-event-v1", "phase": phase,
+        "cycle_count": cycle_count, "observed_at": observed_at.astimezone(UTC).isoformat(),
+        "cycle_sha256": cycle_sha256, "strategy_changed": False,
+        "network_orders": False, "trading_authority": False}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+        stream.flush(); os.fsync(stream.fileno())
 
 
 def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
@@ -103,6 +135,15 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
             "train_count": train_count, "development_count": development_count,
             "final_count": final_count}, "manifests": manifests,
         "families": {"TREND_QUASIMODO": trend, "RANGE_DEVIATION": ranges},
+        "session_lifecycle": {"phase": "ANALYSIS_COMPLETE",
+            "phase_transitions": ["RUNNING", "PAUSED", "ANALYZING", "COOLDOWN"],
+            "analysis_partition": "TRAIN_ONLY",
+            "same_frozen_strategies_required": True,
+            "resume_condition": "NEXT_SCHEDULED_COMPLETED_WINDOW_AFTER_COOLDOWN",
+            "family_process_phases": {
+                "TREND_QUASIMODO": trend["train_process_review"]["phase"],
+                "RANGE_DEVIATION": ranges["train_process_review"]["phase"]},
+            "strategy_changed": False},
         "automatic_promotion": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
     identity = sha256(json.dumps(full, sort_keys=True, separators=(",", ":"),
@@ -113,6 +154,7 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
     return {"cycle_sha256": identity, "run_path": str(run_path),
         "window": full["window"], "manifests": manifests,
         "families": {name: _compact(value) for name, value in full["families"].items()},
+        "session_lifecycle": full["session_lifecycle"],
         "automatic_promotion": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
 
@@ -133,6 +175,7 @@ def main(argv=None) -> int:
         parser.error("daily cycle budget must be 1..24")
     args.state_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = args.state_dir / "checkpoint.json"
+    session_events_path = args.state_dir / "course-session-events.jsonl"
     checkpoint = {}
     if checkpoint_path.is_file():
         if checkpoint_path.is_symlink() or checkpoint_path.stat().st_size > 2 * 1024 * 1024:
@@ -157,9 +200,14 @@ def main(argv=None) -> int:
                 datetime.min.time(), UTC))
         if now >= due:
             started = monotonic()
+            next_cycle_count = int(checkpoint.get("cycle_count", 0)) + 1
+            checkpoint.update(status="RUNNING", updated_at=now.isoformat())
+            atomic_write_json(checkpoint_path, checkpoint)
+            _append_session_event(session_events_path, phase="RUNNING",
+                cycle_count=next_cycle_count, observed_at=now)
             try:
                 result = run_cycle(state_dir=args.state_dir, bars=args.bars, now=now)
-                status, error = "RUNNING", None
+                status, error = "COOLDOWN", None
             except (HistoricalArchiveError, OSError, ValueError, TypeError,
                     KeyError, RuntimeError) as exc:
                 result = checkpoint.get("last_result")
@@ -167,7 +215,7 @@ def main(argv=None) -> int:
             cycles_today += 1
             checkpoint = {"schema": SCHEMA, "status": status, "utc_day": day,
                 "cycles_today": cycles_today,
-                "cycle_count": int(checkpoint.get("cycle_count", 0)) + 1,
+                "cycle_count": next_cycle_count,
                 "last_result": result, "last_error_class": error,
                 "last_cycle_seconds": monotonic() - started,
                 "updated_at": datetime.now(UTC).isoformat(),
@@ -175,6 +223,11 @@ def main(argv=None) -> int:
                 "automatic_promotion": False, "network_orders": False,
                 "trading_authority": False, "paid_model_calls": 0}
             atomic_write_json(checkpoint_path, checkpoint)
+            if error is None:
+                for phase in ("PAUSED", "ANALYZING", "COOLDOWN"):
+                    _append_session_event(session_events_path, phase=phase,
+                        cycle_count=next_cycle_count, observed_at=datetime.now(UTC),
+                        cycle_sha256=result["cycle_sha256"])
             if args.once:
                 checkpoint["status"] = "STOPPED"
                 atomic_write_json(checkpoint_path, checkpoint)
@@ -184,4 +237,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -26,13 +26,23 @@ class CourseSupervisorTests(unittest.TestCase):
             "development_rejection_reasons": [], "final": None,
             "final_rejection_reasons": ["LOCKED"], "development_consumed": False,
             "final_consumed": False, "prospective_qualification": False,
-            "result_sha256": "a" * 64})
+            "result_sha256": "a" * 64,
+            "train_process_review": {"schema": "process-v1", "source_partition": "TRAIN_ONLY",
+                "phase": "PAUSED_ANALYZING", "episode_count": 3, "market_count": 1,
+                "journal_complete": True, "incomplete_journal_count": 0,
+                "maximum_observed_consecutive_losses": 3,
+                "pause_reasons": ["CONSECUTIVE_LOSS_PAUSE_REQUIRED"],
+                "resume_condition": "REVIEW_CHECKPOINT_WRITTEN_AND_COOLDOWN_ELAPSED",
+                "same_frozen_strategy_required": True,
+                "loss_streak_pause_events": [{"market": "BTC_PERP"}],
+                "daily_process_events": [], "review_sha256": "b" * 64}})
         self.assertFalse(value["network_orders"])
         self.assertFalse(value["trading_authority"])
         self.assertFalse(value["automatic_promotion"])
         self.assertEqual(value["paid_model_calls"], 0)
+        self.assertEqual(value["train_process_review"]["loss_streak_pause_event_count"], 1)
+        self.assertNotIn("loss_streak_pause_events", value["train_process_review"])
 
 
 if __name__ == "__main__":
     unittest.main()
-

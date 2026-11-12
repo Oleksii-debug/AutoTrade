@@ -13,6 +13,7 @@ import tempfile
 from research.autotrade_research.strategies.course_range_deviation import (
     RangeDeviationConfiguration, VERSION, simulate,
 )
+from research.autotrade_research.learning.course_process_discipline import review_course_episodes
 from tools.screen_whitebit_trend_regime import authenticated_bars
 
 
@@ -59,6 +60,9 @@ def screen_universe(datasets: list[dict], *, train_count: int, development_count
     train_native = {row["market"]: simulate(row["bars"][:train_count], configuration=configuration)
                     for row in datasets}
     train = _aggregate(train_native)
+    train_process_review = review_course_episodes([
+        {"market": market, "episodes": value["episodes"]}
+        for market, value in sorted(train_native.items())])
     train_reasons = _reasons(train, minimum_train_cycles, "TRAIN")
     development = None; development_reasons = []
     if not train_reasons:
@@ -84,6 +88,7 @@ def screen_universe(datasets: list[dict], *, train_count: int, development_count
         "minimum_development_cycles": minimum_development_cycles,
         "minimum_final_cycles": minimum_final_cycles,
         "train": train, "train_rejection_reasons": train_reasons,
+        "train_process_review": train_process_review,
         "development": development, "development_rejection_reasons": development_reasons,
         "final": final, "final_rejection_reasons": final_reasons,
         "development_consumed": development is not None,

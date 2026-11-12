@@ -12,7 +12,7 @@ def valid_setup():
 def test_complete_course_setup_passes_critic():
     assert criticize_setup(valid_setup()) == []
     packet = curriculum_packet()
-    assert len(packet["source_digests"]) == 10
+    assert len(packet["source_digests"]) == 11
     assert packet["transcript_text_embedded"] is False
 
 

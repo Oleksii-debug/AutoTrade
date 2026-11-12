@@ -1,8 +1,8 @@
 # Windows background watchdog
 
-`tools/run_autotrade_process_watchdog.py` keeps the public WhiteBIT BTC, ETH and
-SOL collectors, the primary BTC and fast per-market ZERO-learning loops, and
-the goal-directed attention loop alive independently of a Codex chat.  The
+`tools/run_autotrade_process_watchdog.py` runs the checked-in WhiteBIT market
+collectors, historical research workers, and SOL forward simulator as local
+Windows processes independently of a Codex chat. The
 checked-in manifest contains no credentials and every child remains
 non-trading (`network_orders=false`, `trading_authority=false`).
 
@@ -20,6 +20,14 @@ The watchdog writes `watchdog-state.json`, bounded rotated diagnostics, and
 separate stdout/stderr logs.  A child that exits is restarted with a bounded
 crash window; repeated crashes open a circuit and leave the watchdog in
 `DEGRADED` instead of spinning indefinitely.
+
+The two managed historical research workers defer new computation cycles on
+confirmed Windows battery power. They retain their results and next scheduled
+run, and check for AC power every 15 seconds. The public-data collectors and
+forward simulation continue while Windows is awake. After shutdown or
+hibernation, they resume from their local checkpoints on restart. The worker
+records gaps in live coverage. Keep the computer shut down or hibernated
+during transport in a bag.
 
 To stop safely, write any file named `watchdog.stop.json` into the watchdog
 state directory or send the watchdog SIGINT/SIGTERM.  It writes a per-process

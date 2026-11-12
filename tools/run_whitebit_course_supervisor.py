@@ -29,6 +29,7 @@ from tools.screen_whitebit_course_quasimodo_universe import screen_universe as s
 from tools.screen_whitebit_course_range_universe import screen_universe as screen_range
 from tools.screen_whitebit_trend_regime import authenticated_bars
 from tools.whitebit_historical_klines import collect_whitebit_history
+from tools.windows_power_status import running_on_battery
 
 
 SCHEMA = "autotrade-whitebit-course-supervisor-v1"
@@ -175,6 +176,7 @@ def main(argv=None) -> int:
     parser.add_argument("--interval-seconds", type=int, default=21600)
     parser.add_argument("--max-cycles-per-utc-day", type=int, default=4)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--defer-on-battery", action="store_true")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     completed_window(datetime.now(UTC), args.bars)
@@ -192,7 +194,9 @@ def main(argv=None) -> int:
         checkpoint = json.loads(checkpoint_path.read_bytes())
         if checkpoint.get("schema") != SCHEMA:
             raise ValueError("course supervisor checkpoint schema differs")
-    checkpoint.update(schema=SCHEMA, status="RUNNING",
+    checkpoint.update(schema=SCHEMA,
+        status=("WAITING_FOR_AC_POWER" if args.defer_on_battery and running_on_battery()
+                else "RUNNING"),
         updated_at=datetime.now(UTC).isoformat(), automatic_promotion=False,
         network_orders=False, trading_authority=False, paid_model_calls=0)
     atomic_write_json(checkpoint_path, checkpoint)
@@ -202,11 +206,22 @@ def main(argv=None) -> int:
         if args.stop_file and args.stop_file.exists():
             checkpoint.update(status="STOPPED", updated_at=now.isoformat())
             atomic_write_json(checkpoint_path, checkpoint); return 0
+        if args.defer_on_battery and running_on_battery():
+            if checkpoint["status"] != "WAITING_FOR_AC_POWER":
+                checkpoint.update(status="WAITING_FOR_AC_POWER", updated_at=now.isoformat())
+                atomic_write_json(checkpoint_path, checkpoint)
+            if args.once:
+                return 0
+            sleep(15)
+            continue
         due_text = checkpoint.get("next_run_at")
         due = datetime.fromisoformat(due_text) if type(due_text) is str else now
         if cycles_today >= args.max_cycles_per_utc_day:
             due = max(due, datetime.combine(now.date() + timedelta(days=1),
                 datetime.min.time(), UTC))
+        if now < due and checkpoint["status"] == "WAITING_FOR_AC_POWER":
+            checkpoint.update(status="COOLDOWN", updated_at=now.isoformat())
+            atomic_write_json(checkpoint_path, checkpoint)
         if now >= due:
             started = monotonic()
             next_cycle_count = int(checkpoint.get("cycle_count", 0)) + 1
@@ -246,4 +261,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

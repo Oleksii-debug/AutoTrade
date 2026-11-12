@@ -44,6 +44,7 @@
         "--bars", "20000",
         "--interval-seconds", "21600",
         "--max-cycles-per-utc-day", "4",
+        "--defer-on-battery",
         "--stop-file", "${RUNTIME_ROOT}/whitebit-course-research-v1-20261112/managed.stop.json"
       ],
       "stop_file": "${RUNTIME_ROOT}/whitebit-course-research-v1-20261112/managed.stop.json",
@@ -79,6 +80,7 @@
         "--state-dir", "${RUNTIME_ROOT}/whitebit-subhour-screen-v1-20261112",
         "--bars", "6000",
         "--interval-seconds", "21600",
+        "--defer-on-battery",
         "--stop-file", "${RUNTIME_ROOT}/whitebit-subhour-screen-v1-20261112/managed.stop.json"
       ],
       "stop_file": "${RUNTIME_ROOT}/whitebit-subhour-screen-v1-20261112/managed.stop.json",

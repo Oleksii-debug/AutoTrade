@@ -9,7 +9,7 @@ from statsmodels.stats.multitest import multipletests
 from statsmodels.tsa.stattools import coint
 from statsmodels.tools.sm_exceptions import CollinearityWarning
 
-from .alpha_economics import AlphaInputError
+from .alpha_economics import AlphaInputError, market_quote_currency
 from .alpha_models import PriceSeries
 
 
@@ -48,7 +48,8 @@ def cointegration_scan(series: tuple[PriceSeries, ...], alpha: float = 0.05) -> 
     logs = []
     for s in series:
         if (s.closed_at_ms != ref.closed_at_ms or s.asof_ms != ref.asof_ms or
-                s.interval_ms != ref.interval_ms or s.market.split('_')[-1] != ref.market.split('_')[-1]):
+                s.interval_ms != ref.interval_ms
+                or market_quote_currency(s.market) != market_quote_currency(ref.market)):
             raise AlphaInputError('align times, horizon and quote currencies explicitly')
         values, _ = s.arrays()
         logs.append(np.log(values))

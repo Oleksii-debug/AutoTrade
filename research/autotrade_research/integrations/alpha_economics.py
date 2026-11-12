@@ -43,6 +43,17 @@ def market_name(value: str) -> str:
     return value
 
 
+def market_quote_currency(value: str) -> str:
+    """Return the settlement currency used by the supported WhiteBIT symbol.
+
+    WhiteBIT perpetual symbols are named ``BASE_PERP`` even though their PnL
+    and notional are USDT-settled.  Treating the suffix as the quote currency
+    mislabeled research economics as ``PERP``.
+    """
+    market_name(value)
+    return "USDT" if value.endswith("_PERP") else value.rsplit("_", 1)[1]
+
+
 def timestamp(value: int, name: str) -> int:
     if type(value) is not int or not 0 <= value < 2**63:
         raise AlphaInputError(f'{name}: invalid timestamp')
@@ -142,7 +153,7 @@ def opportunity(gross_return_ratio: str, lower_return_ratio: str, cost: CostBudg
     if type(cost) is not CostBudget:
         raise AlphaInputError('CostBudget required')
     cost.validate(asof_ms)
-    if market.split('_')[-1] != cost.quote_currency:
+    if market_quote_currency(market) != cost.quote_currency:
         raise AlphaInputError('market and cost quote currency differ')
     gross = exact(gross_return_ratio, 'gross midpoint return', low='-1', high='10')
     lower = exact(lower_return_ratio, 'lower midpoint return', low='-1', high='10')

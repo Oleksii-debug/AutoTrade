@@ -9,7 +9,9 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 
-from .alpha_economics import AlphaInputError, CostBudget, opportunity
+from .alpha_economics import (
+    AlphaInputError, CostBudget, market_quote_currency, opportunity,
+)
 from .alpha_models import BACKENDS, PriceSeries, forecast_suite
 
 
@@ -19,7 +21,7 @@ def build_alpha_packet(series: PriceSeries, costs: CostBudget, *, lookback=24,
     if type(costs) is not CostBudget or type(series) is not PriceSeries:
         raise AlphaInputError('canonical research records required')
     costs.validate(series.asof_ms)
-    if series.market.split('_')[-1] != costs.quote_currency:
+    if market_quote_currency(series.market) != costs.quote_currency:
         raise AlphaInputError('model-cost conversion to quote currency required')
     forecast = forecast_suite(series, lookback=lookback, horizon=horizon,
                               steps=steps, backends=backends, seed=seed,

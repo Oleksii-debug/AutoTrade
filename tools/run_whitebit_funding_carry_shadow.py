@@ -9,6 +9,7 @@ fees, executable book spreads and an explicit adverse basis reserve.
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_DOWN, localcontext
 import json
@@ -25,9 +26,11 @@ for dependency_root in (ROOT, ROOT / "research", ROOT / "mvp"):
 
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.integrations.whitebit_public import (
+    INTERVAL_SECONDS,
     PublicBook,
     PublicDataError,
     WhiteBitPublicClient,
+    plan_kline_windows,
 )
 
 
@@ -140,6 +143,125 @@ def evaluate_pair(*, future, perpetual, spot, history, spot_book: PublicBook,
     }
 
 
+def _replay_statistics(values: list[Decimal]) -> dict:
+    if not values:
+        return {"window_count": 0, "mean_net_quote": None,
+                "win_fraction": None, "worst_net_quote": None,
+                "total_net_quote": None}
+    return {
+        "window_count": len(values),
+        "mean_net_quote": _text(sum(values) / Decimal(len(values))),
+        "win_fraction": _text(Decimal(sum(value > 0 for value in values))
+                              / Decimal(len(values))),
+        "worst_net_quote": _text(min(values)),
+        "total_net_quote": _text(sum(values)),
+    }
+
+
+def historical_replay_gate(*, client: WhiteBitPublicClient, future, perpetual,
+                           spot, first_history, notional: Decimal,
+                           horizon_days: int, impact_reserve_bps: Decimal = Decimal("10"),
+                           record_limit: int = 800) -> dict:
+    """Chronologically gate the projection on older funding and spot prices.
+
+    The configured horizon is fixed before the chronological split.  The
+    replay cannot use the later evaluation partition to choose a horizon.
+    Windows are non-overlapping within each partition to avoid presenting
+    highly overlapping marks as independent evidence.
+    """
+    if record_limit % 100 or not 400 <= record_limit <= 1000:
+        raise ValueError("historical funding record limit must be 400..1000 by 100")
+    records = list(first_history.records)
+    history_digests = [first_history.digest]
+    for offset in range(100, record_limit, 100):
+        page = client.funding_history(future.market, limit=100, offset=offset)
+        history_digests.append(page.digest)
+        records.extend(page.records)
+        if len(page.records) < 100:
+            break
+    records = sorted({row.funding_time: row for row in records}.values(),
+                     key=lambda row: row.funding_time)
+    if len(records) < 400:
+        return {"qualified": False, "reason": "INSUFFICIENT_FUNDING_HISTORY",
+                "record_count": len(records), "history_sha256": history_digests}
+
+    step = INTERVAL_SECONDS["1h"]
+    start = (int(records[0].funding_time.timestamp()) - 2 * step) // step * step
+    end = (int(records[-1].funding_time.timestamp()) // step - 1) * step
+    candles, candle_digests = [], []
+    for window in plan_kline_windows(start=start, end=end, interval="1h"):
+        # WhiteBIT derives the page start from end and limit.
+        query_end = window.start + window.limit * step
+        page = client.klines(spot.market, interval="1h", end=query_end,
+                             limit=window.limit, training=True)
+        candles.extend(page.candles)
+        candle_digests.append(page.digest)
+    candle_ends = [int(row.open_time.timestamp()) + step for row in candles]
+    candle_closes = [Decimal(row.close) for row in candles]
+
+    def spot_close(at) -> Decimal | None:
+        index = bisect_right(candle_ends, int(at.timestamp())) - 1
+        return candle_closes[index] if index >= 0 else None
+
+    horizon_intervals = horizon_days * 1440 // future.funding_interval_minutes
+    split = int(len(records) * 0.65)
+    if horizon_intervals < 1:
+        raise ValueError("historical horizon is shorter than funding interval")
+
+    def partition_windows(lower: int, upper: int) -> list[Decimal]:
+        values = []
+        index = lower
+        while index + horizon_intervals < upper:
+            entry, exit_row = records[index], records[index + horizon_intervals]
+            spot_entry, spot_exit = spot_close(entry.funding_time), spot_close(exit_row.funding_time)
+            if spot_entry is None or spot_exit is None:
+                index += horizon_intervals
+                continue
+            perp_entry = Decimal(entry.settlement_price)
+            perp_exit = Decimal(exit_row.settlement_price)
+            quantity = notional / max(spot_entry, perp_entry)
+            gross = quantity * ((spot_exit - spot_entry) + (perp_entry - perp_exit))
+            funding = sum(
+                quantity * Decimal(row.settlement_price) * Decimal(row.funding_rate)
+                for row in records[index + 1:index + horizon_intervals + 1]
+            )
+            fees = (
+                quantity * (spot_entry + spot_exit) * Decimal(spot.taker_fee_rate)
+                + quantity * (perp_entry + perp_exit) * Decimal(perpetual.taker_fee_rate)
+            )
+            impact = notional * impact_reserve_bps / Decimal(10000)
+            values.append(gross + funding - fees - impact)
+            index += horizon_intervals
+        return values
+
+    train_values = partition_windows(0, split)
+    evaluation_values = partition_windows(split, len(records))
+    train, evaluation = _replay_statistics(train_values), _replay_statistics(evaluation_values)
+    qualified = (
+        train["window_count"] >= 4
+        and evaluation["window_count"] >= 2
+        and Decimal(train["mean_net_quote"] or "0") > 0
+        and Decimal(evaluation["mean_net_quote"] or "0") > 0
+        and Decimal(train["win_fraction"] or "0") >= Decimal("0.5")
+        and Decimal(evaluation["win_fraction"] or "0") >= Decimal("0.5")
+    )
+    return {
+        "qualified": qualified,
+        "reason": "PASS" if qualified else "HISTORICAL_AFTER_COST_GATE_FAILED",
+        "record_count": len(records),
+        "horizon_days": horizon_days,
+        "horizon_intervals": horizon_intervals,
+        "split_index": split,
+        "impact_reserve_bps": _text(impact_reserve_bps),
+        "train": train,
+        "evaluation": evaluation,
+        "history_sha256": history_digests,
+        "spot_kline_sha256": candle_digests,
+        "horizon_selected_before_evaluation": True,
+        "overlapping_windows": False,
+    }
+
+
 def screen_once(*, client: WhiteBitPublicClient, notional: Decimal,
                 horizon_days: int, basis_stress_bps: Decimal,
                 candidate_limit: int) -> dict:
@@ -161,12 +283,26 @@ def screen_once(*, client: WhiteBitPublicClient, notional: Decimal,
             history = client.funding_history(future.market, limit=100)
             spot_book = client.instrument_orderbook(spot.market)
             future_book = client.instrument_orderbook(future.market)
-            candidates.append(evaluate_pair(
+            result = evaluate_pair(
                 future=future, perpetual=perpetual, spot=spot, history=history,
                 spot_book=spot_book, future_book=future_book,
                 notional=notional, horizon_days=horizon_days,
                 basis_stress_bps=basis_stress_bps,
-            ))
+            )
+            projection_qualified = result["qualified_for_shadow_observation"]
+            result["projection_qualified_without_historical_gate"] = projection_qualified
+            if projection_qualified:
+                replay = historical_replay_gate(
+                    client=client, future=future, perpetual=perpetual,
+                    spot=spot, first_history=history, notional=notional,
+                    horizon_days=horizon_days,
+                )
+                result["historical_replay"] = replay
+                result["qualified_for_shadow_observation"] = replay["qualified"]
+            else:
+                result["historical_replay"] = {"qualified": False,
+                                                "reason": "PROJECTION_GATE_FAILED"}
+            candidates.append(result)
         except (PublicDataError, ValueError) as error:
             rejected.append({"market": future.market, "reason": str(error)})
     candidates.sort(key=lambda row: (-Decimal(row["stressed_after_cost_quote"]), row["market"]))

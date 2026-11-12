@@ -72,7 +72,7 @@ def _validate(payload: dict, packet: dict, *, snapshot_id: str, asof_ms: int):
     prices, closes, available = (series[key] for key in
                                  ("closes", "closed_at_ms", "available_at_ms"))
     if (any(type(value) is not list for value in (prices, closes, available)) or
-            not 160 <= len(prices) <= 4096 or len(closes) != len(prices) or
+            not 160 <= len(prices) <= 20_000 or len(closes) != len(prices) or
             len(available) != len(prices)):
         raise ValueError("bounded aligned closed bars are required")
     interval = series["interval_ms"]
@@ -268,3 +268,4 @@ def aggregate_alpha_receipt(artifact_root: str | Path, packet_ref: str, *,
     reader = trusted_authenticated_reader(artifact_root, publication_store=store)
     return _aggregate(store, reader, packet_ref,
                       expected_snapshot_id=expected_snapshot_id, asof_ms=asof_ms)
+

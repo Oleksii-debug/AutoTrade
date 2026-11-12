@@ -20,6 +20,7 @@ from .alpha_economics import AlphaInputError, exact, market_name, timestamp
 
 _TRAINING_LOCK = Lock()
 BACKENDS = ('DLINEAR', 'XGBOOST', 'CATBOOST')
+MAX_SERIES_BARS = 20_000
 
 
 @dataclass(frozen=True)
@@ -42,8 +43,8 @@ class PriceSeries:
         if any(type(v) is not tuple for v in (self.closes, self.closed_at_ms, self.available_at_ms)):
             raise AlphaInputError('series fields must be tuples')
         n = len(self.closes)
-        if not 160 <= n <= 4096 or len(self.closed_at_ms) != n or len(self.available_at_ms) != n:
-            raise AlphaInputError('aligned series requires 160..4096 closed bars')
+        if not 160 <= n <= MAX_SERIES_BARS or len(self.closed_at_ms) != n or len(self.available_at_ms) != n:
+            raise AlphaInputError('aligned series requires 160..20000 closed bars')
         if self.evidence_class not in ('RECORDED_PUBLIC', 'SYNTHETIC_FIXTURE'):
             raise AlphaInputError('explicit evidence class required')
         for name in ('source_ref', 'snapshot_id'):
@@ -284,3 +285,4 @@ def forecast_suite(series: PriceSeries, *, lookback: int = 24, horizon: int = 1,
 def predict_model_artifact(data: bytes, *, expected_sha256: str, features):
     from .alpha_model_checkpoint import predict_model_artifact as predict
     return predict(data, expected_sha256=expected_sha256, features=features)
+

@@ -32,8 +32,8 @@ CALIBRATION_ALPHAS = ("0.1", "0.2", "0.3", "0.4")
 def completed_window(now: datetime, bars: int) -> tuple[int, int]:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("rolling Alpha clock must be timezone-aware")
-    if type(bars) is not int or not 160 <= bars <= 4096:
-        raise ValueError("rolling Alpha bars must be 160..4096")
+    if type(bars) is not int or not 160 <= bars <= 20_000:
+        raise ValueError("rolling Alpha bars must be 160..20000")
     current_hour = int(now.astimezone(UTC).timestamp()) // INTERVAL_SECONDS * INTERVAL_SECONDS
     end = current_hour - INTERVAL_SECONDS
     start = end - (bars - 1) * INTERVAL_SECONDS
@@ -137,7 +137,7 @@ def main(argv=None) -> int:
     parser.add_argument("--stop-file", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
-    if not 160 <= args.bars <= 4096 or not 1 <= args.steps <= 128:
+    if not 160 <= args.bars <= 20_000 or not 1 <= args.steps <= 128:
         parser.error("bars or steps outside bounded range")
     if not 3600 <= args.interval_seconds <= 86400:
         parser.error("interval must be 3600..86400 seconds")

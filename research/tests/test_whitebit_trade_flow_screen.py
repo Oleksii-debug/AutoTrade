@@ -4,6 +4,7 @@ from unittest.mock import patch
 from autotrade_research.strategies.trade_flow_screen import (
     FlowCandidate,
     _simulate,
+    candidates,
     screen_trade_flow,
 )
 
@@ -35,6 +36,37 @@ def test_flow_simulation_is_nonoverlapping_and_cost_aware():
     assert result["trade_count"] == 39
     assert float(result["net_return_fraction"]) > 0
     assert result["maximum_drawdown_fraction"] == "0"
+
+
+def test_price_response_families_are_causal_and_preregistered():
+    assert len(candidates()) == 108
+    rows = [
+        {
+            "bucket_epoch": 0, "bucket_seconds": 5,
+            "first_price": "100", "last_price": "99",
+            "high_price": "100", "low_price": "99",
+            "aggressive_buy_quote_quantity": "100",
+            "aggressive_sell_quote_quantity": "0",
+        },
+        {
+            "bucket_epoch": 5, "bucket_seconds": 5,
+            "first_price": "99", "last_price": "98",
+            "high_price": "99", "low_price": "98",
+            "aggressive_buy_quote_quantity": "0",
+            "aggressive_sell_quote_quantity": "100",
+        },
+    ]
+    absorption = _simulate(
+        rows, FlowCandidate("ABSORPTION_REVERSAL", 1, "0.8", 1),
+        cost=__import__("decimal").Decimal("0.0026"),
+    )
+    confirmed = _simulate(
+        rows, FlowCandidate("CONFIRMED_MOMENTUM", 1, "0.8", 1),
+        cost=__import__("decimal").Decimal("0.0026"),
+    )
+    assert absorption["trade_count"] == 1
+    assert absorption["net_return_fraction"] > "0"
+    assert confirmed["trade_count"] == 0
 
 
 def test_locked_final_is_consumed_only_after_train_and_development(tmp_path):

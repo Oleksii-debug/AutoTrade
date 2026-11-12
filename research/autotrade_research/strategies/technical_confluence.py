@@ -286,17 +286,23 @@ def technical_signal(history: list[dict],
     }
 
 
+INTRABAR_EXECUTION_MODEL = "NEXT_OPEN_WITH_OHLC_PROTECTIVE_STOP"
+
+
 def simulate(bars: list[dict], *, candidate: str,
              costs: TechnicalCosts = TechnicalCosts(),
              configuration: TechnicalConfiguration = TechnicalConfiguration(),
              report_daily_returns: bool = False,
              report_hourly_returns: bool = False,
-             require_hourly_trend_alignment: bool = False) -> dict:
-    """Run one partition with causal next-open perpetual-futures fills."""
+             require_hourly_trend_alignment: bool = False,
+             protective_stop_intrabar: bool = False) -> dict:
+    """Run causal next-open fills with an optional OHLC protective stop."""
     validate_bars(bars, require_ohlcv=True)
     costs.validate(); configuration.validate()
     if candidate not in CANDIDATES:
         raise ValueError("unknown technical candidate")
+    if protective_stop_intrabar and candidate != "TECHNICAL_CONFLUENCE":
+        raise ValueError("intrabar protection requires a technical candidate")
     if require_hourly_trend_alignment and (
             candidate != "TECHNICAL_CONFLUENCE"
             or any((bar["closed_at"] - bar["opened_at"]) != timedelta(minutes=15)
@@ -307,8 +313,8 @@ def simulate(bars: list[dict], *, candidate: str,
         context.prec = 50
         balance = initial = peak = decimal(costs.initial_equity)
         fee_ratio = decimal(costs.fee_bps_per_fill) / Decimal(10000)
-        adverse = (decimal(costs.spread_bps) / Decimal(2)
-                   + decimal(costs.slippage_bps_per_fill)) / Decimal(10000)
+        half_spread = decimal(costs.spread_bps) / Decimal(20000)
+        adverse = half_spread + decimal(costs.slippage_bps_per_fill) / Decimal(10000)
         fraction = decimal(costs.capital_fraction)
         funding_day = decimal(costs.funding_bps_per_day) / Decimal(10000)
         quantity = entry_price = Decimal(0)
@@ -452,22 +458,43 @@ def simulate(bars: list[dict], *, candidate: str,
                 "reason": reason, "balance": str(balance)}, sort_keys=True).encode())
 
         active_atr = Decimal(0)
-        for index, bar in enumerate(bars):
-            execute(pending, decimal(bar["open"]), pending_reason,
-                    bar["opened_at"].isoformat())
+        for bar in bars:
+            opened = decimal(bar["open"])
+            execute(pending, opened, pending_reason, bar["opened_at"].isoformat())
             pending = None; pending_reason = None
             close = decimal(bar["close"])
             if quantity == 0 and cooldown_remaining > 0:
                 cooldown_remaining -= 1
-            mark(close)
+            protective_reason = None
+            reference = close
+            if quantity and protective_stop_intrabar:
+                side = 1 if quantity > 0 else -1
+                stop = entry_price - side * decimal(configuration.stop_atr) * active_atr
+                # OHLC is a reference price. Translate the bid/ask stop before
+                # applying the execution spread and slippage in execute().
+                threshold = stop / (1 - side * half_spread)
+                extreme = decimal(bar["low"] if side > 0 else bar["high"])
+                if side * (opened - threshold) <= 0:
+                    protective_reason = "ATR_PROTECTIVE_GAP"
+                    hour_had_exposure = True
+                    execute(0, opened, protective_reason, bar["opened_at"].isoformat())
+                elif side * (extreme - threshold) <= 0:
+                    protective_reason = "ATR_PROTECTIVE_TOUCH"
+                    reference = threshold
+            mark(reference)
             if quantity:
                 hour_had_exposure = True
                 holding += 1
                 seconds = Decimal(str((bar["closed_at"] - bar["opened_at"]).total_seconds()))
                 if not Decimal(0) < seconds <= Decimal(86400 * 7):
                     raise ValueError("bar duration is outside the funding-cost envelope")
-                carry = abs(quantity) * close * funding_day * seconds / Decimal(86400)
-                balance -= carry; funding += carry; mark(close)
+                # A touch has unknown timing. Charge the full bar at the stop
+                # reference, and never mark the subsequent close as exposed.
+                carry = abs(quantity) * reference * funding_day * seconds / Decimal(86400)
+                balance -= carry; funding += carry; mark(reference)
+                if protective_reason:
+                    execute(0, reference, protective_reason, bar["closed_at"].isoformat())
+                    mark(reference)
             if window_hours:
                 record_boundary(bar["closed_at"], close)
             if require_hourly_trend_alignment:
@@ -475,6 +502,8 @@ def simulate(bars: list[dict], *, candidate: str,
                 if not (utc_close.minute or utc_close.second or utc_close.microsecond):
                     hourly_closes.append(close)
             history.append(bar)
+            if protective_reason:
+                continue
             features = _features(history, configuration)
             if candidate != "TECHNICAL_CONFLUENCE" or features is None:
                 continue
@@ -503,7 +532,7 @@ def simulate(bars: list[dict], *, candidate: str,
             if holding >= configuration.maximum_hold_bars:
                 reason = "MAX_HOLD_EXIT"
             elif holding >= configuration.minimum_hold_bars:
-                if move <= -decimal(configuration.stop_atr) * active_atr:
+                if not protective_stop_intrabar and move <= -decimal(configuration.stop_atr) * active_atr:
                     reason = "ATR_STOP_EXIT"
                 elif move >= decimal(configuration.take_profit_atr) * active_atr:
                     reason = "ATR_TAKE_PROFIT_EXIT"
@@ -534,6 +563,8 @@ def simulate(bars: list[dict], *, candidate: str,
             "exit_reasons": exit_reasons, "evidence_sha256": evidence.hexdigest(),
             "network_orders": False, "trading_authority": False,
         }
+        if protective_stop_intrabar:
+            result["execution_model"] = INTRABAR_EXECUTION_MODEL
         if report_daily_returns:
             result["daily_returns"] = summarize_daily_returns(window_returns[24])
         if require_hourly_trend_alignment:

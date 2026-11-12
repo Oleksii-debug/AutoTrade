@@ -16,6 +16,7 @@ def quote_admission(
     book: PublicBook, instrument: PublicInstrument, batch: PublicTradeBatch,
     *, maximum_absolute_flow_imbalance: str = "0.20",
     adverse_selection_reserve_bps: str = "5",
+    flow_window_seconds: int = 60,
 ) -> dict[str, object]:
     if (type(book) is not PublicBook or type(instrument) is not PublicInstrument
             or type(batch) is not PublicTradeBatch):
@@ -24,26 +25,37 @@ def quote_admission(
         raise ValueError("maker admission market differs")
     limit = _decimal(maximum_absolute_flow_imbalance, name="flow_imbalance_limit")
     reserve = _decimal(adverse_selection_reserve_bps, name="reserve_bps")
-    if not Decimal(0) <= limit <= 1 or reserve < 0:
+    if (not Decimal(0) <= limit <= 1 or reserve < 0
+            or type(flow_window_seconds) is not int
+            or not 10 <= flow_window_seconds <= 3600):
         raise ValueError("maker admission economics are invalid")
+    recent = tuple(
+        trade for trade in batch.trades
+        if 0 <= (batch.received_at - trade.trade_at).total_seconds()
+        <= flow_window_seconds
+    )
     buy = sum((_decimal(t.quote_quantity, name="trade_quote_quantity")
-               for t in batch.trades if t.side == "buy"), Decimal(0))
+               for t in recent if t.side == "buy"), Decimal(0))
     sell = sum((_decimal(t.quote_quantity, name="trade_quote_quantity")
-                for t in batch.trades if t.side == "sell"), Decimal(0))
+                for t in recent if t.side == "sell"), Decimal(0))
     total = buy + sell
     imbalance = Decimal(0) if total == 0 else (buy - sell) / total
     bid, ask = Decimal(book.bids[0][0]), Decimal(book.asks[0][0])
     spread_bps = (ask - bid) / ((ask + bid) / 2) * Decimal(10000)
     fee_hurdle = _decimal(instrument.maker_fee_rate, name="maker_fee_rate") * 20000
     required = fee_hurdle + reserve
-    admitted = abs(imbalance) <= limit and spread_bps >= required
+    admitted = total > 0 and abs(imbalance) <= limit and spread_bps >= required
     return {
         "admitted": admitted,
         "flow_imbalance": format(imbalance, "f"),
         "maximum_absolute_flow_imbalance": format(limit, "f"),
         "spread_bps": format(spread_bps, "f"),
         "required_spread_bps": format(required, "f"),
+        "flow_window_seconds": flow_window_seconds,
+        "recent_trade_count": len(recent),
+        "recent_trade_quote_volume": format(total, "f"),
         "reason": "ADMITTED" if admitted else (
+            "INSUFFICIENT_RECENT_FLOW" if total == 0 else
             "DIRECTIONAL_FLOW" if abs(imbalance) > limit else "SPREAD_BELOW_HURDLE"
         ),
         "network_orders": False, "trading_authority": False,
@@ -253,6 +265,7 @@ def evaluate_quote(
         result, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     return result
+
 
 
 

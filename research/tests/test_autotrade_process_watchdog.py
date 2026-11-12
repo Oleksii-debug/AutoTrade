@@ -196,6 +196,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "learning-fleet-diagnostics", "groq-advisory", "rolling-native-alpha",
         "whitebit-opportunity-screen",
         "whitebit-funding-carry-shadow",
+        "whitebit-course-research",
     ]
     assert "sol-trend-forward-shadow" not in {
         row["id"] for row in manifest["processes"]
@@ -325,6 +326,7 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
+
 
 
 

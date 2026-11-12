@@ -111,6 +111,15 @@ def main(argv=None) -> int:
                         "wave_net_pnl_quote": "0", "wave_outcomes": {},
                     })
                 state["adaptive_filter_version"] = "NEUTRAL_FLOW_V1"
+                admission = state.get("last_quote_admission")
+                if ("FILTERED" in str(state.get("research_phase"))
+                        and type(admission) is dict
+                        and admission.get("reason") == "UNFILTERED_DISCOVERY"
+                        and type(state.get("open_quote")) is dict):
+                    state["discarded_transition_quote_sha256"] = state["open_quote"].get(
+                        "quote_sha256"
+                    )
+                    state["open_quote"] = None
             client = WhiteBitPublicClient()
             instruments = [item for item in client.instruments() if item.market == market]
             if len(instruments) != 1:
@@ -164,10 +173,9 @@ def main(argv=None) -> int:
                                 target_cycles=args.cycle_cycles,
                             )
                             state["last_settled"] = evaluated
-                            state["open_quote"] = (
-                                None if state["research_phase"] == "RESEARCH_ONLY"
-                                else None
-                            )
+                            # Re-enter through the admission path on the next poll.
+                            # This is essential when a wave boundary changes policy.
+                            state["open_quote"] = None
                         else:
                             state["open_quote"] = evaluated
                     state.update({
@@ -199,6 +207,7 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 

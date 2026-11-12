@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -354,6 +354,79 @@ def _maker_shadow_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _triangular_shadow_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != (
+                "autotrade-whitebit-triangular-shadow-supervisor-v1"
+            )
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or document.get("profit_guaranteed") is not False
+            or type(document.get("paid_model_calls")) is not int
+            or document.get("paid_model_calls") != 0):
+        raise ValueError("triangular-shadow checkpoint authority or schema differs")
+    count_fields = ("latest_market_count", "cycle_result_count", "opportunity_count")
+    if any(type(document.get(field)) is not int or document[field] < 0
+           for field in count_fields):
+        raise ValueError("triangular-shadow counters are malformed")
+    try:
+        notional = Decimal(str(document.get("notional")))
+        reserve = Decimal(str(document.get("impact_reserve_bps")))
+    except InvalidOperation as exc:
+        raise ValueError("triangular-shadow economics are malformed") from exc
+    if (not notional.is_finite() or notional <= 0
+            or not reserve.is_finite() or reserve < 0):
+        raise ValueError("triangular-shadow economics are malformed")
+    best = document.get("best_result")
+    best_summary = None
+    if best is not None:
+        if (type(best) is not dict
+                or type(best.get("path")) is not list
+                or len(best["path"]) != 4
+                or not all(type(asset) is str and asset for asset in best["path"])
+                or best["path"][0] != best["path"][-1]
+                or type(best.get("qualified_for_shadow_observation")) is not bool
+                or type(best.get("result_sha256")) is not str):
+            raise ValueError("triangular-shadow best result is malformed")
+        try:
+            after_fees = Decimal(str(best.get("net_after_taker_fees_bps")))
+            after_reserve = Decimal(str(best.get("net_after_reserve_bps")))
+        except InvalidOperation as exc:
+            raise ValueError("triangular-shadow economics are malformed") from exc
+        if (not after_fees.is_finite() or not after_reserve.is_finite()
+                or after_reserve > after_fees
+                or (best["qualified_for_shadow_observation"] is True
+                    and document["opportunity_count"] == 0)):
+            raise ValueError("triangular-shadow economics are non-finite")
+        best_summary = {
+            "path": list(best["path"]),
+            "net_after_taker_fees_bps": format(after_fees, "f"),
+            "net_after_reserve_bps": format(after_reserve, "f"),
+            "qualified_for_shadow_observation": (
+                best["qualified_for_shadow_observation"] is True
+            ),
+            "result_sha256": best.get("result_sha256"),
+        }
+    return {
+        "status": str(document.get("phase", "UNKNOWN")),
+        "checkpointed_at": document.get("checkpointed_at"),
+        "latest_market_count": document["latest_market_count"],
+        "cycle_result_count": document["cycle_result_count"],
+        "opportunity_count": document["opportunity_count"],
+        "notional": format(notional, "f"),
+        "impact_reserve_bps": format(reserve, "f"),
+        "best_result": best_summary,
+        "profit_guaranteed": False,
+        "paid_model_calls": 0,
+        "network_orders": False,
+        "trading_authority": False,
+        "automatic_promotion": False,
+    }
+
+
 def run_cycle(*, organism_root: Path, market_snapshot: Path,
               now: datetime | None = None,
               learning_fleet_checkpoint: Path | None = None,
@@ -362,7 +435,8 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
               opportunity_checkpoint: Path | None = None,
               trade_flow_checkpoint: Path | None = None,
               maker_shadow_checkpoint: Path | None = None,
-              ena_maker_shadow_checkpoint: Path | None = None) -> dict[str, object]:
+              ena_maker_shadow_checkpoint: Path | None = None,
+              triangular_shadow_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -471,6 +545,10 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     ena_maker_shadow_path = ena_maker_shadow_checkpoint or (
         runtime_root / "whitebit-ena-maker-shadow-v1-20261112" / "checkpoint.json"
     )
+    triangular_shadow_path = triangular_shadow_checkpoint or (
+        runtime_root / "whitebit-stable-fiat-triangle-shadow-v1-20261112"
+        / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -488,6 +566,9 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
             "trade_flow_screen": _trade_flow_summary(trade_flow_path),
             "maker_shadow": _maker_shadow_summary(maker_shadow_path),
             "ena_maker_shadow": _maker_shadow_summary(ena_maker_shadow_path),
+            "stable_fiat_triangular_shadow": _triangular_shadow_summary(
+                triangular_shadow_path
+            ),
         },
         "network_orders": False,
         "trading_authority": False,

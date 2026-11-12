@@ -17,7 +17,7 @@ from research.autotrade_research.agents.goal_directed import (
     workstream_from_document,
 )
 from tools.create_goal_directed_organism import build_manifest
-from tools.run_goal_directed_attention import run_cycle
+from tools.run_goal_directed_attention import _triangular_shadow_summary, run_cycle
 
 
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
@@ -375,6 +375,23 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "profit_guaranteed": False, "paid_model_calls": 0,
                 "network_orders": False, "trading_authority": False,
             }), encoding="utf-8")
+            triangle = root / "triangle.json"
+            triangle.write_text(json.dumps({
+                "schema": "autotrade-whitebit-triangular-shadow-supervisor-v1",
+                "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
+                "latest_market_count": 9, "cycle_result_count": 8,
+                "opportunity_count": 0, "notional": "100",
+                "impact_reserve_bps": "2",
+                "best_result": {
+                    "path": ["USDT", "USDC", "USD", "USDT"],
+                    "net_after_taker_fees_bps": "-29.9612337330",
+                    "net_after_reserve_bps": "-31.9612337330",
+                    "qualified_for_shadow_observation": False,
+                    "result_sha256": "9" * 64,
+                },
+                "profit_guaranteed": False, "paid_model_calls": 0,
+                "network_orders": False, "trading_authority": False,
+            }), encoding="utf-8")
             enriched = run_cycle(
                 organism_root=organism,
                 market_snapshot=market,
@@ -386,6 +403,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 trade_flow_checkpoint=trade_flow,
                 maker_shadow_checkpoint=maker,
                 ena_maker_shadow_checkpoint=maker_ena,
+                triangular_shadow_checkpoint=triangle,
             )
             evidence = enriched["organism_evidence"]
             self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
@@ -434,6 +452,49 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             self.assertEqual(ena_summary["market"], "ENA_USDT")
             self.assertEqual(ena_summary["research_phase"], "DISCOVERY")
             self.assertEqual(ena_summary["net_pnl_quote"], "0")
+            triangle_summary = evidence["stable_fiat_triangular_shadow"]
+            self.assertEqual(triangle_summary["latest_market_count"], 9)
+            self.assertEqual(triangle_summary["cycle_result_count"], 8)
+            self.assertEqual(triangle_summary["opportunity_count"], 0)
+            self.assertEqual(
+                triangle_summary["best_result"]["path"],
+                ["USDT", "USDC", "USD", "USDT"],
+            )
+            self.assertEqual(
+                triangle_summary["best_result"]["net_after_reserve_bps"],
+                "-31.9612337330",
+            )
+            self.assertFalse(triangle_summary["automatic_promotion"])
+
+    def test_triangular_shadow_projection_fails_closed_on_authority_or_malformed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "triangle.json"
+            base = {
+                "schema": "autotrade-whitebit-triangular-shadow-supervisor-v1",
+                "phase": "RUNNING", "paid_model_calls": 0,
+                "profit_guaranteed": False,
+                "network_orders": False, "trading_authority": False,
+                "latest_market_count": 9, "cycle_result_count": 8,
+                "opportunity_count": 0, "notional": "100",
+                "impact_reserve_bps": "2",
+                "best_result": None,
+            }
+            checkpoint.write_text(json.dumps({**base, "trading_authority": True}),
+                                  encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "authority or schema"):
+                _triangular_shadow_summary(checkpoint)
+            checkpoint.write_text(json.dumps({
+                **base,
+                "best_result": {
+                    "path": ["USDT", "USDC"],
+                    "net_after_taker_fees_bps": "1",
+                    "net_after_reserve_bps": "0.5",
+                    "qualified_for_shadow_observation": True,
+                    "result_sha256": "a" * 64,
+                },
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "best result is malformed"):
+                _triangular_shadow_summary(checkpoint)
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:

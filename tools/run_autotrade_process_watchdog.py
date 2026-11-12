@@ -410,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument("--respect-stop-marker", action="store_true",
+                        help="For automatic startup, preserve an intentional watchdog.stop.json")
     args = parser.parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
     runtime_root = _ordinary_directory(Path(args.runtime_root), "runtime root")
@@ -421,10 +423,15 @@ def main(argv: list[str] | None = None) -> int:
     stop_file = state_dir / "watchdog.stop.json"
     try:
         with ResourceLock(state_dir / "watchdog.lock"):
-            # Only the lock owner may clear a previous terminal stop request.
-            # A duplicate startup must not consume the request intended for
-            # the process that already owns the runtime.
-            stop_file.unlink(missing_ok=True)
+            # Decide under the same lock that protects explicit restarts.
+            if args.respect_stop_marker:
+                if stop_file.exists():
+                    print(json.dumps({"schema": STATE_SCHEMA, "phase": "STOP_REQUESTED",
+                                      "network_orders": False, "trading_authority": False},
+                                     sort_keys=True), flush=True)
+                    return 0
+            else:
+                stop_file.unlink(missing_ok=True)
             watchdog = ProcessWatchdog(
                 manifest, manifest_digest=digest, state_dir=state_dir
             )

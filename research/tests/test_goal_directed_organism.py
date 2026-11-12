@@ -311,6 +311,32 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "network_orders": False, "trading_authority": False,
                 "automatic_promotion": False,
             }), encoding="utf-8")
+            trade_flow = root / "trade-flow.json"
+            trade_flow.write_text(json.dumps({
+                "schema": "autotrade-whitebit-trade-flow-supervisor-v1",
+                "phase": "RUNNING",
+                "checkpointed_at": NOW.isoformat(),
+                "minimum_buckets": 2160,
+                "paid_model_calls": 0,
+                "results": {
+                    "BTC_USDT": {
+                        "status": "WAITING_FOR_CAUSAL_BUCKETS",
+                        "available_causal_buckets": 321,
+                        "prospective_qualification": False,
+                        "final_consumed": False,
+                        "result_sha256": "5" * 64,
+                    },
+                    "SOL_USDT": {
+                        "status": "REJECTED",
+                        "available_causal_buckets": 2160,
+                        "prospective_qualification": False,
+                        "final_consumed": False,
+                        "result_sha256": "6" * 64,
+                    },
+                },
+                "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
             enriched = run_cycle(
                 organism_root=organism,
                 market_snapshot=market,
@@ -319,6 +345,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 forward_shadow_checkpoint=shadow,
                 rolling_alpha_checkpoint=rolling,
                 opportunity_checkpoint=opportunity,
+                trade_flow_checkpoint=trade_flow,
             )
             evidence = enriched["organism_evidence"]
             self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
@@ -340,6 +367,15 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             self.assertEqual(opportunity_summary["rejected_data_count"], 1)
             self.assertFalse(opportunity_summary["markets"][1]["prospective_qualification"])
             self.assertFalse(opportunity_summary["automatic_promotion"])
+            trade_flow_summary = evidence["trade_flow_screen"]
+            self.assertEqual(trade_flow_summary["minimum_buckets"], 2160)
+            self.assertEqual(trade_flow_summary["market_count"], 2)
+            self.assertEqual(trade_flow_summary["qualified_market_count"], 0)
+            self.assertEqual(
+                trade_flow_summary["markets"][0]["available_causal_buckets"], 321
+            )
+            self.assertFalse(trade_flow_summary["automatic_promotion"])
+            self.assertFalse(trade_flow_summary["trading_authority"])
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -426,4 +462,5 @@ class GoalDirectedOrganismTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

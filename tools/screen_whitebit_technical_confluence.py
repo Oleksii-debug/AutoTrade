@@ -28,7 +28,7 @@ def default_grid() -> tuple[TechnicalConfiguration, ...]:
             (8, 12), (32, 48), ("0.0015", "0.003"), (8, 24)):
         values.append(TechnicalConfiguration(
             family="EMA_RSI_TREND", fast_ema=fast, slow_ema=slow,
-            stop_atr="2", take_profit_atr="3", maximum_hold_bars=120,
+            stop_atr="1", take_profit_atr="4", maximum_hold_bars=120,
             minimum_ema_gap_fraction=gap, minimum_expected_move_fraction="0.003",
             cooldown_bars=cooldown))
     for period, width, expected in product(
@@ -36,10 +36,18 @@ def default_grid() -> tuple[TechnicalConfiguration, ...]:
         values.append(TechnicalConfiguration(
             family="BOLLINGER_RSI_REVERSION", fast_ema=8, slow_ema=32,
             rsi_long_min="35", rsi_short_max="65", bollinger_period=period,
-            bollinger_width=width, stop_atr="2", take_profit_atr="3",
+            bollinger_width=width, stop_atr="1", take_profit_atr="4",
             minimum_expected_move_fraction=expected, cooldown_bars=8,
             minimum_hold_bars=2, maximum_hold_bars=60))
     return tuple(values)
+
+
+def intraday_trend_configuration() -> TechnicalConfiguration:
+    """One fixed trend control with the same 30–60 minute risk envelope."""
+    return TechnicalConfiguration(family="EMA_RSI_TREND", fast_ema=8, slow_ema=32,
+        stop_atr="1", take_profit_atr="4", cooldown_bars=4,
+        minimum_expected_move_fraction="0.006", minimum_hold_bars=2,
+        maximum_hold_bars=4, maximum_entries_per_utc_day=1)
 
 
 def _reasons(candidate: dict, controls: list[dict], *, stage: str,
@@ -66,7 +74,7 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
         configurations: tuple[TechnicalConfiguration, ...],
         costs: TechnicalCosts = TechnicalCosts(), minimum_cycles: int = 10,
         maximum_drawdown_fraction: str = "0.20",
-        gate_policy: str = "BEAT_ALL_CONTROLS") -> dict:
+        gate_policy: str = "BEAT_ALL_CONTROLS", report_hourly_returns: bool = False) -> dict:
     validate_bars(bars, require_ohlcv=True); costs.validate()
     if not 1 <= len(configurations) <= 128:
         raise ValueError("technical grid must contain 1..128 configurations")
@@ -95,14 +103,15 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
     screened = []
     for identity, config in sorted(unique.items()):
         train = simulate(parts["TRAIN"], candidate=CANDIDATES[-1], costs=costs,
-                         configuration=config)
+                         configuration=config, report_hourly_returns=report_hourly_returns)
         train_reasons = _reasons(train, controls["TRAIN"], stage="TRAIN",
             minimum_cycles=minimum_cycles, maximum_drawdown=maximum,
             gate_policy=gate_policy)
         development = None; development_reasons = []; score = None
         if not train_reasons:
             development = simulate(parts["DEVELOPMENT"], candidate=CANDIDATES[-1],
-                                   costs=costs, configuration=config)
+                                   costs=costs, configuration=config,
+                                   report_hourly_returns=report_hourly_returns)
             development_reasons = _reasons(development, controls["DEVELOPMENT"],
                 stage="DEVELOPMENT", minimum_cycles=minimum_cycles,
                 maximum_drawdown=maximum, gate_policy=gate_policy)
@@ -122,7 +131,9 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
     if selected:
         config = TechnicalConfiguration(**selected["configuration"])
         final = [simulate(parts["FINAL"], candidate=name, costs=costs,
-                          configuration=config) for name in CANDIDATES]
+                          configuration=config,
+                          report_hourly_returns=report_hourly_returns and name == CANDIDATES[-1])
+                 for name in CANDIDATES]
         candidate = final[-1]
         final_reasons = _reasons(candidate, final[:-1], stage="FINAL",
             minimum_cycles=minimum_cycles, maximum_drawdown=maximum,
@@ -174,11 +185,18 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gate-policy", choices=GATE_POLICIES,
                         default="BEAT_ALL_CONTROLS")
+    parser.add_argument("--intraday-trend", action="store_true",
+                        help="replay one fixed 30–60 minute EMA/RSI trend control on M15")
     args = parser.parse_args(argv)
     bars, dataset, manifest = authenticated_bars(args.manifest)
+    if args.intraday_trend and manifest["interval"] != "15m":
+        parser.error("--intraday-trend requires a 15-minute manifest")
+    configurations = (intraday_trend_configuration(),) if args.intraday_trend else default_grid()
     result = locked_final_screen(bars, train_count=args.train_count,
         development_count=args.development_count, dataset_sha256=dataset,
-        configurations=default_grid(), gate_policy=args.gate_policy)
+        configurations=configurations, gate_policy=args.gate_policy,
+        minimum_cycles=5 if args.intraday_trend else 10,
+        report_hourly_returns=args.intraday_trend)
     target = args.output_dir / f"{result['result_sha256']}.json"
     _atomic(target, {"source": {"venue": "WHITEBIT_PUBLIC", "market": manifest["market"],
         "dataset_identity_sha256": dataset, "manifest": str(args.manifest)}, "result": result})

@@ -616,9 +616,33 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-depth-tape",
+      "script": "tools/run_whitebit_depth_tape.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-depth-tape-v1-20261112",
+        "--market", "BTC_USDT",
+        "--market", "ETH_USDT",
+        "--market", "SOL_USDT",
+        "--market", "BTC_PERP",
+        "--market", "ETH_PERP",
+        "--market", "SOL_PERP",
+        "--poll-seconds", "1",
+        "--bucket-seconds", "1",
+        "--retention-days", "3",
+        "--depth-limit", "20",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-depth-tape-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-depth-tape-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-depth-tape-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }
+
 
 
 

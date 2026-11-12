@@ -337,6 +337,26 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "network_orders": False,
                 "trading_authority": False,
             }), encoding="utf-8")
+            maker = root / "maker.json"
+            maker.write_text(json.dumps({
+                "schema": "autotrade-whitebit-maker-shadow-v1",
+                "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
+                "market": "PEPE_USDT", "settled_cycles": 2,
+                "positive_cycles": 1, "net_pnl_quote": "-0.15",
+                "open_quote": {
+                    "status": "OPEN", "age_seconds": 12,
+                    "bid_filled": True, "ask_filled": False,
+                    "quote_sha256": "7" * 64,
+                    "network_orders": False, "trading_authority": False,
+                },
+                "last_settled": {
+                    "outcome": "BID_ONLY_FORCED_EXIT",
+                    "net_pnl_quote": "-0.25", "result_sha256": "8" * 64,
+                    "network_orders": False, "trading_authority": False,
+                },
+                "profit_guaranteed": False, "paid_model_calls": 0,
+                "network_orders": False, "trading_authority": False,
+            }), encoding="utf-8")
             enriched = run_cycle(
                 organism_root=organism,
                 market_snapshot=market,
@@ -346,6 +366,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 rolling_alpha_checkpoint=rolling,
                 opportunity_checkpoint=opportunity,
                 trade_flow_checkpoint=trade_flow,
+                maker_shadow_checkpoint=maker,
             )
             evidence = enriched["organism_evidence"]
             self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
@@ -376,6 +397,15 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             )
             self.assertFalse(trade_flow_summary["automatic_promotion"])
             self.assertFalse(trade_flow_summary["trading_authority"])
+            maker_summary = evidence["maker_shadow"]
+            self.assertEqual(maker_summary["settled_cycles"], 2)
+            self.assertEqual(maker_summary["positive_cycles"], 1)
+            self.assertEqual(maker_summary["net_pnl_quote"], "-0.15")
+            self.assertTrue(maker_summary["open_quote"]["bid_filled"])
+            self.assertEqual(
+                maker_summary["last_settled"]["outcome"], "BID_ONLY_FORCED_EXIT"
+            )
+            self.assertFalse(maker_summary["automatic_promotion"])
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -462,5 +492,6 @@ class GoalDirectedOrganismTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

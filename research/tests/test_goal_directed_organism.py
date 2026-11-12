@@ -255,12 +255,34 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "network_orders": False,
                 "trading_authority": False,
             }), encoding="utf-8")
+            rolling = root / "rolling.json"
+            rolling.write_text(json.dumps({
+                "schema": "autotrade-whitebit-rolling-native-alpha-v1",
+                "status": "RUNNING", "updated_at": NOW.isoformat(),
+                "cycle_count": 1, "cycles_today": 1,
+                "next_run_at": (NOW + timedelta(hours=6)).isoformat(),
+                "last_result": {"markets": {"SOL_USDT": {
+                    "evaluation": {
+                        "dataset_identity_sha256": "4" * 64,
+                        "models": {"XGBOOST": {
+                            "executed_trade_count": 1, "long_trade_count": 0,
+                            "short_trade_count": 1,
+                            "net_pnl_after_costs_quote": "-6.8",
+                            "research_gate_passed": False,
+                            "rejection_reasons": ["NO_POSITIVE_RETURN_AFTER_COSTS"],
+                        }},
+                    },
+                }}},
+                "network_orders": False, "trading_authority": False,
+                "automatic_promotion": False,
+            }), encoding="utf-8")
             enriched = run_cycle(
                 organism_root=organism,
                 market_snapshot=market,
                 now=NOW + timedelta(milliseconds=30),
                 learning_fleet_checkpoint=fleet,
                 forward_shadow_checkpoint=shadow,
+                rolling_alpha_checkpoint=rolling,
             )
             evidence = enriched["organism_evidence"]
             self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
@@ -268,6 +290,14 @@ class GoalDirectedOrganismTests(unittest.TestCase):
             self.assertEqual(evidence["forward_shadow"]["net_pnl"], "1.2")
             self.assertEqual(evidence["forward_shadow"]["quantity"], "-12")
             self.assertFalse(evidence["forward_shadow"]["trading_authority"])
+            alpha = evidence["rolling_native_alpha"]
+            self.assertEqual(alpha["cycle_count"], 1)
+            self.assertEqual(alpha["passed_model_count"], 0)
+            self.assertEqual(alpha["markets"][0]["models"][0]["short"], 1)
+            self.assertEqual(
+                alpha["markets"][0]["models"][0]["net_pnl_after_costs_quote"], "-6.8"
+            )
+            self.assertFalse(alpha["automatic_promotion"])
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -354,3 +384,4 @@ class GoalDirectedOrganismTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

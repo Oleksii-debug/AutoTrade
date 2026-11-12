@@ -207,6 +207,62 @@ def _review_wave(state: dict) -> None:
     }
 
 
+def _close_position(state: dict, quote: dict, now: datetime, reason: str,
+                    costs: TechnicalCosts) -> None:
+    position = state["position"]
+    quantity = Decimal(position["quantity"])
+    entry = Decimal(position["entry_price"])
+    fill, fee, funding, elapsed = _exit_values(position, quote, now, costs)
+    prior_balance = Decimal(state["balance"])
+    balance = prior_balance + quantity * (fill - entry) - fee - funding
+    starting_equity = position.get("starting_equity")
+    if starting_equity is None:
+        entry_fee = abs(quantity) * entry * Decimal(costs.fee_bps_per_fill) / Decimal(10000)
+        starting_equity = prior_balance + entry_fee
+    state["balance"] = format(balance, "f")
+    state["fees"] = format(Decimal(state["fees"]) + fee, "f")
+    state["funding"] = format(Decimal(state["funding"]) + funding, "f")
+    state["net_pnl"] = format(balance - Decimal(costs.initial_equity), "f")
+    state["closed_cycles"] += 1
+    episode = {
+        "opened_at": position["opened_at"], "closed_at": now.isoformat(),
+        "direction": position["direction"], "entry_price": position["entry_price"],
+        "exit_price": format(fill, "f"), "exit_reason": reason,
+        "net_equity": state["balance"],
+        "net_pnl": format(balance - Decimal(starting_equity), "f"),
+        "holding_seconds": int(elapsed), "exit_quote_sha256": quote.get("source_sha256"),
+        "technical_configuration_frozen": True,
+    }
+    state["last_episode"] = episode
+    state["episodes"] = (state["episodes"] + [episode])[-PROSPECTIVE_WAVE_CYCLES:]
+    state["position"] = None
+    _review_wave(state)
+
+
+def protect_open_position(state: dict, quote: dict, now: datetime) -> str | None:
+    """Apply an already-fixed stop and deadline to a fresh executable quote."""
+    position = state["position"]
+    if position is None:
+        return None
+    quote_age = now - datetime.fromisoformat(quote["received_at"])
+    if not timedelta(0) <= quote_age <= timedelta(seconds=5):
+        raise PublicDataError("STALE_PROTECTIVE_QUOTE")
+    config = configurations()[0]
+    elapsed = now - datetime.fromisoformat(position["opened_at"])
+    direction = position["direction"]
+    stop = (Decimal(position["entry_price"])
+            - direction * Decimal(config.stop_atr) * Decimal(position["entry_atr"]))
+    executable = quote["bid"] if direction > 0 else quote["ask"]
+    if direction * (executable - stop) <= 0:
+        reason = "OBSERVED_ATR_PROTECTIVE_STOP"
+    elif elapsed >= timedelta(seconds=config.maximum_hold_bars * STEP_SECONDS):
+        reason = "ELAPSED_HOLD_LIMIT_EXIT"
+    else:
+        return None
+    _close_position(state, quote, now, reason, TechnicalCosts())
+    return reason
+
+
 def _append_decision(path: Path, value: dict) -> None:
     """Append one bounded decision record and retain one rotated predecessor."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,31 +318,7 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
                 if (direction > 0 and close >= middle) or (direction < 0 and close <= middle):
                     reason = "BOLLINGER_MEAN_EXIT"
         if reason:
-            quantity = Decimal(position["quantity"])
-            fill, fee, funding, elapsed = _exit_values(position, quote, now, costs)
-            prior_balance = Decimal(state["balance"])
-            balance = prior_balance + quantity * (fill - entry) - fee - funding
-            starting_equity = position.get("starting_equity")
-            if starting_equity is None:
-                entry_fee = abs(quantity) * entry * Decimal(costs.fee_bps_per_fill) / Decimal(10000)
-                starting_equity = prior_balance + entry_fee
-            state["balance"] = format(balance, "f")
-            state["fees"] = format(Decimal(state["fees"]) + fee, "f")
-            state["funding"] = format(Decimal(state["funding"]) + funding, "f")
-            state["net_pnl"] = format(balance - Decimal(costs.initial_equity), "f")
-            state["closed_cycles"] += 1
-            episode = {"opened_at": position["opened_at"],
-                "closed_at": now.isoformat(), "direction": int(direction),
-                "entry_price": position["entry_price"], "exit_price": format(fill, "f"),
-                "exit_reason": reason, "net_equity": state["balance"],
-                "net_pnl": format(balance - Decimal(starting_equity), "f"),
-                "holding_seconds": int(elapsed),
-                "technical_configuration_frozen": True}
-            state["last_episode"] = episode
-            state["episodes"].append(episode)
-            state["episodes"] = state["episodes"][-PROSPECTIVE_WAVE_CYCLES:]
-            state["position"] = None
-            _review_wave(state)
+            _close_position(state, quote, now, reason, costs)
         return state
     if not timedelta(0) <= now - bar["closed_at"] <= MAX_ENTRY_DELAY:
         _hold(state, "COMPLETED_CANDLE_OUTSIDE_ENTRY_WINDOW")
@@ -357,8 +389,28 @@ def main(argv=None) -> int:
     while not stop.exists():
         now = datetime.now(UTC); started = monotonic(); error = None
         try:
+            protective_exit = None
+            if state is not None and state["position"] is not None:
+                quote = _quote(client)
+                now = datetime.now(UTC)
+                next_state = deepcopy(state)
+                protective_exit = protect_open_position(next_state, quote, now)
+                if protective_exit is not None:
+                    review = next_state.get("wave_analysis")
+                    closed = next_state["closed_cycles"]
+                    _append_decision(state_dir / "decisions.jsonl", {
+                        "schema": SCHEMA, "event": "PROTECTIVE_EXIT", "observed_at": now.isoformat(),
+                        "position_open": False, "episode": next_state["last_episode"],
+                        "wave_analysis": (review if review and review["closed_through_cycle"] == closed
+                                          else None),
+                        "closed_cycles": closed, "net_pnl": next_state["net_pnl"],
+                        "network_orders": False, "trading_authority": False,
+                    })
+                    state = next_state
             expected_epoch = int(now.timestamp()) // STEP_SECONDS * STEP_SECONDS - STEP_SECONDS
-            if state is None:
+            if protective_exit is not None:
+                status = "RUNNING"
+            elif state is None:
                 history = _bars(client, now)
                 state = _initial(int(history[-1]["opened_at"].timestamp()), now)
                 status = "OBSERVING_FROM_NEXT_COMPLETED_BAR"
@@ -415,7 +467,13 @@ def main(argv=None) -> int:
             "paid_model_calls": 0}
         atomic_write_json(checkpoint, value)
         if args.once: return 0 if error is None else 2
-        deadline = monotonic() + args.poll_seconds
+        delay = args.poll_seconds
+        if error is None and state is not None and state["position"] is not None:
+            opened = datetime.fromisoformat(state["position"]["opened_at"])
+            time_left = (opened + timedelta(seconds=configurations()[0].maximum_hold_bars
+                * STEP_SECONDS) - datetime.now(UTC)).total_seconds()
+            delay = min(delay, max(1, time_left))
+        deadline = monotonic() + delay
         while not stop.exists() and monotonic() < deadline:
             sleep(min(5, max(1, deadline - monotonic())))
     atomic_write_json(checkpoint, {**value, "status": "STOPPED",

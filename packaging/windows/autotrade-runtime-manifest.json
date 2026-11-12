@@ -359,6 +359,7 @@
       "args": [
         "--organism-root", "${RUNTIME_ROOT}/goal-directed-organism",
         "--market-snapshot", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111/latest-market.json",
+        "--flow-research-checkpoint", "${RUNTIME_ROOT}/whitebit-flow-research-screen-v1-20261112/checkpoint.json",
         "--poll-seconds", "15",
         "--stop-file", "${RUNTIME_ROOT}/goal-directed-organism/managed.stop.json"
       ],

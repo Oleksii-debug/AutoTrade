@@ -9,6 +9,7 @@ from research.autotrade_research.strategies.course_quasimodo import (
 )
 from tools.index_trading_course_transcripts import build_index
 from tools.screen_whitebit_course_quasimodo import screen
+from tools.screen_whitebit_course_quasimodo_universe import screen_universe
 
 
 def bars(count=1200):
@@ -46,6 +47,10 @@ class CourseQuasimodoTests(unittest.TestCase):
     def test_detector_requires_full_context(self):
         self.assertIsNone(detect_sweep(bars(100), CourseConfiguration()))
 
+    def test_top_down_gate_needs_completed_daily_history(self):
+        self.assertIsNone(detect_sweep(bars(1200),
+            CourseConfiguration(require_true_top_down=True)))
+
     def test_locked_screen_keeps_final_unread_after_train_failure(self):
         value = screen(bars(2500), train_count=1400, development_count=550,
                        dataset_sha256="a" * 64, minimum_cycles=3)
@@ -53,6 +58,16 @@ class CourseQuasimodoTests(unittest.TestCase):
         self.assertIn("MINIMUM_TRAIN_CYCLES_NOT_MET", value["train_rejection_reasons"])
         self.assertFalse(value["network_orders"])
 
+    def test_universe_screen_keeps_later_partitions_locked(self):
+        value = screen_universe([{"market": "BTC_PERP", "bars": bars(2500),
+            "dataset_identity_sha256": "b" * 64}], train_count=1400,
+            development_count=550, configuration=CourseConfiguration(),
+            minimum_train_cycles=3)
+        self.assertFalse(value["development_consumed"])
+        self.assertFalse(value["final_consumed"])
+        self.assertIn("MINIMUM_TRAIN_CYCLES_NOT_MET", value["train_rejection_reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

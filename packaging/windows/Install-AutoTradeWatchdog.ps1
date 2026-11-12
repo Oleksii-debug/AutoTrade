@@ -59,16 +59,21 @@ $arguments = @(
     '"' + $watchdog + '"',
     '--manifest', '"' + $manifest + '"',
     '--runtime-root', '"' + $runtime + '"',
-    '--state-dir', '"' + $state + '"'
+    '--state-dir', '"' + $state + '"',
+    '--respect-stop-marker'
 ) -join ' '
 
 $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $repo
-$trigger = New-ScheduledTaskTrigger -AtLogOn
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+$recoveryTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -MultipleInstances IgnoreNew `
+    -DontStopIfGoingOnBatteries `
+    -AllowStartIfOnBatteries `
     -StartWhenAvailable
 
 if ($PSCmdlet.ShouldProcess($TaskName, 'Install current-user watchdog startup')) {
@@ -76,7 +81,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Install current-user watchdog startup'))
         Register-ScheduledTask `
             -TaskName $TaskName `
             -Action $action `
-            -Trigger $trigger `
+            -Trigger @($logonTrigger, $recoveryTrigger) `
             -Settings $settings `
             -Description 'Restarts AutoTrade public data, ZERO learning, and attention processes without trading authority.' `
             -RunLevel Limited `

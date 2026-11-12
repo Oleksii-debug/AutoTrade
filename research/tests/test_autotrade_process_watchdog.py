@@ -210,6 +210,32 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert Path(forward["script"]).name == "run_whitebit_subhour_forward_shadow.py"
 
 
+def test_automatic_watchdog_start_preserves_an_intentional_stop(tmp_path):
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "state"
+    runtime.mkdir()
+    state.mkdir()
+    stop_file = state / "watchdog.stop.json"
+    stop_file.write_text("owner stop request", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _row())
+
+    args = ["--manifest", str(manifest_path), "--runtime-root", str(runtime),
+            "--state-dir", str(state)]
+    captured = io.StringIO()
+    with patch("tools.run_autotrade_process_watchdog.ProcessWatchdog") as runner:
+        with redirect_stdout(captured):
+            assert main([*args, "--respect-stop-marker"]) == 0
+        runner.assert_not_called()
+        assert json.loads(captured.getvalue())["phase"] == "STOP_REQUESTED"
+        assert stop_file.read_text(encoding="utf-8") == "owner stop request"
+
+        runner.return_value.run.return_value = 0
+        assert main(args) == 0
+        runner.return_value.run.assert_called_once()
+        assert not stop_file.exists()
+
+
 def test_duplicate_watchdog_does_not_start_or_consume_owner_stop(tmp_path):
     runtime = tmp_path / "runtime"
     state = tmp_path / "state"

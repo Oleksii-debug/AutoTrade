@@ -32,9 +32,11 @@ during transport in a bag.
 To stop safely, write any file named `watchdog.stop.json` into the watchdog
 state directory or send the watchdog SIGINT/SIGTERM.  It writes a per-process
 managed stop marker, waits for each process to publish its checkpoint, then
-uses forced termination only after the grace period.  The next start removes
-only those managed stop markers.  Runtime data, learning memory, model state,
-and market evidence are never stored in the replaceable program directory.
+uses forced termination only after the grace period.  Automatic starts preserve the watchdog stop marker and exit without starting
+children. To resume deliberately, remove the marker after the watchdog is
+stopped and start the task, or use the manual command above. Runtime data,
+learning memory, model state, and market evidence remain outside the
+replaceable program directory.
 
 The manifest accepts only repository-relative Python scripts.  Options named
 like credentials, tokens, passwords, private keys, or secrets are rejected;
@@ -52,8 +54,9 @@ scheduled task once (no administrator account or stored password is required):
 ```
 
 The task uses `pythonw.exe` when it is available, prevents parallel duplicate
-instances, restarts the watchdog after a process failure, and starts when a
-missed logon trigger becomes available. If Windows denies Task Scheduler
+instances, restarts the watchdog after a process failure, and checks every
+five minutes while Windows is available. Recovery respects the stop marker and
+does not wake a sleeping computer. If Windows denies Task Scheduler
 registration for the current account, the installer falls back to the
 non-admin per-user `HKCU\\...\\Run` startup entry; the watchdog's single-owner
 lock still prevents a duplicate runtime. Remove only the startup registration

@@ -100,11 +100,16 @@ def snapshot_from_artifact(manifest: dict, data: bytes) -> dict:
 
 
 def replay(*, artifact_root: Path, state_dir: Path, maximum_artifacts: int = 4096,
-           outcome_horizon_seconds: int = 60) -> dict:
+           outcome_horizon_seconds: int = 60,
+           feature_mode: str = "TOP_BOOK_IMBALANCE") -> dict:
     if type(maximum_artifacts) is not int or not 2 <= maximum_artifacts <= 100_000:
         raise ValueError("maximum_artifacts must be 2..100000")
     if type(outcome_horizon_seconds) is not int or not 1 <= outcome_horizon_seconds <= 3600:
         raise ValueError("outcome horizon must be 1..3600 seconds")
+    if feature_mode not in {
+        "TOP_BOOK_IMBALANCE", "TOP_BOOK_IMBALANCE_PERSISTENCE",
+    }:
+        raise ValueError("replay feature mode is unsupported")
     store = ArtifactStore(artifact_root)
     paths = list(store.manifests.glob("*.json"))
     if len(paths) > maximum_artifacts:
@@ -138,7 +143,7 @@ def replay(*, artifact_root: Path, state_dir: Path, maximum_artifacts: int = 409
         outcome_horizon_seconds=outcome_horizon_seconds,
         signal_lookback_seconds=0,
         short_carry_bps_per_day="2",
-        feature_mode="TOP_BOOK_IMBALANCE",
+        feature_mode=feature_mode,
     )
     processed = duplicates = 0
     for snapshot in snapshots:
@@ -159,6 +164,7 @@ def replay(*, artifact_root: Path, state_dir: Path, maximum_artifacts: int = 409
         "last_available_at": None if not snapshots else snapshots[-1]["available_at"],
         "episode_count": checkpoint["episode_count"],
         "model_version_count": checkpoint["model_version_count"],
+        "feature_mode": feature_mode,
         "learning_cycle": checkpoint["learning_cycle"],
         "public_data_only": True,
         "network_orders": False,
@@ -174,6 +180,9 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--maximum-artifacts", type=int, default=4096)
     parser.add_argument("--outcome-horizon-seconds", type=int, default=60)
+    parser.add_argument("--feature-mode", choices=(
+        "TOP_BOOK_IMBALANCE", "TOP_BOOK_IMBALANCE_PERSISTENCE",
+    ), default="TOP_BOOK_IMBALANCE")
     args = parser.parse_args(argv)
     try:
         result = replay(
@@ -181,6 +190,7 @@ def main(argv=None) -> int:
             state_dir=Path(args.state_dir),
             maximum_artifacts=args.maximum_artifacts,
             outcome_horizon_seconds=args.outcome_horizon_seconds,
+            feature_mode=args.feature_mode,
         )
     except (OSError, TypeError, ValueError) as exc:
         print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, sort_keys=True))

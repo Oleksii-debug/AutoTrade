@@ -10,6 +10,7 @@ from ..integrations.whitebit_public import PublicBook, PublicInstrument, PublicT
 
 
 SCHEMA = "autotrade-whitebit-maker-shadow-v1"
+EARLY_FUTILITY_MINIMUM_CYCLES = 4
 
 
 def quote_admission(
@@ -86,6 +87,9 @@ def advance_evidence_wave(
         "wave_net_pnl_quote": format(wave_net, "f"),
         "wave_outcomes": dict(sorted(outcomes.items())),
     }
+    early = apply_early_futility_gate(updated, target_cycles=target_cycles)
+    if early is not updated:
+        return early
     if cycles < target_cycles:
         return updated
     passed = wave_net > 0 and positive >= max(2, target_cycles // 3)
@@ -116,6 +120,73 @@ def advance_evidence_wave(
         **updated, "research_phase": next_phase, "latest_wave_analysis": analysis,
         "wave_cycles": 0, "wave_positive_cycles": 0,
         "wave_net_pnl_quote": "0", "wave_outcomes": {},
+    }
+
+
+def apply_early_futility_gate(
+    state: dict[str, object], *, target_cycles: int,
+    minimum_cycles: int = EARLY_FUTILITY_MINIMUM_CYCLES,
+) -> dict[str, object]:
+    """Stop an obviously futile prospective maker wave before its full budget.
+
+    The regular target-cycle gate remains authoritative unless at least four
+    settled cycles have produced neither a positive outcome nor a two-sided
+    fill and their combined after-cost result is negative.  This rule is
+    deterministic from checkpointed evidence, so it can also repair a state
+    restored from an older supervisor that had not applied the gate.
+    """
+    if (type(state) is not dict or type(target_cycles) is not int
+            or not 4 <= target_cycles <= 1000 or type(minimum_cycles) is not int
+            or not 4 <= minimum_cycles <= target_cycles):
+        raise ValueError("maker early futility configuration is invalid")
+    phase = str(state.get("research_phase", "DISCOVERY"))
+    if phase not in {
+        "DISCOVERY", "EVALUATING", "RESEARCH_FILTERED",
+        "EVALUATING_FILTERED", "QUALIFIED_SHADOW",
+    }:
+        return state
+    cycles = int(state.get("wave_cycles", 0))
+    positive = int(state.get("wave_positive_cycles", 0))
+    wave_net = _decimal(state.get("wave_net_pnl_quote", "0"), name="wave_net")
+    outcomes = dict(state.get("wave_outcomes", {}))
+    if any(type(key) is not str or type(value) is not int or value < 0
+           for key, value in outcomes.items()):
+        raise ValueError("maker wave outcomes are invalid")
+    two_sided = int(outcomes.get("BOTH_SIDES_FILLED", 0))
+    if (cycles < minimum_cycles or cycles >= target_cycles or positive > 0
+            or two_sided > 0 or wave_net >= 0):
+        return state
+    # This is a terminal stop/analyse decision, not another adaptive trial.
+    # A fresh experiment must therefore be explicitly preregistered rather
+    # than being selected automatically from the phase that happened to fail.
+    next_phase = "RESEARCH_ONLY"
+    analysis = {
+        "stage": phase,
+        "cycles": cycles,
+        "positive_cycles": positive,
+        "two_sided_fill_cycles": two_sided,
+        "net_pnl_quote": format(wave_net, "f"),
+        "outcomes": dict(sorted(outcomes.items())),
+        "unclassified_outcome_count": max(0, cycles - sum(outcomes.values())),
+        "passed_after_cost_gate": False,
+        "next_research_phase": next_phase,
+        "finding": "EARLY_AFTER_COST_FUTILITY",
+        "reason_code": "ZERO_POSITIVE_AND_TWO_SIDED_NEGATIVE_AFTER_COST",
+        "early_futility_gate": True,
+        "early_futility_minimum_cycles": minimum_cycles,
+        "saved_remaining_cycle_budget": target_cycles - cycles,
+        "automatic_promotion": False,
+        "network_orders": False,
+        "trading_authority": False,
+    }
+    return {
+        **state,
+        "research_phase": next_phase,
+        "latest_wave_analysis": analysis,
+        "wave_cycles": 0,
+        "wave_positive_cycles": 0,
+        "wave_net_pnl_quote": "0",
+        "wave_outcomes": {},
     }
 
 

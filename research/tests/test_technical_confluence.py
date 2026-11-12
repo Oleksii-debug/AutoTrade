@@ -36,7 +36,8 @@ class TechnicalConfluenceTests(unittest.TestCase):
 
     def test_signal_uses_next_open_and_has_no_order_authority(self):
         result = simulate(bars(), candidate="TECHNICAL_CONFLUENCE",
-            configuration=TechnicalConfiguration(rsi_long_max="100", maximum_hold_bars=30))
+            configuration=TechnicalConfiguration(rsi_long_max="100",
+                minimum_expected_move_fraction="0.001", maximum_hold_bars=30))
         self.assertGreater(result["closed_cycles"], 0)
         self.assertEqual(result["round_trip_cost_bps"], "15.0")
         self.assertFalse(result["network_orders"])

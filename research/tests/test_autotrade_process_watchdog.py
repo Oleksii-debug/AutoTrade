@@ -199,6 +199,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-course-research",
         "whitebit-depth-tape",
         "whitebit-subhour-screen",
+        "whitebit-subhour-forward-shadow",
     ]
     assert "sol-trend-forward-shadow" not in {
         row["id"] for row in manifest["processes"]
@@ -264,6 +265,9 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     ]
     subhour = processes["whitebit-subhour-screen"]
     assert subhour["args"][subhour["args"].index("--bars") + 1] == "6000"
+    forward = processes["whitebit-subhour-forward-shadow"]
+    assert forward["args"][forward["args"].index("--poll-seconds") + 1] == "30"
+    assert Path(forward["script"]).name == "run_whitebit_subhour_forward_shadow.py"
 
 
 def test_duplicate_watchdog_does_not_start_or_consume_owner_stop(tmp_path):
@@ -339,7 +343,6 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
-
 
 
 

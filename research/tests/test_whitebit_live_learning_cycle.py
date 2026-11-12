@@ -91,10 +91,16 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertIsNone(learner._cycle_side(
                 "MOMENTUM_SHORT_COST_HURDLE", Decimal("-0.01"), quote,
             ))
-            winning = learner._short_outcome("100", "90")[3]
-            losing = learner._short_outcome("100", "110")[3]
+            winning_result = learner._short_outcome("100", "90", duration_seconds=60)
+            losing_result = learner._short_outcome("100", "110", duration_seconds=60)
+            winning, losing = winning_result[4], losing_result[4]
             self.assertGreater(winning, 0)
             self.assertLess(losing, 0)
+            self.assertGreater(winning_result[3], 0)
+            self.assertLess(
+                abs(winning-(winning_result[1]-winning_result[2]-winning_result[3])),
+                Decimal("1e-25"),
+            )
 
     def test_legacy_memory_migrates_paused_and_retains_pending_and_evaluation(self):
         with TemporaryDirectory() as tmp:

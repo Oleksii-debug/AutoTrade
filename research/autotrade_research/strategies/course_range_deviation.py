@@ -19,7 +19,7 @@ from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 from .technical_confluence import HourlyEquity, TechnicalCosts
 
 
-VERSION = "private-course-range-deviation-v1.2-confirmed-boundaries-frozen-100-cycle"
+VERSION = "private-course-range-deviation-v1.3-cancel-invalidated-confirmation"
 
 
 def _text(value: Decimal) -> str:
@@ -97,11 +97,17 @@ def _atr(history: list[dict], period: int) -> float:
 
 
 def detect_deviation(history: list[dict],
-                     configuration: RangeDeviationConfiguration) -> dict | None:
+                     configuration: RangeDeviationConfiguration, *,
+                     diagnostics: dict[str, int] | None = None) -> dict | None:
     """Return the latest completed-bar deviation setup without future data."""
+    def reject(reason: str) -> None:
+        if diagnostics is not None:
+            diagnostics[reason] = diagnostics.get(reason, 0) + 1
+        return None
+
     configuration.validate()
     if len(history) < configuration.range_lookback + 1:
-        return None
+        return reject("WARMUP")
     current = history[-1]
     prior = history[-1-configuration.range_lookback:-1]
     # Signal comparisons use binary64 for throughput.  Fills, fees, funding,
@@ -110,23 +116,23 @@ def detect_deviation(history: list[dict],
     path = sum((abs(closes[index] - closes[index - 1])
                 for index in range(1, len(closes))), 0.0)
     if path == 0:
-        return None
+        return reject("FLAT_RANGE")
     efficiency = abs(closes[-1] - closes[0]) / path
     if efficiency > float(configuration.maximum_directional_efficiency):
-        return None
+        return reject("DIRECTIONAL_REGIME")
     atr = _atr(history, configuration.atr_period)
     if atr <= 0:
-        return None
+        return reject("ZERO_ATR")
     lower = min(float(row["low"]) for row in prior)
     upper = max(float(row["high"]) for row in prior)
     width_atr = (upper - lower) / atr
     if not float(configuration.minimum_range_atr) <= width_atr <= float(configuration.maximum_range_atr):
-        return None
+        return reject("RANGE_WIDTH")
     tolerance = float(configuration.boundary_touch_tolerance_atr) * atr
     lower_touches = sum(float(row["low"]) <= lower + tolerance for row in prior)
     upper_touches = sum(float(row["high"]) >= upper - tolerance for row in prior)
     if min(lower_touches, upper_touches) < configuration.minimum_boundary_touches:
-        return None
+        return reject("BOUNDARY_TOUCHES")
     half = len(prior) // 2
     first, second = prior[:half], prior[half:]
     first_low = min(float(row["low"]) for row in first)
@@ -136,7 +142,7 @@ def detect_deviation(history: list[dict],
     overlap = max(0.0, min(first_high, second_high) - max(first_low, second_low))
     union = max(first_high, second_high) - min(first_low, second_low)
     if union <= 0 or overlap / union < float(configuration.minimum_half_range_overlap):
-        return None
+        return reject("RANGE_OVERLAP")
     midpoint = (lower + upper) / 2.0
     opened = float(current["open"])
     high = float(current["high"])
@@ -155,7 +161,7 @@ def detect_deviation(history: list[dict],
         direction = -1
         extreme = high
     else:
-        return None
+        return reject("NO_REENTRY_SWEEP")
     stop = (extreme - float(configuration.stop_buffer_atr) * atr if direction > 0
             else extreme + float(configuration.stop_buffer_atr) * atr)
     # Confirmation is deliberately later than the sweep candle.  Requiring a
@@ -166,7 +172,7 @@ def detect_deviation(history: list[dict],
     displacement = float(configuration.confirmation_displacement_atr) * atr
     shift = close + displacement if direction > 0 else close - displacement
     if (direction > 0 and shift >= midpoint) or (direction < 0 and shift <= midpoint):
-        return None
+        return reject("SHIFT_BEYOND_TARGET")
     bounded = lambda value: _text(Decimal(str(value)))
     return {"direction": direction, "range_lower": bounded(lower),
         "range_upper": bounded(upper), "range_midpoint": bounded(midpoint),
@@ -205,6 +211,8 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
         pretrade_holds = 0
         pretrade_hold_reasons: dict[str, int] = {}
         detected_setups = expired_setups = 0
+        detection_rejections: dict[str, int] = {}
+        confirmation_rejections: dict[str, int] = {}
         fees = funding = maximum_drawdown = Decimal(0)
         exits: dict[str, int] = {}
         evidence = sha256()
@@ -317,6 +325,16 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                 pending_setup = None
                 continue
             if pending_setup is not None:
+                # A thesis that crossed its invalidation while awaiting
+                # confirmation cannot be revived by a later favorable close.
+                invalidated = (low <= decimal(pending_setup["stop"])
+                    if pending_setup["direction"] > 0
+                    else high >= decimal(pending_setup["stop"]))
+                if invalidated:
+                    confirmation_rejections["STOP_INVALIDATED"] = (
+                        confirmation_rejections.get("STOP_INVALIDATED", 0) + 1)
+                    pending_setup = None
+                    continue
                 pending_setup["age"] += 1
                 confirmed = (close > decimal(pending_setup["shift_level"])
                     if pending_setup["direction"] > 0
@@ -327,6 +345,9 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                             "deviation_to_shift_bars": pending_setup["age"],
                             "shift_confirmed_at": bar["closed_at"].isoformat()}
                         signals += 1
+                    else:
+                        confirmation_rejections["CONFIRMED_TOO_EARLY"] = (
+                            confirmation_rejections.get("CONFIRMED_TOO_EARLY", 0) + 1)
                     # Confirmation age is the first causal crossing.  A setup
                     # that confirms too early cannot be relabelled as a later
                     # confirmation by waiting while price remains beyond it.
@@ -334,7 +355,7 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                 elif pending_setup["age"] >= configuration.shift_expiry_bars:
                     pending_setup = None; expired_setups += 1
                 continue
-            setup = detect_deviation(history, configuration)
+            setup = detect_deviation(history, configuration, diagnostics=detection_rejections)
             if setup is not None:
                 pending_setup = setup; detected_setups += 1
 
@@ -351,6 +372,8 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
             "win_rate": str(Decimal(wins) / Decimal(closed)) if closed else None,
             "fill_count": fills, "signal_count": signals, "fees": str(fees),
             "detected_setups": detected_setups, "expired_setups": expired_setups,
+            "detection_rejections": detection_rejections,
+            "confirmation_rejections": confirmation_rejections,
             "pretrade_holds": pretrade_holds,
             "pretrade_hold_reasons": pretrade_hold_reasons,
             "funding": str(funding), "exit_reasons": exits, "episodes": episodes,

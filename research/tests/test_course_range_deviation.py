@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
 
 from research.autotrade_research.strategies.course_range_deviation import (
     RangeDeviationConfiguration, detect_deviation, simulate,
@@ -38,6 +39,36 @@ class CourseRangeDeviationTests(unittest.TestCase):
         self.assertIn("shift_level", setup)
         self.assertGreaterEqual(setup["lower_boundary_touches"], 2)
         self.assertGreaterEqual(setup["upper_boundary_touches"], 2)
+
+    def test_invalidated_setup_cannot_be_revived_by_confirmation(self):
+        for side in (1, -1):
+            with self.subTest(side=side):
+                values = range_bars(4)
+                for row in values:
+                    row.update(open="100", high="100.2", low="99.8", close="100")
+                # The confirmation candle crosses both the shift and stop.
+                values[1].update(high="103", low="97",
+                                 close="101" if side > 0 else "99")
+                setup = {"direction": side, "stop": "98" if side > 0 else "102",
+                         "target": "110" if side > 0 else "90",
+                         "shift_level": "100.5" if side > 0 else "99.5", "age": 0}
+                with patch("research.autotrade_research.strategies.course_range_deviation.detect_deviation",
+                           side_effect=[setup, None, None, None]):
+                    result = simulate(values, configuration=RangeDeviationConfiguration(
+                        minimum_shift_confirmation_bars=1, maximum_hold_bars=4))
+                self.assertEqual(result["signal_count"], 0)
+                self.assertEqual(result["fill_count"], 0)
+                self.assertEqual(result["confirmation_rejections"], {"STOP_INVALIDATED": 1})
+
+    def test_detection_diagnostics_do_not_change_the_setup(self):
+        cfg = RangeDeviationConfiguration(minimum_range_atr="1", minimum_reaction_atr="0.5")
+        counters = {}
+        values = range_bars(deviation=True)
+        self.assertEqual(detect_deviation(values, cfg),
+                         detect_deviation(values, cfg, diagnostics=counters))
+        self.assertEqual(counters, {})
+        self.assertIsNone(detect_deviation(values[:2], cfg, diagnostics=counters))
+        self.assertEqual(counters, {"WARMUP": 1})
 
     def test_no_sweep_means_no_trade(self):
         result = simulate(range_bars(300), configuration=RangeDeviationConfiguration(

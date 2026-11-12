@@ -8,7 +8,7 @@ spread and slippage.  It is research-only and cannot place an order.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, ROUND_DOWN, localcontext
 from hashlib import sha256
 import json
@@ -60,6 +60,41 @@ def summarize_hour_windows(returns: list[Decimal], hours: int) -> dict:
         "best_fraction": str(max(returns)) if returns else None,
         "worst_fraction": str(min(returns)) if returns else None,
     }
+
+
+class HourlyEquity:
+    """Collect liquidation equity on complete UTC hours for a causal replay."""
+
+    def __init__(self, opened_at: datetime, initial_equity: Decimal) -> None:
+        self.samples: dict[int, Decimal] = {}
+        self.record(opened_at, initial_equity)
+
+    def record(self, at: datetime, equity: Decimal) -> None:
+        at = at.astimezone(UTC)
+        if not (at.minute or at.second or at.microsecond):
+            self.samples[int(at.timestamp())] = equity
+
+    def mark(self, at: datetime, *, balance: Decimal, quantity: Decimal, entry: Decimal,
+             close: Decimal, adverse: Decimal, fee_ratio: Decimal) -> None:
+        at = at.astimezone(UTC)
+        if at.minute or at.second or at.microsecond:
+            return
+        if quantity:
+            exit_price = close * (1 - adverse if quantity > 0 else 1 + adverse)
+            balance += quantity * (exit_price - entry) - abs(quantity) * exit_price * fee_ratio
+        self.record(at, balance)
+
+    def report(self) -> dict:
+        windows = {}
+        for hours in HOURLY_WINDOWS:
+            span = hours * 3600
+            changes = []
+            for end, equity in self.samples.items():
+                baseline = self.samples.get(end - span)
+                if end % span == 0 and baseline is not None and baseline > 0:
+                    changes.append(equity / baseline - 1)
+            windows[str(hours)] = summarize_hour_windows(changes, hours)
+        return windows
 
 
 @dataclass(frozen=True)

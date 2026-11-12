@@ -16,7 +16,7 @@ import json
 
 from .fast_screen import decimal, validate_bars
 from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
-from .technical_confluence import TechnicalCosts
+from .technical_confluence import HourlyEquity, TechnicalCosts
 
 
 VERSION = "private-course-range-deviation-v1.2-confirmed-boundaries-frozen-100-cycle"
@@ -180,13 +180,15 @@ def detect_deviation(history: list[dict],
 
 
 def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
-             configuration: RangeDeviationConfiguration = RangeDeviationConfiguration()) -> dict:
+             configuration: RangeDeviationConfiguration = RangeDeviationConfiguration(),
+             report_hourly_returns: bool = False) -> dict:
     """Simulate fixed-risk range deviations with conservative next-open fills."""
     validate_bars(bars, require_ohlcv=True)
     costs.validate(); configuration.validate()
     with localcontext() as context:
         context.prec = 50
         balance = initial = peak = decimal(costs.initial_equity)
+        clock = HourlyEquity(bars[0]["opened_at"], initial) if report_hourly_returns else None
         fee_ratio = decimal(costs.fee_bps_per_fill) / Decimal(10000)
         adverse = (decimal(costs.spread_bps) / Decimal(2)
                    + decimal(costs.slippage_bps_per_fill)) / Decimal(10000)
@@ -297,12 +299,16 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                 stopped = low <= stop if quantity > 0 else high >= stop
                 targeted = high >= target if quantity > 0 else low <= target
                 if stopped:
-                    close_position(stop, "PRECOMMITTED_STOP_EXIT", bar["closed_at"].isoformat())
+                    reference = min(opened, stop) if quantity > 0 else max(opened, stop)
+                    close_position(reference, "PRECOMMITTED_STOP_EXIT", bar["closed_at"].isoformat())
                 elif targeted:
                     close_position(target, "RANGE_EQUILIBRIUM_EXIT", bar["closed_at"].isoformat())
                 elif holding >= configuration.maximum_hold_bars:
                     close_position(close, "MAX_HOLD_EXIT", bar["closed_at"].isoformat())
             mark(close)
+            if clock is not None:
+                clock.mark(bar["closed_at"], balance=balance, quantity=quantity, entry=entry,
+                           close=close, adverse=adverse, fee_ratio=fee_ratio)
             history.append(bar)
             if quantity or pending_entry is not None:
                 continue
@@ -335,7 +341,7 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
         if quantity:
             close_position(decimal(bars[-1]["close"]), "PARTITION_END_EXIT",
                            bars[-1]["closed_at"].isoformat())
-        return {"schema": VERSION, "configuration": asdict(configuration),
+        result = {"schema": VERSION, "configuration": asdict(configuration),
             "costs": asdict(costs), "round_trip_cost_bps": str(costs.round_trip_bps),
             "initial_equity": str(initial), "final_equity": str(balance),
             "net_pnl": str(balance - initial),
@@ -351,5 +357,6 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
             "evidence_sha256": evidence.hexdigest(), "frozen_until_cycles": 100,
             "network_orders": False, "trading_authority": False,
             "automatic_strategy_mutation": False}
-
-
+        if clock is not None:
+            result["clock_window_returns"] = clock.report()
+        return result

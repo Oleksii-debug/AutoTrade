@@ -8,7 +8,8 @@ import pytest
 from research.autotrade_research.integrations.whitebit_public import PublicDataError
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
-    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial, _record_clock_sample, main,
+    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial,
+    _observe_execution_outcomes, _record_clock_sample, main,
     process_completed_bar, protect_open_position,
 )
 from tools.run_whitebit_subhour_supervisor import _perfect_timing_benchmark, compare_horizons
@@ -184,6 +185,36 @@ def test_shadow_clock_resumes_and_does_not_measure_through_a_data_gap():
     later = start + timedelta(hours=4)
     _record_clock_sample(state, boundary=later, quote=quote, now=later, contiguous=True)
     assert state["clock_metrics"]["windows"]["4"]["complete_windows"] == 0
+
+
+def test_execution_outcomes_settle_after_restart_without_virtual_fill():
+    start = datetime(2026, 11, 12, 12, tzinfo=UTC)
+    state = _initial(int(start.timestamp()) - 900, start)
+
+    def observe(boundary, bid, ask, contiguous=True, delay=3):
+        now = boundary + timedelta(seconds=delay)
+        quote = {"bid": Decimal(bid), "ask": Decimal(ask),
+                 "received_at": now.isoformat(), "source_sha256": str(boundary.timestamp())}
+        return _observe_execution_outcomes(state, boundary=boundary, quote=quote,
+            now=now, contiguous=contiguous, policy_action="L2_NOT_CONFIRMED")
+
+    assert observe(start, "100", "100.10") == []
+    state = json.loads(json.dumps(state))
+    assert observe(start + timedelta(minutes=15), "101", "101.10") == []
+    due = start + timedelta(minutes=30)
+    results = observe(due, "102", "102.10")
+    assert len(results) == 1
+    outcome = results[0]
+    assert outcome["policy_action"] == "L2_NOT_CONFIRMED"
+    assert Decimal(outcome["elapsed_seconds"]) == 1800
+    assert Decimal("0.004") < Decimal(outcome["outcomes"]["LONG"]["net_equity_return"]) < Decimal("0.005")
+    assert Decimal(outcome["outcomes"]["SHORT"]["net_equity_return"]) < 0
+    assert observe(due, "103", "103.10") == []
+    assert observe(due + timedelta(minutes=30), "103", "103.10", contiguous=False) == []
+    assert state["execution_outcomes"]["settled_count"] == 1
+    assert state["position"] is None
+    assert state["closed_cycles"] == 0
+    assert state["balance"] == "1000"
 
 
 def test_shadow_clock_marks_an_open_short_after_exit_costs():

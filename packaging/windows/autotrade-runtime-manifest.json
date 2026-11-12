@@ -639,6 +639,25 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-depth-ofi-screen",
+      "script": "tools/run_whitebit_depth_ofi_supervisor.py",
+      "args": [
+        "--depth-tape", "${RUNTIME_ROOT}/whitebit-depth-tape-v1-20261112/depth-tape.sqlite3",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-depth-ofi-screen-v1-20261112",
+        "--market", "BTC_PERP",
+        "--market", "ETH_PERP",
+        "--market", "SOL_PERP",
+        "--minimum-buckets", "3600",
+        "--interval-seconds", "900",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-depth-ofi-screen-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-depth-ofi-screen-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-depth-ofi-screen-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }

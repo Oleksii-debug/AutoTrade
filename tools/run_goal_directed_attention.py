@@ -361,7 +361,8 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
               rolling_alpha_checkpoint: Path | None = None,
               opportunity_checkpoint: Path | None = None,
               trade_flow_checkpoint: Path | None = None,
-              maker_shadow_checkpoint: Path | None = None) -> dict[str, object]:
+              maker_shadow_checkpoint: Path | None = None,
+              ena_maker_shadow_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -467,6 +468,9 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     maker_shadow_path = maker_shadow_checkpoint or (
         runtime_root / "whitebit-pepe-maker-shadow-v1-20261112" / "checkpoint.json"
     )
+    ena_maker_shadow_path = ena_maker_shadow_checkpoint or (
+        runtime_root / "whitebit-ena-maker-shadow-v1-20261112" / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -483,6 +487,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
             "opportunity_screen": _opportunity_summary(opportunity_path),
             "trade_flow_screen": _trade_flow_summary(trade_flow_path),
             "maker_shadow": _maker_shadow_summary(maker_shadow_path),
+            "ena_maker_shadow": _maker_shadow_summary(ena_maker_shadow_path),
         },
         "network_orders": False,
         "trading_authority": False,
@@ -553,6 +558,7 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 

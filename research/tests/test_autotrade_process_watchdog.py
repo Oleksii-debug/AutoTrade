@@ -167,6 +167,11 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert "api-key" not in serialized
     assert "password" not in serialized
     assert "secret" not in serialized
+    groq = next(row for row in manifest["processes"] if row["id"] == "groq-advisory")
+    checkpoint_index = groq["args"].index("--checkpoint") + 1
+    assert groq["args"][checkpoint_index].endswith(
+        "whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json"
+    )
 
 
 def test_duplicate_watchdog_does_not_start_or_consume_owner_stop(tmp_path):

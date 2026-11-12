@@ -19,7 +19,9 @@ def digest(value):
 class LiveCycle:
     def _configure_cycle(self, episodes, seconds, evaluation, drawdown, cooldown, trials,
                          max_gap, min_trades, outcome_horizon, signal_lookback,
-                         short_carry_bps_per_day):
+                         short_carry_bps_per_day, feature_mode):
+        if feature_mode not in {"MID_MOMENTUM", "TOP_BOOK_IMBALANCE"}:
+            raise ValueError("feature mode is unsupported")
         for name, value in (("outcome horizon", outcome_horizon),
                             ("signal lookback", signal_lookback)):
             if (type(value) is not int or isinstance(value, bool)
@@ -39,7 +41,7 @@ class LiveCycle:
             evaluation=evaluation, drawdown=str(dd), cooldown=cooldown, trials=trials,
             notional=str(self.notional), fee_bps=str(self.fee_bps),
             slippage_bps=str(self.slippage_bps), evaluation_every=self.evaluation_every,
-            short_carry_bps_per_day=str(carry))
+            short_carry_bps_per_day=str(carry), feature_mode=feature_mode)
         self.cycle_config.update(max_observation_gap_seconds=max_gap,
                                  min_evaluation_trades=min_trades,
                                  outcome_horizon_seconds=outcome_horizon,
@@ -65,6 +67,9 @@ class LiveCycle:
             if ("short_carry_bps_per_day" not in migrated_config
                     and self.cycle_config["short_carry_bps_per_day"] == "2"):
                 migrated_config["short_carry_bps_per_day"] = "2"
+            if ("feature_mode" not in migrated_config
+                    and self.cycle_config["feature_mode"] == "MID_MOMENTUM"):
+                migrated_config["feature_mode"] = "MID_MOMENTUM"
             if migrated_config != self.cycle_config:
                 raise ValueError("persisted learning cycle configuration differs")
             if migrated_config != persisted_config:
@@ -151,6 +156,21 @@ class LiveCycle:
 
     def _cycle_action(self, parameter, feature, snapshot):
         return self._cycle_side(parameter, feature, snapshot) is not None
+
+    def _signal_feature(self, current, reference):
+        mid = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"]))
+        if self.cycle_config["feature_mode"] == "MID_MOMENTUM":
+            return mid - Decimal(reference[0])
+        bid_quantity = Decimal(current["bid_quantity"])
+        ask_quantity = Decimal(current["ask_quantity"])
+        if (not bid_quantity.is_finite() or not ask_quantity.is_finite()
+                or min(bid_quantity, ask_quantity) < 0
+                or bid_quantity + ask_quantity <= 0):
+            raise ValueError("top-book quantities are invalid")
+        imbalance = (bid_quantity - ask_quantity) / (bid_quantity + ask_quantity)
+        # A preregistered 1% price-equivalent scale lets the existing exact
+        # cost hurdle decide whether an imbalance is large enough to test.
+        return mid * imbalance / Decimal(100)
 
     def _signal_reference(self, con, current, key):
         lookback = self.cycle_config["signal_lookback_seconds"]
@@ -367,7 +387,7 @@ class LiveCycle:
             return
         reference = self._signal_reference(con, current, key)
         if reference:
-            feature = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"])) - Decimal(reference[0])
+            feature = self._signal_feature(current, reference)
             pending = dict(ask=current["ask_price"], bid=current["bid_price"],
                            observation_key=key,
                            available_at=current["available_at"],
@@ -379,3 +399,4 @@ class LiveCycle:
                 pending[name] = action is not None
                 pending[name+"_action"] = action
             evaluation["pending"] = pending
+

@@ -269,6 +269,24 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "rolling-native-alpha",
+      "script": "tools/run_whitebit_rolling_alpha_supervisor.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/rolling-native-alpha-v1-20261112",
+        "--bars", "4096",
+        "--steps", "32",
+        "--interval-seconds", "21600",
+        "--max-cycles-per-utc-day", "4",
+        "--stop-file", "${RUNTIME_ROOT}/rolling-native-alpha-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/rolling-native-alpha-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/rolling-native-alpha-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }
+

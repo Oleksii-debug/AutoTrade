@@ -29,7 +29,7 @@ from research.autotrade_research.strategies.pretrade_evidence import (
     PreTradeThesis, evaluate_pretrade,
 )
 from research.autotrade_research.strategies.technical_confluence import (
-    TechnicalCosts, technical_signal,
+    HOURLY_WINDOWS, TechnicalCosts, summarize_hour_windows, technical_signal,
 )
 from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurations
 
@@ -39,6 +39,7 @@ MARKET = "SOL_PERP"
 STEP_SECONDS = 900
 MAX_ENTRY_DELAY = timedelta(seconds=90)
 PROSPECTIVE_WAVE_CYCLES = 5
+MAX_HOURLY_SAMPLES = 7 * 24 + 1
 MAX_DECISION_JOURNAL_BYTES = 16 * 1024 * 1024
 
 
@@ -118,6 +119,64 @@ def _initial(last_bar_epoch: int, now: datetime) -> dict:
 
 def _hold(state: dict, reason: str) -> None:
     state["holds"][reason] = state["holds"].get(reason, 0) + 1
+
+
+def _exit_values(position: dict, quote: dict, now: datetime,
+                 costs: TechnicalCosts) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    quantity = Decimal(position["quantity"])
+    slippage = Decimal(costs.slippage_bps_per_fill) / Decimal(10000)
+    fill = (quote["bid"] * (1 - slippage) if quantity > 0
+            else quote["ask"] * (1 + slippage))
+    fee = abs(quantity) * fill * Decimal(costs.fee_bps_per_fill) / Decimal(10000)
+    elapsed = max(Decimal(0), Decimal(str((now - datetime.fromisoformat(
+        position["opened_at"])).total_seconds())))
+    funding = (abs(quantity) * fill * Decimal(costs.funding_bps_per_day)
+               / Decimal(10000) * elapsed / Decimal(86400))
+    return fill, fee, funding, elapsed
+
+
+def _record_clock_sample(state: dict, *, boundary: datetime, quote: dict,
+                         now: datetime, contiguous: bool) -> dict | None:
+    """Mark shadow equity at observed near-boundary quotes and skip data gaps."""
+    metrics = state.setdefault("clock_metrics", {"samples": [], "segment": 0})
+    if not contiguous:
+        metrics["segment"] += 1
+    boundary = boundary.astimezone(UTC)
+    if boundary.minute or boundary.second or boundary.microsecond:
+        return None
+    if not timedelta(0) <= now - boundary <= MAX_ENTRY_DELAY:
+        return None
+    balance = Decimal(state["balance"])
+    position = state["position"]
+    if position is not None:
+        fill, fee, funding, _ = _exit_values(position, quote, now, TechnicalCosts())
+        balance += Decimal(position["quantity"]) * (fill - Decimal(position["entry_price"]))
+        balance -= fee + funding
+    epoch = int(boundary.timestamp())
+    samples = metrics["samples"]
+    if samples and epoch <= samples[-1]["boundary_epoch"]:
+        return None
+    sample = {"boundary_epoch": epoch, "observed_at": now.isoformat(),
+              "equity": str(balance), "segment": metrics["segment"],
+              "quote_sha256": quote.get("source_sha256")}
+    samples.append(sample)
+    samples[:] = samples[-MAX_HOURLY_SAMPLES:]
+    by_epoch = {item["boundary_epoch"]: item for item in samples}
+    windows = {}
+    for hours in HOURLY_WINDOWS:
+        span = 3600 * hours
+        returns = []
+        for item in samples:
+            end = item["boundary_epoch"]
+            prior = by_epoch.get(end - span)
+            if (end % span or prior is None or prior["segment"] != item["segment"]
+                    or Decimal(prior["equity"]) <= 0):
+                continue
+            returns.append(Decimal(item["equity"]) / Decimal(prior["equity"]) - 1)
+        windows[str(hours)] = summarize_hour_windows(returns, hours)
+    metrics["windows"] = windows
+    metrics["quote_basis"] = "OBSERVED_BID_ASK_WITH_ESTIMATED_EXIT_COSTS"
+    return sample
 
 
 def _review_wave(state: dict) -> None:
@@ -203,15 +262,8 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
                 if (direction > 0 and close >= middle) or (direction < 0 and close <= middle):
                     reason = "BOLLINGER_MEAN_EXIT"
         if reason:
-            slippage = Decimal(costs.slippage_bps_per_fill) / Decimal(10000)
-            fill = (quote["bid"] * (Decimal(1) - slippage) if direction > 0
-                    else quote["ask"] * (Decimal(1) + slippage))
             quantity = Decimal(position["quantity"])
-            fee = abs(quantity) * fill * Decimal(costs.fee_bps_per_fill) / Decimal(10000)
-            elapsed = max(Decimal(0), Decimal(str((now - datetime.fromisoformat(
-                position["opened_at"])).total_seconds())))
-            funding = (abs(quantity) * fill * Decimal(costs.funding_bps_per_day)
-                       / Decimal(10000) * elapsed / Decimal(86400))
+            fill, fee, funding, elapsed = _exit_values(position, quote, now, costs)
             prior_balance = Decimal(state["balance"])
             balance = prior_balance + quantity * (fill - entry) - fee - funding
             starting_equity = position.get("starting_equity")
@@ -329,6 +381,9 @@ def main(argv=None) -> int:
                     l2=l2, now=now)
                 next_state["last_news_context"] = news
                 next_state["last_l2_context"] = l2
+                clock_sample = _record_clock_sample(
+                    next_state, boundary=history[-1]["closed_at"], quote=quote, now=now,
+                    contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS)
                 closed = next_state["closed_cycles"]
                 review = next_state.get("wave_analysis")
                 _append_decision(state_dir / "decisions.jsonl", {
@@ -344,6 +399,7 @@ def main(argv=None) -> int:
                     "wave_analysis": (review if closed > prior_cycles and review
                                       and review.get("closed_through_cycle") == closed else None),
                     "net_pnl": next_state["net_pnl"],
+                    "clock_sample": clock_sample,
                     "network_orders": False, "trading_authority": False,
                 })
                 state = next_state

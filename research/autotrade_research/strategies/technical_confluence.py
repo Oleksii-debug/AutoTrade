@@ -46,7 +46,7 @@ def summarize_daily_returns(returns: list[Decimal]) -> dict:
     }
 
 
-def _summarize_hour_windows(returns: list[Decimal], hours: int) -> dict:
+def summarize_hour_windows(returns: list[Decimal], hours: int) -> dict:
     target = hours * HOURLY_TARGET
     return {
         "complete_windows": len(returns),
@@ -456,8 +456,8 @@ def simulate(bars: list[dict], *, candidate: str,
             result["daily_returns"] = summarize_daily_returns(window_returns[24])
         if report_hourly_returns:
             result["clock_window_returns"] = {
-                str(hours): _summarize_hour_windows(window_returns[hours], hours)
+                str(hours): summarize_hour_windows(window_returns[hours], hours)
                 for hours in HOURLY_WINDOWS
             }
-            result["one_hour_with_exposure"] = _summarize_hour_windows(exposed_hour_returns, 1)
+            result["one_hour_with_exposure"] = summarize_hour_windows(exposed_hour_returns, 1)
         return result

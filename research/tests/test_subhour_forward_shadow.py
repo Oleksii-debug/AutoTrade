@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,8 @@ import pytest
 from research.autotrade_research.integrations.whitebit_public import PublicDataError
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
-    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial, process_completed_bar,
+    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial, _record_clock_sample,
+    process_completed_bar,
 )
 from tools.run_whitebit_subhour_supervisor import _perfect_timing_benchmark, compare_horizons
 
@@ -161,6 +163,40 @@ def test_clock_returns_measure_elapsed_windows_without_extrapolation():
     assert cash["clock_window_returns"]["4"]["complete_windows"] == 1
     assert cash["clock_window_returns"]["8"]["complete_windows"] == 0
     assert cash["one_hour_with_exposure"]["complete_windows"] == 0
+
+
+def test_shadow_clock_resumes_and_does_not_measure_through_a_data_gap():
+    start = datetime(2026, 11, 12, 0, 0, tzinfo=UTC)
+    state = _initial(int(start.timestamp()), start)
+    quote = {"bid": Decimal("99.9"), "ask": Decimal("100.1"), "source_sha256": "book"}
+    assert _record_clock_sample(state, boundary=start, quote=quote,
+                               now=start, contiguous=True)["equity"] == "1000"
+    state = json.loads(json.dumps(state))
+    state["balance"] = "1005.10"
+    hour = start + timedelta(hours=1)
+    _record_clock_sample(state, boundary=hour, quote=quote, now=hour, contiguous=True)
+    assert state["clock_metrics"]["windows"]["1"]["target_hits"] == 1
+    assert _record_clock_sample(state, boundary=hour, quote=quote,
+                               now=hour, contiguous=True) is None
+    gap = hour + timedelta(minutes=30)
+    assert _record_clock_sample(state, boundary=gap, quote=quote,
+                               now=gap, contiguous=False) is None
+    later = start + timedelta(hours=4)
+    _record_clock_sample(state, boundary=later, quote=quote, now=later, contiguous=True)
+    assert state["clock_metrics"]["windows"]["4"]["complete_windows"] == 0
+
+
+def test_shadow_clock_marks_an_open_short_after_exit_costs():
+    start = datetime(2026, 11, 12, 0, 0, tzinfo=UTC)
+    state = _initial(int(start.timestamp()), start)
+    state["position"] = {"quantity": "-1", "entry_price": "100",
+                         "opened_at": start.isoformat()}
+    hour = start + timedelta(hours=1)
+    sample = _record_clock_sample(state, boundary=hour,
+        quote={"bid": Decimal("98"), "ask": Decimal("99")},
+        now=hour, contiguous=True)
+    assert Decimal("1000") < Decimal(sample["equity"]) < Decimal("1001")
+    assert state["balance"] == "1000"
 
 
 def test_decision_journal_is_append_only_and_secret_free(tmp_path):

@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from tools.run_whitebit_ohlcv_forward_shadow import apply_decision, initial_state
+import json
+
+from tools.run_whitebit_ohlcv_forward_shadow import apply_decision, initial_state, main
 
 
 NOW = datetime(2026, 11, 12, 3, tzinfo=UTC)
@@ -41,4 +43,17 @@ def test_below_threshold_remains_cash():
     assert result["last_action"] == "HOLD"
     assert result["cash_quote"] == "1000"
     assert result["network_orders"] is False
+
+
+def test_missing_model_can_wait_without_restart_loop(tmp_path, capsys):
+    result = main(["--model-artifact", str(tmp_path/"missing-model.json"),
+        "--model-sha256", "c"*64, "--threshold", "0.005",
+        "--horizon", "24", "--state-dir", str(tmp_path/"state"),
+        "--poll-seconds", "10", "--wait-for-artifacts", "--once"])
+    assert result == 0
+    state = json.loads((tmp_path/"state"/"checkpoint.json").read_text(encoding="utf-8"))
+    assert state["status"] == "WAITING_FOR_QUALIFIED_ARTIFACTS"
+    assert state["network_orders"] is False
+    assert json.loads(capsys.readouterr().out)["status"] == "WAITING_FOR_QUALIFIED_ARTIFACTS"
+
 

@@ -5,7 +5,7 @@ from research.autotrade_research.integrations.whitebit_public import (
     PublicBook, PublicInstrument, PublicTrade, PublicTradeBatch,
 )
 from research.autotrade_research.strategies.maker_shadow import (
-    advance_evidence_wave, evaluate_quote, open_quote,
+    advance_evidence_wave, evaluate_quote, open_quote, quote_admission,
 )
 
 
@@ -89,7 +89,7 @@ def test_negative_discovery_wave_stops_new_research_actions():
             state, net_pnl_quote="-0.1", outcome="BID_ONLY_FORCED_EXIT",
             target_cycles=4,
         )
-    assert state["research_phase"] == "RESEARCH_ONLY"
+    assert state["research_phase"] == "RESEARCH_FILTERED"
     assert state["latest_wave_analysis"]["passed_after_cost_gate"] is False
     assert state["latest_wave_analysis"]["automatic_promotion"] is False
 
@@ -109,5 +109,31 @@ def test_positive_discovery_requires_separate_positive_evaluation_wave():
         )
     assert state["research_phase"] == "QUALIFIED_SHADOW"
     assert state["latest_wave_analysis"]["automatic_promotion"] is False
+
+
+def test_filtered_wave_rejects_directional_flow_and_insufficient_spread():
+    directional = quote_admission(
+        book(), instrument(), batch(
+            trade(2, side="buy", price="0.00000402", quantity="5000000"),
+        ),
+    )
+    assert directional["admitted"] is False
+    assert directional["reason"] == "DIRECTIONAL_FLOW"
+    neutral_but_too_narrow = quote_admission(
+        book(bid="0.00000400", ask="0.000004005"), instrument(), batch(),
+    )
+    assert neutral_but_too_narrow["admitted"] is False
+    assert neutral_but_too_narrow["reason"] == "SPREAD_BELOW_HURDLE"
+
+
+def test_failed_filtered_wave_exhausts_the_single_adaptive_trial():
+    state = {"research_phase": "RESEARCH_FILTERED"}
+    for _ in range(4):
+        state = advance_evidence_wave(
+            state, net_pnl_quote="-0.1", outcome="ASK_ONLY_FORCED_EXIT",
+            target_cycles=4,
+        )
+    assert state["research_phase"] == "RESEARCH_ONLY"
+
 
 

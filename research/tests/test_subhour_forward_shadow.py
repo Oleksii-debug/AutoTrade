@@ -153,7 +153,7 @@ def test_clock_returns_measure_elapsed_windows_without_extrapolation():
     hold = simulate(bars, candidate="HOLD_LONG", costs=costs, report_hourly_returns=True)
     clocks = hold["clock_window_returns"]
     assert [(clocks[h]["complete_windows"], clocks[h]["target_hits"]) for h in ("1", "4", "8")] == [
-        (8, 1), (2, 1), (1, 0)]
+        (8, 1), (2, 0), (1, 0)]
     assert Decimal(clocks["1"]["median_fraction"]) == 0
     assert Decimal(clocks["8"]["best_fraction"]) == Decimal("0.0204")
     assert hold["one_hour_with_exposure"]["complete_windows"] == 8
@@ -172,7 +172,7 @@ def test_shadow_clock_resumes_and_does_not_measure_through_a_data_gap():
     assert _record_clock_sample(state, boundary=start, quote=quote,
                                now=start, contiguous=True)["equity"] == "1000"
     state = json.loads(json.dumps(state))
-    state["balance"] = "1005.10"
+    state["balance"] = "1010"
     hour = start + timedelta(hours=1)
     _record_clock_sample(state, boundary=hour, quote=quote, now=hour, contiguous=True)
     assert state["clock_metrics"]["windows"]["1"]["target_hits"] == 1

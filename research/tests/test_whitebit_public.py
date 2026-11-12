@@ -17,6 +17,7 @@ from autotrade_research.integrations.whitebit_public import (
     BASE, KLINE_BASE, MAX_BYTES, MAX_CANDLES, WS, PublicDataError,
     WhiteBitPublicClient, _NoRedirect, _kline_query, _public_url, decode_public_json,
     parse_funding_history, parse_klines, parse_market_activity, parse_orderbook,
+    parse_recent_trades,
     parse_public_futures, parse_public_instruments, parse_spot_markets,
     plan_kline_windows,
 )
@@ -143,6 +144,42 @@ class BookTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicDataError, "TIME_MISMATCH"):
             b.to_raw_market_update({"sha256": b.digest, "source_uri": b.source_uri,
                                     "observed_at": "2020-01-01T00:00:00Z"}, now=NOW)
+
+
+class RecentTradeTests(unittest.TestCase):
+    def rows(self):
+        return [
+            {"tradeID": 12, "price": "100.1", "quote_volume": "0.2",
+             "base_volume": "20.02", "trade_timestamp": int(NOW.timestamp()) - 1,
+             "type": "buy", "rpi": False},
+            {"tradeID": 11, "price": "100", "quote_volume": "0.1",
+             "base_volume": "10", "trade_timestamp": int(NOW.timestamp()) - 2,
+             "type": "sell", "rpi": True},
+        ]
+
+    def test_exact_trade_tape_contract_and_volume_meaning(self):
+        batch = parse_recent_trades(raw(self.rows()), "BTC_USDT", NOW)
+        self.assertEqual(batch.source_uri, BASE + "trades/BTC_USDT")
+        self.assertEqual([item.trade_id for item in batch.trades], [12, 11])
+        self.assertEqual(batch.trades[0].base_quantity, "0.2")
+        self.assertEqual(batch.trades[0].quote_quantity, "20.02")
+        self.assertTrue(batch.digest.startswith("sha256:"))
+
+    def test_duplicate_unsorted_future_and_unknown_fields_fail_closed(self):
+        cases = [
+            self.rows() + [dict(self.rows()[1])],
+            [self.rows()[1], self.rows()[0]],
+            [dict(self.rows()[0], trade_timestamp=int(NOW.timestamp()) + 1)],
+            [dict(self.rows()[0], unexpected="field")],
+        ]
+        for rows in cases:
+            with self.subTest(rows=rows), self.assertRaises(PublicDataError):
+                parse_recent_trades(raw(rows), "BTC_USDT", NOW)
+
+    def test_public_trades_route_has_no_query_or_credential_surface(self):
+        self.assertEqual(_public_url("trades/BTC_USDT"), BASE + "trades/BTC_USDT")
+        with self.assertRaisesRegex(PublicDataError, "QUERY"):
+            _public_url("trades/BTC_USDT", (("limit", "100"),))
 
 
 class MarketTests(unittest.TestCase):
@@ -427,4 +464,5 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

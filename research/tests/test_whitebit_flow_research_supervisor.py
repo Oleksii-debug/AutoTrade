@@ -82,6 +82,35 @@ def test_cycle_persists_digest_bound_bounded_authority_free_evidence(tmp_path):
     assert len(list((state / "runs").glob("*.json"))) == 1
 
 
+def test_cycle_uses_declared_futures_cost_for_both_horizons(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    with patch(
+        "tools.run_whitebit_flow_research_supervisor.screen_flow_volatility",
+        side_effect=lambda _p, market, **_kw: _flow(market),
+    ) as fast_screen, patch(
+        "tools.run_whitebit_flow_research_supervisor.screen_medium_horizon_flow",
+        side_effect=lambda _p, market, **_kw: _flow(market),
+    ) as medium_screen, patch(
+        "tools.run_whitebit_flow_research_supervisor.run_lead_lag",
+        return_value=_lead(),
+    ):
+        report = execute_cycle(
+            trade_tape=tmp_path / "futures.sqlite3", state_dir=state,
+            markets=["BTC_PERP", "ETH_PERP"], minimum_buckets=300,
+            round_trip_cost_bps="15", maximum_runs=2,
+            medium_minimum_buckets=900,
+            medium_round_trip_cost_bps="15",
+            now=datetime(2026, 11, 12, tzinfo=UTC),
+        )
+    assert report["round_trip_cost_bps"] == "15"
+    assert report["medium_horizon"]["round_trip_cost_bps"] == "15"
+    assert all(call.kwargs["round_trip_cost_bps"] == "15"
+               for call in fast_screen.call_args_list)
+    assert all(call.kwargs["round_trip_cost_bps"] == "15"
+               for call in medium_screen.call_args_list)
+
+
 def test_once_writes_restart_checkpoint_without_promoting(tmp_path):
     state = tmp_path / "state"
     stop = state / "managed.stop.json"

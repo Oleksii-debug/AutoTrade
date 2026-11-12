@@ -184,8 +184,10 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-public-eth", "learning-btc-imbalance",
         "learning-btc-imbalance-fast", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "whitebit-public-trade-tape",
+        "whitebit-public-futures-trade-tape",
         "whitebit-trade-flow-screen", "whitebit-trade-flow-fast-screen",
         "whitebit-flow-research-screen",
+        "whitebit-futures-flow-research-screen",
         "goal-attention",
         "whitebit-pepe-maker-shadow",
         "whitebit-ena-maker-shadow",
@@ -223,6 +225,26 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
             "WBT_USDT", "XRP_USDT", "NEAR_USDT", "ZEC_USDT", "UNI_USDT",
             "SUI_USDT", "DOGE_USDT", "TRX_USDT", "TAO_USDT", "HYPE_USDT",
         ]
+    futures_markets = [
+        "BTC_PERP", "ETH_PERP", "SOL_PERP", "WBT_PERP", "ZEC_PERP",
+        "XRP_PERP", "HYPE_PERP", "MU_PERP", "NEAR_PERP", "DOGE_PERP",
+        "LTC_PERP", "LINK_PERP", "ADA_PERP", "XAUT_PERP", "QNT_PERP",
+    ]
+    for process_id in (
+        "whitebit-public-futures-trade-tape",
+        "whitebit-futures-flow-research-screen",
+    ):
+        args = processes[process_id]["args"]
+        markets = [
+            args[index + 1] for index, value in enumerate(args[:-1])
+            if value == "--market"
+        ]
+        assert markets == futures_markets
+    futures_screen_args = processes["whitebit-futures-flow-research-screen"]["args"]
+    assert futures_screen_args[futures_screen_args.index("--round-trip-cost-bps") + 1] == "15"
+    assert futures_screen_args[
+        futures_screen_args.index("--medium-round-trip-cost-bps") + 1
+    ] == "15"
     groq = next(row for row in manifest["processes"] if row["id"] == "groq-advisory")
     checkpoint_index = groq["args"].index("--checkpoint") + 1
     assert groq["args"][checkpoint_index].endswith(

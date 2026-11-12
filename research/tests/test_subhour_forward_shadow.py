@@ -8,8 +8,8 @@ import pytest
 from research.autotrade_research.integrations.whitebit_public import PublicDataError
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
-    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial, _record_clock_sample,
-    process_completed_bar,
+    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial, _record_clock_sample, main,
+    process_completed_bar, protect_open_position,
 )
 from tools.run_whitebit_subhour_supervisor import _perfect_timing_benchmark, compare_horizons
 
@@ -197,6 +197,63 @@ def test_shadow_clock_marks_an_open_short_after_exit_costs():
         now=hour, contiguous=True)
     assert Decimal("1000") < Decimal(sample["equity"]) < Decimal("1001")
     assert state["balance"] == "1000"
+
+
+@pytest.mark.parametrize(("direction", "bid", "ask"), [(1, "97", "97.1"), (-1, "102.9", "103")])
+def test_shadow_protects_from_executable_quote_before_the_minimum_hold(direction, bid, ask):
+    start = datetime(2026, 11, 12, 0, 0, tzinfo=UTC)
+    state = _initial(int(start.timestamp()), start)
+    state["position"] = {"direction": direction, "quantity": str(direction),
+        "entry_price": "100", "entry_atr": "1", "starting_equity": "1000",
+        "opened_at": start.isoformat()}
+    now = start + timedelta(minutes=5)
+    quote = {"bid": Decimal(bid), "ask": Decimal(ask), "source_sha256": "observed",
+             "received_at": now.isoformat()}
+    assert protect_open_position(state, quote, now) == "OBSERVED_ATR_PROTECTIVE_STOP"
+    assert state["position"] is None
+    assert state["last_episode"]["holding_seconds"] == 300
+    assert state["last_episode"]["exit_quote_sha256"] == "observed"
+    assert Decimal(state["net_pnl"]) < Decimal("-3")
+
+
+def test_shadow_hold_deadline_requires_a_fresh_quote():
+    start = datetime(2026, 11, 12, 0, 0, tzinfo=UTC)
+    state = _initial(int(start.timestamp()), start)
+    state["position"] = {"direction": 1, "quantity": "1", "entry_price": "100",
+                         "entry_atr": "1", "opened_at": start.isoformat()}
+    due = start + timedelta(hours=1)
+    quote = {"bid": Decimal("99.9"), "ask": Decimal("100.1"),
+             "received_at": start.isoformat()}
+    with pytest.raises(PublicDataError, match="STALE_PROTECTIVE_QUOTE"):
+        protect_open_position(state, quote, due)
+    assert state["position"] is not None
+    quote["received_at"] = due.isoformat()
+    assert protect_open_position(state, quote, due) == "ELAPSED_HOLD_LIMIT_EXIT"
+    assert state["last_episode"]["holding_seconds"] == 3600
+
+
+def test_main_persists_protective_exit_without_candles_or_news(tmp_path, monkeypatch):
+    started = datetime.now(UTC) - timedelta(minutes=5)
+    state = _initial(int(started.timestamp()), started)
+    state["position"] = {"direction": 1, "quantity": "1", "entry_price": "100",
+                         "entry_atr": "1", "opened_at": started.isoformat()}
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(json.dumps({"state": state}), encoding="utf-8")
+    module = "tools.run_whitebit_subhour_forward_shadow"
+    monkeypatch.setattr(f"{module}._quote", lambda _: {
+        "bid": Decimal("97"), "ask": Decimal("97.1"), "source_sha256": "book",
+        "received_at": datetime.now(UTC).isoformat(),
+    })
+    monkeypatch.setattr(f"{module}._bars", lambda *args: pytest.fail("protective exit must run first"))
+    monkeypatch.setattr(f"{module}.collect_market_context",
+                        lambda *args: pytest.fail("protective exit does not need news"))
+    assert main(["--state-dir", str(tmp_path), "--depth-database", str(tmp_path / "depth"),
+                 "--stop-file", str(tmp_path / "stop"), "--once"]) == 0
+    saved = json.loads(checkpoint.read_bytes())
+    record = json.loads((tmp_path / "decisions.jsonl").read_bytes())
+    assert saved["state"]["position"] is None
+    assert record["episode"] == saved["state"]["last_episode"]
+    assert record["event"] == "PROTECTIVE_EXIT"
 
 
 def test_decision_journal_is_append_only_and_secret_free(tmp_path):

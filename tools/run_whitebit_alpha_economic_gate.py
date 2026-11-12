@@ -142,7 +142,7 @@ def _simulate(
     source, costs, rows: list[dict[str, object]], minimum_trades: int,
     maximum_drawdown: Decimal,
 ) -> tuple[dict, list[dict]]:
-    """Replay one frozen forecast sequentially with non-overlapping long trades."""
+    """Replay one frozen forecast with non-overlapping long/short trades."""
     if predictions.shape != split["y"].shape or not np.isfinite(predictions).all():
         raise AlphaInputError("economic replay predictions are invalid")
     entry_fee = _decimal(costs.entry_fee_ratio, "entry fee")
@@ -161,6 +161,7 @@ def _simulate(
     gross_pnl = fees = spread_cost = slippage_cost = funding_cost = Decimal(0)
     model_cost_total = turnover = Decimal(0)
     trades = wins = signals = skipped_overlap = unavailable_execution = 0
+    long_trades = short_trades = 0
     trace: list[dict] = []
     available_to_bar = {int(value): index for index, value in enumerate(source.available_at_ms)}
     horizon = int(split["horizon"])
@@ -171,16 +172,20 @@ def _simulate(
         decision_bar = available_to_bar[decision_ms]
         prediction = Decimal(format(float(predictions[sample_index]), ".17g"))
         lower = prediction - radius
+        upper = prediction + radius
         charged_model_cost = min(cash, model_cost)
         cash -= charged_model_cost
         model_cost_total += charged_model_cost
         peak = max(peak, cash)
         maximum_observed_drawdown = max(maximum_observed_drawdown, _drawdown(peak, cash))
-        signal = lower > threshold
+        direction = ("LONG" if lower > threshold else
+                     "SHORT" if upper < -threshold else None)
+        signal = direction is not None
         row = {
             "sample_index": sample_index, "decision_bar": decision_bar,
             "decision_ms": decision_ms, "prediction_return_ratio": _text(prediction),
-            "lower_return_ratio": _text(lower), "required_return_ratio": _text(threshold),
+            "lower_return_ratio": _text(lower), "upper_return_ratio": _text(upper),
+            "required_return_ratio": _text(threshold), "direction": direction,
             "signal": signal, "outcome": "NO_SIGNAL",
         }
         if cash <= 0:
@@ -207,28 +212,54 @@ def _simulate(
                 before = cash
                 entry_reference = rows[entry_index]["open"]
                 exit_reference = rows[exit_index]["open"]
-                entry_execution = entry_reference * (Decimal(1) + half_spread + entry_slippage)
-                exit_execution = exit_reference * (Decimal(1) - half_spread - exit_slippage)
-                quantity = cash / (entry_execution * (Decimal(1) + entry_fee))
+                if direction == "LONG":
+                    entry_execution = entry_reference * (
+                        Decimal(1) + half_spread + entry_slippage)
+                    exit_execution = exit_reference * (
+                        Decimal(1) - half_spread - exit_slippage)
+                    quantity = cash / (entry_execution * (Decimal(1) + entry_fee))
+                else:
+                    entry_execution = entry_reference * (
+                        Decimal(1) - half_spread - entry_slippage)
+                    exit_execution = exit_reference * (
+                        Decimal(1) + half_spread + exit_slippage)
+                    quantity = cash / (entry_reference * (Decimal(1) + entry_fee))
                 entry_notional = quantity * entry_execution
                 exit_notional = quantity * exit_execution
                 entry_fee_cost = entry_notional * entry_fee
                 exit_fee_cost = exit_notional * exit_fee
                 holding_cost = quantity * entry_reference * funding
-                after = exit_notional - exit_fee_cost - holding_cost
-                trade_gross = quantity * (exit_reference - entry_reference)
+                if direction == "LONG":
+                    after = exit_notional - exit_fee_cost - holding_cost
+                    trade_gross = quantity * (exit_reference - entry_reference)
+                else:
+                    after = (before + entry_notional - exit_notional
+                             - entry_fee_cost - exit_fee_cost - holding_cost)
+                    trade_gross = quantity * (entry_reference - exit_reference)
                 trade_fees = entry_fee_cost + exit_fee_cost
                 trade_spread = quantity * (entry_reference + exit_reference) * half_spread
                 trade_slippage = quantity * (entry_reference * entry_slippage +
                                                exit_reference * exit_slippage)
                 for held_index in range(entry_index, exit_index):
-                    favorable = (quantity * rows[held_index]["high"] *
-                                  (Decimal(1) - half_spread - exit_slippage) *
-                                  (Decimal(1) - exit_fee) - holding_cost)
+                    if direction == "LONG":
+                        favorable = (quantity * rows[held_index]["high"] *
+                                      (Decimal(1) - half_spread - exit_slippage) *
+                                      (Decimal(1) - exit_fee) - holding_cost)
+                        liquidation = (quantity * rows[held_index]["low"] *
+                                       (Decimal(1) - half_spread - exit_slippage) *
+                                       (Decimal(1) - exit_fee) - holding_cost)
+                    else:
+                        favorable_exit = rows[held_index]["low"] * (
+                            Decimal(1) + half_spread + exit_slippage)
+                        adverse_exit = rows[held_index]["high"] * (
+                            Decimal(1) + half_spread + exit_slippage)
+                        favorable = (before + entry_notional
+                                     - quantity * favorable_exit - entry_fee_cost
+                                     - quantity * favorable_exit * exit_fee - holding_cost)
+                        liquidation = (before + entry_notional
+                                       - quantity * adverse_exit - entry_fee_cost
+                                       - quantity * adverse_exit * exit_fee - holding_cost)
                     peak = max(peak, favorable)
-                    liquidation = (quantity * rows[held_index]["low"] *
-                                   (Decimal(1) - half_spread - exit_slippage) *
-                                   (Decimal(1) - exit_fee) - holding_cost)
                     maximum_observed_drawdown = max(
                         maximum_observed_drawdown, _drawdown(peak, liquidation))
                 cash = after
@@ -242,6 +273,8 @@ def _simulate(
                 funding_cost += holding_cost
                 turnover += entry_notional + exit_notional
                 trades += 1
+                long_trades += direction == "LONG"
+                short_trades += direction == "SHORT"
                 if after > before:
                     wins += 1
                 last_exit_index = exit_index
@@ -262,15 +295,16 @@ def _simulate(
     if maximum_observed_drawdown > maximum_drawdown:
         reasons.append("MAXIMUM_DRAWDOWN_EXCEEDED")
     report = {
-        "model": name, "policy": "LOWER_CALIBRATED_BOUND_EXCEEDS_ALL_IN_COST",
-        "execution_policy": "FIRST_ARCHIVE_OPEN_STRICTLY_AFTER_DECISION;NON_OVERLAPPING_LONG_ONLY",
-        "drawdown_policy": "CONSERVATIVE_WITHIN_CANDLE_HIGH_BEFORE_LOW",
+        "model": name, "policy": "CALIBRATED_INTERVAL_CLEARS_SYMMETRIC_ALL_IN_COST",
+        "execution_policy": "FIRST_ARCHIVE_OPEN_STRICTLY_AFTER_DECISION;NON_OVERLAPPING_LONG_SHORT",
+        "drawdown_policy": "DIRECTIONAL_CONSERVATIVE_WITHIN_CANDLE_ADVERSE_EXTREME",
         "starting_equity_quote": _text(starting), "final_equity_quote": _text(cash),
         "net_pnl_after_costs_quote": _text(net_pnl),
         "net_return_ratio": _text(net_pnl / starting),
         "maximum_drawdown_ratio": _text(maximum_observed_drawdown),
         "decision_count": len(split["holdout"]), "signal_count": signals,
         "executed_trade_count": trades, "winning_trade_count": wins,
+        "long_trade_count": long_trades, "short_trade_count": short_trades,
         "skipped_overlapping_signal_count": skipped_overlap,
         "unavailable_strict_execution_count": unavailable_execution,
         "gross_reference_pnl_quote": _text(gross_pnl),
@@ -592,3 +626,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

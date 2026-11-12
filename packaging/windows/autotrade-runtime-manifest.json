@@ -250,6 +250,7 @@
         "--market", "BTC_USDT",
         "--market", "ETH_USDT",
         "--market", "SOL_USDT",
+        "--market", "PEPE_USDT",
         "--poll-seconds", "1",
         "--bucket-seconds", "5",
         "--retention-days", "14",
@@ -270,6 +271,7 @@
         "--market", "BTC_USDT",
         "--market", "ETH_USDT",
         "--market", "SOL_USDT",
+        "--market", "PEPE_USDT",
         "--minimum-buckets", "2160",
         "--interval-seconds", "900",
         "--stop-file", "${RUNTIME_ROOT}/whitebit-trade-flow-screen-v1-20261112/managed.stop.json"
@@ -390,6 +392,7 @@
     }
   ]
 }
+
 
 
 

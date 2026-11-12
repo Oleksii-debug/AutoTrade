@@ -133,6 +133,17 @@ def main(argv=None) -> int:
                 checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
                 if checkpoint.get("schema") != SCHEMA:
                     raise ValueError("maker-universe supervisor schema differs")
+            if checkpoint:
+                checkpoint.update(
+                    status="RUNNING",
+                    updated_at=datetime.now(UTC).isoformat(),
+                    paid_model_calls=0,
+                    network_orders=False,
+                    trading_authority=False,
+                    automatic_promotion=False,
+                    profit_guaranteed=False,
+                )
+                atomic_write_json(checkpoint_path, checkpoint)
             while not stopped.is_set() and not stop_file.exists():
                 now = datetime.now(UTC)
                 due_text = checkpoint.get("next_run_at")

@@ -186,6 +186,33 @@ def _entry(features: dict, config: TechnicalConfiguration) -> int:
     return 0
 
 
+def technical_signal(history: list[dict],
+                     configuration: TechnicalConfiguration) -> dict:
+    """Return a causal, completed-candle technical decision with evidence.
+
+    This is the single live/shadow entry surface for the frozen strategy.  It
+    deliberately exposes no price forecast and never treats a news headline or
+    model response as an entry signal.  Callers must still apply the pre-trade,
+    news and microstructure gates before acting on a non-zero direction.
+    """
+    validate_bars(history, require_ohlcv=True)
+    configuration.validate()
+    features = _features(history, configuration)
+    if features is None:
+        return {"direction": 0, "reason": "INSUFFICIENT_TECHNICAL_HISTORY",
+                "features": None}
+    direction = _entry(features, configuration)
+    return {
+        "direction": direction,
+        "reason": ("TECHNICAL_SETUP_LONG" if direction > 0 else
+                   "TECHNICAL_SETUP_SHORT" if direction < 0 else
+                   "NO_TECHNICAL_SETUP"),
+        "features": {key: format(value, "f") for key, value in features.items()},
+        "configuration_sha256": digest(asdict(configuration)),
+        "last_completed_bar": history[-1]["closed_at"].isoformat(),
+    }
+
+
 def simulate(bars: list[dict], *, candidate: str,
              costs: TechnicalCosts = TechnicalCosts(),
              configuration: TechnicalConfiguration = TechnicalConfiguration()) -> dict:
@@ -350,4 +377,3 @@ def simulate(bars: list[dict], *, candidate: str,
             "exit_reasons": exit_reasons, "evidence_sha256": evidence.hexdigest(),
             "network_orders": False, "trading_authority": False,
         }
-

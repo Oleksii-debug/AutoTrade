@@ -276,6 +276,41 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 "network_orders": False, "trading_authority": False,
                 "automatic_promotion": False,
             }), encoding="utf-8")
+            opportunity = root / "opportunity.json"
+            opportunity.write_text(json.dumps({
+                "schema": "autotrade-whitebit-opportunity-supervisor-v1",
+                "status": "RUNNING", "updated_at": NOW.isoformat(),
+                "cycle_count": 2,
+                "next_run_at": (NOW + timedelta(days=1)).isoformat(),
+                "last_result": {
+                    "selected_market_count": 2,
+                    "qualified_market_count": 0,
+                    "paid_model_calls": 0,
+                    "markets": {
+                        "XRP_USDT": {
+                            "status": "SCREENED", "rank": 1,
+                            "quote_volume_24h": "2000000",
+                            "screen": {
+                                "prospective_qualification": False,
+                                "train_survivor_count": 0,
+                                "development_survivor_count": 0,
+                                "final_consumed": False,
+                                "final_rejection_reasons": ["NO_TRAIN_SURVIVOR"],
+                                "network_orders": False,
+                                "trading_authority": False,
+                            },
+                        },
+                        "HYPE_USDT": {
+                            "status": "REJECTED_DATA", "rank": 2,
+                            "quote_volume_24h": "1000000",
+                        },
+                    },
+                    "network_orders": False,
+                    "trading_authority": False,
+                },
+                "network_orders": False, "trading_authority": False,
+                "automatic_promotion": False,
+            }), encoding="utf-8")
             enriched = run_cycle(
                 organism_root=organism,
                 market_snapshot=market,
@@ -283,6 +318,7 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 learning_fleet_checkpoint=fleet,
                 forward_shadow_checkpoint=shadow,
                 rolling_alpha_checkpoint=rolling,
+                opportunity_checkpoint=opportunity,
             )
             evidence = enriched["organism_evidence"]
             self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
@@ -298,6 +334,12 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                 alpha["markets"][0]["models"][0]["net_pnl_after_costs_quote"], "-6.8"
             )
             self.assertFalse(alpha["automatic_promotion"])
+            opportunity_summary = evidence["opportunity_screen"]
+            self.assertEqual(opportunity_summary["selected_market_count"], 2)
+            self.assertEqual(opportunity_summary["qualified_market_count"], 0)
+            self.assertEqual(opportunity_summary["rejected_data_count"], 1)
+            self.assertFalse(opportunity_summary["markets"][1]["prospective_qualification"])
+            self.assertFalse(opportunity_summary["automatic_promotion"])
 
     def test_attention_runner_rebases_reference_after_wake(self):
         with tempfile.TemporaryDirectory() as directory:

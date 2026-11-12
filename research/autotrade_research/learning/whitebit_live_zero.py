@@ -145,6 +145,7 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         min_evaluation_trades: int = 3,
         outcome_horizon_seconds: int = 0,
         signal_lookback_seconds: int = 0,
+        short_carry_bps_per_day: str = "2",
     ) -> None:
         if type(state_dir) is not type(Path()):
             raise TypeError("state_dir must be an exact Path")
@@ -167,7 +168,8 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         self._configure_cycle(cycle_episodes, cycle_seconds, evaluation_episodes,
                               max_drawdown_usdt, cooldown_seconds, max_trials,
                               max_observation_gap_seconds, min_evaluation_trades,
-                              outcome_horizon_seconds, signal_lookback_seconds)
+                              outcome_horizon_seconds, signal_lookback_seconds,
+                              short_carry_bps_per_day)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.database = self.state_dir / "episode-memory.sqlite3"
         self._initialize()

@@ -18,7 +18,8 @@ def digest(value):
 
 class LiveCycle:
     def _configure_cycle(self, episodes, seconds, evaluation, drawdown, cooldown, trials,
-                         max_gap, min_trades, outcome_horizon, signal_lookback):
+                         max_gap, min_trades, outcome_horizon, signal_lookback,
+                         short_carry_bps_per_day):
         for name, value in (("outcome horizon", outcome_horizon),
                             ("signal lookback", signal_lookback)):
             if (type(value) is not int or isinstance(value, bool)
@@ -30,10 +31,15 @@ class LiveCycle:
         dd = Decimal(drawdown)
         if not dd.is_finite() or dd <= 0:
             raise ValueError("cycle drawdown must be finite and positive")
+        carry = Decimal(short_carry_bps_per_day)
+        if not carry.is_finite() or not Decimal(0) <= carry <= Decimal(1000):
+            raise ValueError("short carry must be finite and within 0..1000 bps/day")
+        self.short_carry_bps_per_day = carry
         self.cycle_config = dict(episodes=episodes, seconds=seconds,
             evaluation=evaluation, drawdown=str(dd), cooldown=cooldown, trials=trials,
             notional=str(self.notional), fee_bps=str(self.fee_bps),
-            slippage_bps=str(self.slippage_bps), evaluation_every=self.evaluation_every)
+            slippage_bps=str(self.slippage_bps), evaluation_every=self.evaluation_every,
+            short_carry_bps_per_day=str(carry))
         self.cycle_config.update(max_observation_gap_seconds=max_gap,
                                  min_evaluation_trades=min_trades,
                                  outcome_horizon_seconds=outcome_horizon,
@@ -56,6 +62,9 @@ class LiveCycle:
             for key in ("outcome_horizon_seconds", "signal_lookback_seconds"):
                 if key not in migrated_config and self.cycle_config[key] == 0:
                     migrated_config[key] = 0
+            if ("short_carry_bps_per_day" not in migrated_config
+                    and self.cycle_config["short_carry_bps_per_day"] == "2"):
+                migrated_config["short_carry_bps_per_day"] = "2"
             if migrated_config != self.cycle_config:
                 raise ValueError("persisted learning cycle configuration differs")
             if migrated_config != persisted_config:
@@ -100,7 +109,7 @@ class LiveCycle:
             fees = (self.notional + quantity * exit_price) * self.fee_bps / 10000
             return quantity, gross, fees, gross - fees
 
-    def _short_outcome(self, bid, ask):
+    def _short_outcome(self, bid, ask, *, duration_seconds=None):
         # Symmetric virtual short proxy. It carries no real borrow/margin
         # authority; both execution legs and both fees remain explicit.
         with localcontext() as context:
@@ -110,7 +119,15 @@ class LiveCycle:
             quantity = self.notional / entry
             gross = quantity * (entry - exit_price)
             fees = (self.notional + quantity * exit_price) * self.fee_bps / 10000
-            return quantity, gross, fees, gross - fees
+            duration = (self.cycle_config["outcome_horizon_seconds"]
+                        if duration_seconds is None else duration_seconds)
+            if (type(duration) is not int or duration < 0
+                    or duration > self.cycle_config["outcome_horizon_seconds"]
+                    + self.cycle_config["max_observation_gap_seconds"]):
+                raise ValueError("short outcome duration is outside the causal bound")
+            carry = (self.notional * self.short_carry_bps_per_day / 10000
+                     * Decimal(duration) / Decimal(86400))
+            return quantity, gross, fees, carry, gross-fees-carry
 
     def _cycle_side(self, parameter, feature, snapshot):
         signed = -feature if parameter.startswith("CONTRARIAN") else feature
@@ -243,7 +260,12 @@ class LiveCycle:
                         if side == "BUY":
                             score += self._buy_outcome(row["ask"], row["exit_bid"])[3]
                         elif side == "SHORT":
-                            score += self._short_outcome(row["bid"], row["exit_ask"])[3]
+                            duration = int((datetime.fromisoformat(row["exit_at"])
+                                - datetime.fromisoformat(row["entry_at"])).total_seconds())
+                            score += self._short_outcome(
+                                row["bid"], row["exit_ask"],
+                                duration_seconds=duration,
+                            )[4]
                     scores[family] = score
                 family = max(scores, key=scores.get)
                 version = con.execute("SELECT MAX(version)+1 FROM models").fetchone()[0]
@@ -291,8 +313,12 @@ class LiveCycle:
                     outcomes[name] = self._buy_outcome(
                         pending["ask"], current["bid_price"])[3]
                 elif action == "SHORT":
+                    duration = int((datetime.fromisoformat(current["available_at"])
+                        - datetime.fromisoformat(pending["available_at"])).total_seconds())
                     outcomes[name] = self._short_outcome(
-                        pending["bid"], current["ask_price"])[3]
+                        pending["bid"], current["ask_price"],
+                        duration_seconds=duration,
+                    )[4]
                 else:
                     outcomes[name] = Decimal(0)
             con.execute("INSERT INTO live_shadow_episodes(cycle,evidence) VALUES(?,?)",

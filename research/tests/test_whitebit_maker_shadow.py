@@ -71,6 +71,20 @@ def test_one_sided_fill_is_forced_out_with_taker_fee_and_impact():
     assert result["trading_authority"] is False
 
 
+def test_one_sided_fill_hedges_immediately_before_quote_expiry():
+    quote = open_quote(book(), instrument(), batch(), notional_quote="4")
+    result = evaluate_quote(
+        quote,
+        book(bid="0.00000399", ask="0.00000401", at=NOW + timedelta(seconds=10)),
+        batch(trade(2, side="sell", price="0.00000400", quantity="2500000")),
+        now=NOW + timedelta(seconds=10), maximum_age_seconds=60,
+    )
+    assert result["status"] == "SETTLED"
+    assert result["outcome"] == "BID_ONLY_FORCED_EXIT"
+    assert result["inventory_hedge_policy"] == "IMMEDIATE_NEXT_POLL"
+    assert result["age_seconds"] < 60
+
+
 def test_insufficient_queue_volume_remains_open_before_expiry():
     quote = open_quote(book(), instrument(), batch(), notional_quote="4")
     result = evaluate_quote(
@@ -149,6 +163,7 @@ def test_failed_filtered_wave_exhausts_the_single_adaptive_trial():
             target_cycles=4,
         )
     assert state["research_phase"] == "RESEARCH_ONLY"
+
 
 
 

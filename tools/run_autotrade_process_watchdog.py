@@ -71,7 +71,17 @@ def _atomic(path: Path, value: object) -> None:
             stream.write(_canonical(value))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        # Windows virus scanners and indexers can briefly open the destination
+        # without delete sharing.  A single transient sharing violation must
+        # not terminate the owner process and stop every managed worker.
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

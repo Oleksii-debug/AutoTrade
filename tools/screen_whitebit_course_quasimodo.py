@@ -20,10 +20,11 @@ SCHEMA = "autotrade-whitebit-private-course-quasimodo-screen-v1"
 
 
 def screen(bars: list[dict], *, train_count: int, development_count: int,
-           dataset_sha256: str, minimum_cycles: int = 10) -> dict:
+           dataset_sha256: str, minimum_cycles: int = 10,
+           configuration: CourseConfiguration | None = None) -> dict:
     if train_count < 1000 or development_count < 500 or train_count + development_count > len(bars) - 500:
         raise ValueError("course screen requires substantial TRAIN, DEVELOPMENT and FINAL")
-    config = CourseConfiguration()
+    config = configuration or CourseConfiguration()
     parts = {"TRAIN": bars[:train_count],
              "DEVELOPMENT": bars[train_count:train_count + development_count],
              "FINAL": bars[train_count + development_count:]}
@@ -84,12 +85,21 @@ def main(argv=None) -> int:
     parser.add_argument("--train-count", type=int, required=True)
     parser.add_argument("--development-count", type=int, required=True)
     parser.add_argument("--minimum-cycles", type=int, default=10)
+    parser.add_argument("--minimum-shift-bars", type=int, default=1)
+    parser.add_argument("--maximum-shift-bars", type=int, default=16)
+    parser.add_argument("--shift-lookback", type=int, default=12)
+    parser.add_argument("--require-top-down", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     bars, dataset, manifest = authenticated_bars(args.manifest)
+    configuration = CourseConfiguration(
+        minimum_shift_confirmation_bars=args.minimum_shift_bars,
+        shift_expiry_bars=args.maximum_shift_bars,
+        shift_lookback=args.shift_lookback,
+        require_true_top_down=args.require_top_down)
     result = screen(bars, train_count=args.train_count,
         development_count=args.development_count, dataset_sha256=dataset,
-        minimum_cycles=args.minimum_cycles)
+        minimum_cycles=args.minimum_cycles, configuration=configuration)
     target = args.output_dir / f"{result['result_sha256']}.json"
     _atomic(target, {"source": {"venue": "WHITEBIT_PUBLIC", "market": manifest["market"],
         "manifest": str(args.manifest), "private_course_text_embedded": False},
@@ -109,3 +119,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

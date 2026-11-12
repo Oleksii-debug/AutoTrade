@@ -47,6 +47,7 @@ def test_trade_tape_deduplicates_restart_and_aggregates_exact_flow(tmp_path):
     assert reopened.ingest(_batch(newest_first)) == 0
     status = reopened.status()
     assert status["last_trade_ids"] == {"BTC_USDT": 14}
+    assert status["collection_started_at"].endswith("+00:00")
     assert status["network_orders"] is False
     assert status["trading_authority"] is False
     reopened.close()
@@ -63,4 +64,5 @@ def test_trade_tape_retention_removes_old_buckets_without_resetting_cursor(tmp_p
     assert status["bucket_count"] == 1
     assert status["last_trade_ids"] == {"BTC_USDT": 11}
     store.close()
+
 

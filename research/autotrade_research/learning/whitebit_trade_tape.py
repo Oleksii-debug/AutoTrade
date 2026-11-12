@@ -78,8 +78,17 @@ class WhiteBitTradeTapeStore:
                 PRIMARY KEY(market, bucket_epoch)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS buckets_epoch ON buckets(bucket_epoch);
+            CREATE TABLE IF NOT EXISTS metadata(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
             """
         )
+        with self.connection:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)",
+                ("collection_started_at", datetime.now(timezone.utc).isoformat()),
+            )
         check = self.connection.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
             raise ValueError("trade tape integrity check failed")
@@ -174,6 +183,9 @@ class WhiteBitTradeTapeStore:
                 "SELECT market,last_trade_id FROM cursors ORDER BY market"
             )
         }
+        started_at = self.connection.execute(
+            "SELECT value FROM metadata WHERE key='collection_started_at'"
+        ).fetchone()[0]
         return {
             "schema": SCHEMA,
             "database": str(self.path),
@@ -183,8 +195,10 @@ class WhiteBitTradeTapeStore:
             "first_bucket_epoch": first_epoch,
             "last_bucket_epoch": last_epoch,
             "last_trade_ids": cursors,
+            "collection_started_at": str(started_at),
             "public_data_only": True,
             "network_orders": False,
             "trading_authority": False,
         }
+
 

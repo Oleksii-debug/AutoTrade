@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -39,6 +40,7 @@ from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurat
 
 SCHEMA = "autotrade-whitebit-subhour-forward-shadow-v1"
 MARKET = "SOL_PERP"
+LEARNING_MARKETS = ("BTC_PERP", "ETH_PERP")
 STEP_SECONDS = 900
 MAX_ENTRY_DELAY = timedelta(seconds=90)
 PROSPECTIVE_WAVE_CYCLES = 5
@@ -65,15 +67,23 @@ def _bars(client: WhiteBitPublicClient, now: datetime, limit: int = 250) -> list
 
 
 def _quote(client: WhiteBitPublicClient) -> dict:
-    matches = [row for row in client.futures_markets() if row.market == MARKET]
-    if len(matches) != 1:
+    quotes = {}
+    for row in client.futures_markets():
+        if row.market not in (MARKET, *LEARNING_MARKETS):
+            continue
+        bid, ask = Decimal(row.bid), Decimal(row.ask)
+        if bid <= 0 or ask <= bid:
+            if row.market == MARKET:
+                raise PublicDataError("INVALID_LIVE_FUTURES_QUOTE")
+            continue
+        if row.market in quotes:
+            raise PublicDataError("DUPLICATE_LIVE_FUTURES_QUOTE")
+        quotes[row.market] = {"bid": bid, "ask": ask, "mid": (bid + ask) / Decimal(2),
+            "received_at": row.received_at.isoformat(), "source_sha256": row.digest}
+    if MARKET not in quotes:
         raise PublicDataError("FUTURES_MARKET_NOT_AVAILABLE")
-    row = matches[0]
-    bid, ask = Decimal(row.bid), Decimal(row.ask)
-    if bid <= 0 or ask <= bid:
-        raise PublicDataError("INVALID_LIVE_FUTURES_QUOTE")
-    return {"bid": bid, "ask": ask, "mid": (bid + ask) / Decimal(2),
-        "received_at": row.received_at.isoformat(), "source_sha256": row.digest}
+    primary = quotes.pop(MARKET)
+    return {**primary, "learning_quotes": quotes}
 
 
 def _l2_confirmation(path: Path, direction: str, now_epoch: int) -> dict:
@@ -142,17 +152,18 @@ def _exit_values(position: dict, quote: dict, now: datetime,
 
 def _observe_execution_outcomes(
     state: dict, *, boundary: datetime, quote: dict, now: datetime,
-    contiguous: bool, policy_action: str,
+    contiguous: bool, policy_action: str, market: str = MARKET,
 ) -> list[dict]:
     """Label earlier observations with the next observed 30-minute BBO outcome."""
     research = state.setdefault("execution_outcomes", {
         "pending": [], "recent": [], "settled_count": 0,
     })
     epoch = int(boundary.timestamp())
-    if epoch <= research.get("last_boundary_epoch", -1):
+    prior_epoch = research.get("last_boundary_epoch")
+    if prior_epoch is not None and epoch <= prior_epoch:
         return []
     research["last_boundary_epoch"] = epoch
-    if not contiguous:
+    if not contiguous or (prior_epoch is not None and epoch - prior_epoch != STEP_SECONDS):
         research["pending"] = []
     received = datetime.fromisoformat(quote["received_at"])
     if (not timedelta(0) <= now - received <= timedelta(seconds=5)
@@ -189,7 +200,7 @@ def _observe_execution_outcomes(
             outcomes[label] = {"entry_price": str(entry_fill), "exit_price": str(fill),
                 "net_equity_return": str(pnl / starting_equity)}
         settled.append({
-            "outcome_id": f"{MARKET}:M15:{entry['entry_boundary_epoch']}:{HORIZON_SECONDS}",
+            "outcome_id": f"{market}:M15:{entry['entry_boundary_epoch']}:{HORIZON_SECONDS}",
             **entry, "exit_boundary_epoch": epoch, "exit_quote_received_at": received.isoformat(),
             "exit_quote_sha256": quote["source_sha256"], "elapsed_seconds": str(elapsed),
             "kind": "OBSERVED_FIXED_TIME_EXECUTION_OUTCOME", "outcomes": outcomes,
@@ -212,6 +223,65 @@ def _observe_execution_outcomes(
     if settled:
         research["learner_evaluation"] = review_observed_predictions(research["recent"])
     return settled
+
+
+def _midpoint_learning_context(path: Path, market: str, quote: dict) -> dict | None:
+    """Use settled five-minute midpoint history without fetching more candles."""
+    received = datetime.fromisoformat(quote["received_at"])
+    window = 300
+    end = (int(received.timestamp()) - 60) // window * window
+    start = end - 20 * window
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as con:
+            rows = con.execute(
+                "SELECT window_epoch,features_json FROM archived_windows "
+                "WHERE market=? AND window_epoch>=? AND window_epoch<? ORDER BY window_epoch",
+                (market, start, end)).fetchall()
+    except sqlite3.Error:
+        return None
+    if [epoch for epoch, _ in rows] != list(range(start, end, window)):
+        return None
+    mids = []
+    for epoch, payload in rows:
+        feature = json.loads(payload)
+        # Only the last midpoint matters here. Reconnects inside a window
+        # do not invalidate a fresh endpoint on the restored order book.
+        if (datetime.fromisoformat(feature["last_received_at"]) > received
+                or feature["last_bucket_epoch"] < epoch + window - 10):
+            return None
+        mids.append(Decimal(feature["close_mid"]))
+    changes = [abs(current - previous) for previous, current in zip(mids, mids[1:])]
+    return {"kind": "SETTLED_M5_MIDPOINT_CONTEXT", "source_window_end_epoch": end,
+        "features": {"close": str(quote["mid"]), "band_mid": str(sum(mids) / len(mids)),
+                     "atr": str(sum(changes[-14:]) / 14)}}
+
+
+def _observe_additional_markets(
+    state: dict, *, depth_database: Path, boundary: datetime, quote: dict,
+    now: datetime, contiguous: bool,
+) -> dict:
+    """Run independent research ledgers from the same public quote response."""
+    research = state.setdefault("additional_learning", {})
+    observations = {}
+    for market, market_quote in quote.get("learning_quotes", {}).items():
+        ledger = deepcopy(research.get(market, {}))
+        try:
+            ledger["last_technical_signal"] = _midpoint_learning_context(
+                depth_database, market, market_quote)
+            settled = _observe_execution_outcomes(
+                ledger, boundary=boundary, quote=market_quote, now=now,
+                contiguous=contiguous, policy_action="RESEARCH_ONLY", market=market)
+        except (OSError, ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            observations[market] = {"error_class": type(exc).__name__}
+            continue
+        research[market] = ledger
+        pending = ledger["execution_outcomes"]["pending"]
+        current = pending[-1] if pending and pending[-1]["entry_boundary_epoch"] == int(
+            boundary.timestamp()) else None
+        observations[market] = {"observation": current, "settled": settled}
+    return observations
 
 
 def _record_clock_sample(state: dict, *, boundary: datetime, quote: dict,
@@ -526,6 +596,10 @@ def main(argv=None) -> int:
                     next_state, boundary=history[-1]["closed_at"], quote=quote, now=now,
                     contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS,
                     policy_action=action)
+                additional_observations = _observe_additional_markets(
+                    next_state, depth_database=args.depth_database,
+                    boundary=history[-1]["closed_at"], quote=quote, now=now,
+                    contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS)
                 pending = next_state["execution_outcomes"]["pending"]
                 current_observation = (pending[-1] if pending and
                     pending[-1]["entry_boundary_epoch"] == int(history[-1]["closed_at"].timestamp())
@@ -548,6 +622,7 @@ def main(argv=None) -> int:
                     "clock_sample": clock_sample,
                     "execution_outcomes": execution_outcomes,
                     "execution_observation": current_observation,
+                    "additional_market_research": additional_observations,
                     "network_orders": False, "trading_authority": False,
                 })
                 state = next_state

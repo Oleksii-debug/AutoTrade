@@ -1,10 +1,17 @@
 from datetime import UTC, datetime
 import unittest
 
-from tools.run_whitebit_course_supervisor import completed_window, partition_counts, _compact
+from tools.run_whitebit_course_supervisor import (
+    ACTIVE_FAMILIES, completed_window, partition_counts, _compact,
+)
 
 
 class CourseSupervisorTests(unittest.TestCase):
+    def test_only_full_analysis_families_are_active(self):
+        self.assertEqual(ACTIVE_FAMILIES,
+            ("TREND_QUASIMODO_TOP_DOWN", "RANGE_DEVIATION"))
+        self.assertNotIn("TREND_QUASIMODO", ACTIVE_FAMILIES)
+
     def test_window_uses_only_completed_aligned_candles(self):
         start, end = completed_window(datetime(2026, 11, 12, 10, 7, tzinfo=UTC), 4000)
         self.assertEqual(end % 900, 0)
@@ -48,3 +55,4 @@ class CourseSupervisorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

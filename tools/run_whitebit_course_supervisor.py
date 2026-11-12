@@ -2,9 +2,9 @@
 """Run course-derived strategies on rolling public WhiteBIT futures history.
 
 This durable supervisor retrains no paid model and has no order path.  It
-refreshes completed 15-minute BTC/ETH/SOL perpetual candles, runs the frozen
-trend/Quasimodo and consolidation/range families through locked chronological
-partitions, and persists both failures and survivors for later analysis.
+refreshes completed 15-minute BTC/ETH/SOL perpetual candles, runs only the
+strict Daily -> H1 -> M15 Quasimodo and confirmed consolidation/range families
+through locked chronological partitions, and persists failures and survivors.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ SCHEMA = "autotrade-whitebit-course-supervisor-v1"
 MARKETS = ("BTC_PERP", "ETH_PERP", "SOL_PERP")
 INTERVAL = "15m"
 INTERVAL_SECONDS = 900
+ACTIVE_FAMILIES = ("TREND_QUASIMODO_TOP_DOWN", "RANGE_DEVIATION")
 
 
 def completed_window(now: datetime, bars: int) -> tuple[int, int]:
@@ -122,11 +123,6 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
             "dataset_identity_sha256": manifest["dataset_identity_sha256"],
             "row_count": parsed["row_count"]}
     minimum_train = max(3, len(MARKETS))
-    trend = screen_trend(datasets, train_count=train_count,
-        development_count=development_count,
-        configuration=CourseConfiguration(minimum_shift_confirmation_bars=5,
-            shift_expiry_bars=8), minimum_train_cycles=minimum_train,
-        minimum_development_cycles=2, minimum_final_cycles=2)
     trend_top_down = screen_trend(datasets, train_count=train_count,
         development_count=development_count,
         configuration=CourseConfiguration(minimum_shift_confirmation_bars=5,
@@ -142,16 +138,18 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
         "window": {"start_open_epoch": start, "end_open_epoch": end, "bars": bars,
             "train_count": train_count, "development_count": development_count,
             "final_count": final_count}, "manifests": manifests,
-        "families": {"TREND_QUASIMODO": trend,
-            "TREND_QUASIMODO_TOP_DOWN": trend_top_down,
+        "families": {"TREND_QUASIMODO_TOP_DOWN": trend_top_down,
             "RANGE_DEVIATION": ranges},
+        "entry_policy": {"mode": "STRICT_ANALYSIS_BEFORE_ENTRY",
+            "active_families": list(ACTIVE_FAMILIES),
+            "legacy_loose_trend_disabled": True,
+            "no_complete_thesis_action": "HOLD"},
         "session_lifecycle": {"phase": "ANALYSIS_COMPLETE",
             "phase_transitions": ["RUNNING", "PAUSED", "ANALYZING", "COOLDOWN"],
             "analysis_partition": "TRAIN_ONLY",
             "same_frozen_strategies_required": True,
             "resume_condition": "NEXT_SCHEDULED_COMPLETED_WINDOW_AFTER_COOLDOWN",
             "family_process_phases": {
-                "TREND_QUASIMODO": trend["train_process_review"]["phase"],
                 "TREND_QUASIMODO_TOP_DOWN": trend_top_down["train_process_review"]["phase"],
                 "RANGE_DEVIATION": ranges["train_process_review"]["phase"]},
             "strategy_changed": False},
@@ -248,3 +246,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

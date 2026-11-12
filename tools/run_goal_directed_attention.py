@@ -325,8 +325,14 @@ def _maker_shadow_summary(path: Path) -> dict[str, object]:
         "status": str(document.get("phase", "UNKNOWN")),
         "checkpointed_at": document.get("checkpointed_at"),
         "market": document.get("market"),
+        "research_phase": document.get("research_phase"),
         "settled_cycles": int(document.get("settled_cycles", 0)),
         "positive_cycles": int(document.get("positive_cycles", 0)),
+        "wave_cycles": int(document.get("wave_cycles", 0)),
+        "wave_positive_cycles": int(document.get("wave_positive_cycles", 0)),
+        "wave_net_pnl_quote": document.get("wave_net_pnl_quote"),
+        "latest_wave_analysis": document.get("latest_wave_analysis"),
+        "last_quote_admission": document.get("last_quote_admission"),
         "net_pnl_quote": document.get("net_pnl_quote"),
         "open_quote": None if opened is None else {
             "status": opened.get("status"),
@@ -547,6 +553,7 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 

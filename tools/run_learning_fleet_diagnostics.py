@@ -36,6 +36,20 @@ def _cycle_projection(value: dict) -> dict:
         "drawdown", "reason", "incumbent_version", "candidate_version",
         "incumbent_sha256", "candidate_sha256", "pause_reasons", "paused_at",
         "training_cutoff", "train_scores", "analysis", "evaluation")}
+    config = cycle.get("config")
+    if type(config) is dict:
+        projected["cost_and_horizon_config"] = {key: config.get(key) for key in (
+            "fee_bps", "slippage_bps", "short_carry_bps_per_day",
+            "notional", "outcome_horizon_seconds", "signal_lookback_seconds",
+            "max_observation_gap_seconds") if config.get(key) is not None}
+    evaluation = projected.get("evaluation")
+    if type(evaluation) is dict and type(evaluation.get("pending")) is dict:
+        pending = evaluation["pending"]
+        projected["pending_actions"] = {
+            "candidate": pending.get("candidate_action"),
+            "incumbent": pending.get("incumbent_action"),
+            "available_at": pending.get("available_at"),
+        }
     projected["network_orders"] = False
     projected["trading_authority"] = False
     projected["champion_promotion"] = False
@@ -137,3 +151,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

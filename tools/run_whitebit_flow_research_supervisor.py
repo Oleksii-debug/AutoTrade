@@ -23,11 +23,16 @@ from autotrade_research.artifacts.resource_lock import ResourceLock
 from autotrade_research.strategies.flow_volatility_screen import (
     screen_flow_volatility,
 )
+from autotrade_research.strategies.medium_horizon_trade_flow import (
+    screen_medium_horizon_flow,
+)
 from tools.screen_whitebit_flow_lead_lag import DEFAULT_MARKETS, run as run_lead_lag
 
 
 SCHEMA = "autotrade-whitebit-flow-research-supervisor-v1"
 RUN_SCHEMA = "autotrade-whitebit-flow-research-run-v1"
+MEDIUM_MINIMUM_BUCKETS = 900
+MEDIUM_ROUND_TRIP_COST_BPS = "26"
 
 
 def _digest(payload: dict) -> str:
@@ -66,6 +71,21 @@ def execute_cycle(*, trade_tape: Path, state_dir: Path, markets: list[str],
         trade_tape, markets, minimum_buckets=minimum_buckets,
         minimum_trades=6, round_trip_cost_bps=round_trip_cost_bps,
     )
+    medium_horizon = {}
+    medium_horizon_errors = []
+    for market in markets:
+        try:
+            row = screen_medium_horizon_flow(
+                trade_tape, market,
+                minimum_buckets=MEDIUM_MINIMUM_BUCKETS,
+                minimum_trades=2,
+                round_trip_cost_bps=MEDIUM_ROUND_TRIP_COST_BPS,
+            )
+            medium_horizon[row["market"]] = row
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            medium_horizon_errors.append({
+                "market": market, "error_class": type(exc).__name__,
+            })
     report = {
         "schema": RUN_SCHEMA,
         "created_at": now.astimezone(UTC).isoformat(),
@@ -83,6 +103,25 @@ def execute_cycle(*, trade_tape: Path, state_dir: Path, markets: list[str],
             "results": volatility,
         },
         "lead_lag": lead_lag,
+        "medium_horizon": {
+            "minimum_buckets": MEDIUM_MINIMUM_BUCKETS,
+            "round_trip_cost_bps": MEDIUM_ROUND_TRIP_COST_BPS,
+            "market_count": len(medium_horizon),
+            "qualified_count": sum(
+                bool(row["prospective_qualification"])
+                for row in medium_horizon.values()
+            ),
+            "waiting_count": sum(
+                row["status"] == "WAITING_FOR_CAUSAL_BUCKETS"
+                for row in medium_horizon.values()
+            ),
+            "rejected_count": sum(
+                row["status"] == "REJECTED"
+                for row in medium_horizon.values()
+            ),
+            "errors": medium_horizon_errors,
+            "results": medium_horizon,
+        },
         "paid_model_calls": 0,
         "network_requests": 0,
         "network_orders": False,
@@ -153,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
                 checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
                 if checkpoint.get("schema") != SCHEMA:
                     raise ValueError("flow-research supervisor schema differs")
+                last_result = checkpoint.get("last_result")
+                if (type(last_result) is dict
+                        and "medium_horizon_qualified_count" not in last_result):
+                    checkpoint.pop("next_run_at", None)
             if checkpoint:
                 checkpoint.update(
                     status="RUNNING",
@@ -187,9 +230,14 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         "volatility_qualified_count": report["volatility"]["qualified_count"],
                         "lead_lag_qualified_count": report["lead_lag"]["qualified_pair_count"],
+                        "medium_horizon_qualified_count": report["medium_horizon"]["qualified_count"],
+                        "medium_horizon_waiting_count": report["medium_horizon"]["waiting_count"],
+                        "medium_horizon_rejected_count": report["medium_horizon"]["rejected_count"],
+                        "medium_horizon_error_count": len(report["medium_horizon"]["errors"]),
                         "isolated_error_count": (
                             len(report["volatility"]["errors"])
                             + len(report["lead_lag"]["errors"])
+                            + len(report["medium_horizon"]["errors"])
                         ),
                     }
                     status, error = "RUNNING", None

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 import inspect
 import json
@@ -22,6 +22,9 @@ from .whitebit_websocket import (
     WS,
     _default_connector,
 )
+
+
+MAX_FUTURE_CLOCK_SKEW = timedelta(seconds=5)
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,10 @@ def parse_trade_stream_message(
                 trade_at = datetime.fromtimestamp(seconds, timezone.utc)
             except (OSError, OverflowError, ValueError):
                 raise PublicDataError("INVALID_TRADE_STREAM_TIME") from None
-            if trade_at > received_at:
+            # Venue and local wall clocks can differ slightly.  A small fixed
+            # tolerance prevents a valid public execution from forcing a full
+            # reconnect while still rejecting materially future-dated input.
+            if trade_at > received_at + MAX_FUTURE_CLOCK_SKEW:
                 raise PublicDataError("FUTURE_TRADE_STREAM_EVENT")
             side = record["type"]
             rpi = record.get("rpi", False)

@@ -6,6 +6,7 @@ import argparse
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -35,6 +36,8 @@ from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurat
 SCHEMA = "autotrade-whitebit-subhour-forward-shadow-v1"
 MARKET = "SOL_PERP"
 STEP_SECONDS = 900
+PROSPECTIVE_WAVE_CYCLES = 5
+MAX_DECISION_JOURNAL_BYTES = 16 * 1024 * 1024
 
 
 def _bars(client: WhiteBitPublicClient, now: datetime, limit: int = 250) -> list[dict]:
@@ -101,6 +104,7 @@ def _initial(last_bar_epoch: int, now: datetime) -> dict:
         "strategy_mutation_allowed": False, "started_at": now.isoformat(),
         "last_bar_open_epoch": last_bar_epoch, "balance": "1000",
         "position": None, "closed_cycles": 0, "net_pnl": "0",
+        "episodes": [], "wave_limit": PROSPECTIVE_WAVE_CYCLES,
         "technical_analyses": 0, "news_analyses": 0, "l2_analyses": 0,
         "holds": {}, "entries_by_utc_day": {}, "fees": "0", "funding": "0",
         "network_orders": False, "trading_authority": False,
@@ -109,6 +113,22 @@ def _initial(last_bar_epoch: int, now: datetime) -> dict:
 
 def _hold(state: dict, reason: str) -> None:
     state["holds"][reason] = state["holds"].get(reason, 0) + 1
+
+
+def _append_decision(path: Path, value: dict) -> None:
+    """Append one bounded decision record and retain one rotated predecessor."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.is_symlink():
+        raise ValueError("decision journal cannot be a symlink")
+    if path.exists() and path.stat().st_size >= MAX_DECISION_JOURNAL_BYTES:
+        rotated = path.with_suffix(path.suffix + ".1")
+        if rotated.exists():
+            rotated.unlink()
+        os.replace(path, rotated)
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False) + "\n").encode()
+    with path.open("ab") as stream:
+        stream.write(payload); stream.flush(); os.fsync(stream.fileno())
 
 
 def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
@@ -160,15 +180,32 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
             state["funding"] = format(Decimal(state["funding"]) + funding, "f")
             state["net_pnl"] = format(balance - Decimal(costs.initial_equity), "f")
             state["closed_cycles"] += 1
-            state["last_episode"] = {"opened_at": position["opened_at"],
+            episode = {"opened_at": position["opened_at"],
                 "closed_at": now.isoformat(), "direction": int(direction),
                 "entry_price": position["entry_price"], "exit_price": format(fill, "f"),
                 "exit_reason": reason, "net_equity": state["balance"],
+                "net_pnl": format(balance - Decimal(position["starting_equity"]), "f"),
                 "technical_configuration_frozen": True}
+            state["last_episode"] = episode
+            state["episodes"].append(episode)
             state["position"] = None
+            if state["closed_cycles"] >= PROSPECTIVE_WAVE_CYCLES:
+                positive = sum(Decimal(item["net_pnl"]) > 0 for item in state["episodes"])
+                state["wave_analysis"] = {
+                    "status": "POSITIVE_AFTER_COSTS" if Decimal(state["net_pnl"]) > 0
+                              else "NOT_POSITIVE_AFTER_COSTS",
+                    "closed_cycles": state["closed_cycles"],
+                    "positive_cycles": positive,
+                    "net_pnl": state["net_pnl"],
+                    "strategy_mutated": False,
+                    "next_action": "INDEPENDENT_REVIEW_BEFORE_ANY_NEW_WAVE",
+                }
         return state
     signal = technical_signal(history, config)
     state["last_technical_signal"] = signal
+    if state["closed_cycles"] >= PROSPECTIVE_WAVE_CYCLES:
+        _hold(state, "PROSPECTIVE_WAVE_COMPLETE")
+        return state
     day = now.date().isoformat()
     if state["entries_by_utc_day"].get(day, 0) >= config.maximum_entries_per_utc_day:
         _hold(state, "DAILY_ENTRY_LIMIT")
@@ -204,6 +241,7 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
     state["position"] = {"direction": signal["direction"],
         "quantity": format(quantity, "f"), "entry_price": format(fill, "f"),
         "entry_atr": format(atr, "f"), "opened_at": now.isoformat(),
+        "starting_equity": format(balance, "f"),
         "holding_bars": 0, "news_evidence_sha256": news["evidence_sha256"],
         "l2_confirmation": l2, "technical_signal": signal}
     return state
@@ -226,6 +264,11 @@ def main(argv=None) -> int:
     stop.unlink(missing_ok=True); client = WhiteBitPublicClient(); state = None
     if checkpoint.is_file():
         state = json.loads(checkpoint.read_bytes()).get("state")
+        if type(state) is dict:
+            state.setdefault("episodes", [])
+            state.setdefault("entries_by_utc_day", {})
+            state.setdefault("fees", "0")
+            state.setdefault("funding", "0")
     while not stop.exists():
         now = datetime.now(UTC); started = monotonic(); error = None
         try:
@@ -234,6 +277,7 @@ def main(argv=None) -> int:
                 state = _initial(int(history[-1]["opened_at"].timestamp()), now)
                 status = "OBSERVING_FROM_NEXT_COMPLETED_BAR"
             elif int(history[-1]["opened_at"].timestamp()) > state["last_bar_open_epoch"]:
+                previous_epoch = state["last_bar_open_epoch"]
                 quote = _quote(client)
                 try:
                     news = collect_market_context(now=now)
@@ -247,6 +291,18 @@ def main(argv=None) -> int:
                 state = process_completed_bar(state, history, quote=quote, news=news,
                     l2=l2, now=now)
                 state["last_news_context"] = news; state["last_l2_context"] = l2
+                _append_decision(state_dir / "decisions.jsonl", {
+                    "schema": SCHEMA, "observed_at": now.isoformat(),
+                    "previous_bar_open_epoch": previous_epoch,
+                    "processed_bar_open_epoch": state["last_bar_open_epoch"],
+                    "technical": state.get("last_technical_signal"),
+                    "news": news, "l2": l2,
+                    "pretrade": state.get("last_pretrade_thesis"),
+                    "position_open": state["position"] is not None,
+                    "closed_cycles": state["closed_cycles"],
+                    "net_pnl": state["net_pnl"],
+                    "network_orders": False, "trading_authority": False,
+                })
                 status = "RUNNING"
             else:
                 status = "WAITING_FOR_COMPLETED_15M_BAR"

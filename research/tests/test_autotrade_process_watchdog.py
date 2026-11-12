@@ -185,6 +185,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "learning-btc-imbalance-fast", "learning-eth-fast",
         "whitebit-public-sol", "learning-sol-fast", "whitebit-public-trade-tape",
         "whitebit-trade-flow-screen", "goal-attention",
+        "whitebit-pepe-maker-shadow",
         "learning-fleet-diagnostics", "groq-advisory", "rolling-native-alpha",
         "whitebit-opportunity-screen",
         "whitebit-funding-carry-shadow",
@@ -284,6 +285,7 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
+
 
 
 

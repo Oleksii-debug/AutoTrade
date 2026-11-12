@@ -196,6 +196,14 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert "api-key" not in serialized
     assert "password" not in serialized
     assert "secret" not in serialized
+    processes = {row["id"]: row for row in manifest["processes"]}
+    for process_id in ("whitebit-public-trade-tape", "whitebit-trade-flow-screen"):
+        args = processes[process_id]["args"]
+        markets = [
+            args[index + 1] for index, value in enumerate(args[:-1])
+            if value == "--market"
+        ]
+        assert markets == ["BTC_USDT", "ETH_USDT", "SOL_USDT", "PEPE_USDT"]
     groq = next(row for row in manifest["processes"] if row["id"] == "groq-advisory")
     checkpoint_index = groq["args"].index("--checkpoint") + 1
     assert groq["args"][checkpoint_index].endswith(
@@ -276,6 +284,7 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_diagnostic_rotation(self):
         self._run_with_temp(test_watchdog_diagnostic_log_rotation_is_bounded_and_readable)
+
 
 
 

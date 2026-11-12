@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 
 from .fast_screen import decimal, validate_bars
+from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 from .technical_confluence import TechnicalCosts
 
 
@@ -199,6 +200,8 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
         history: list[dict] = []
         episodes: list[dict] = []
         cooldown = holding = closed = wins = losses = fills = signals = 0
+        pretrade_holds = 0
+        pretrade_hold_reasons: dict[str, int] = {}
         detected_setups = expired_setups = 0
         fees = funding = maximum_drawdown = Decimal(0)
         exits: dict[str, int] = {}
@@ -244,8 +247,17 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                 candidate_target = decimal(pending_entry["target"])
                 risk = actual - candidate_stop if direction > 0 else candidate_stop - actual
                 reward = candidate_target - actual if direction > 0 else actual - candidate_target
-                if (risk > 0 and reward > 0
-                        and reward / risk >= decimal(configuration.minimum_reward_risk)
+                gate = evaluate_pretrade(PreTradeThesis(
+                    direction="LONG" if direction > 0 else "SHORT",
+                    regime="RANGE", causal_data_complete=True,
+                    regime_confirmed=True, location_confirmed=True,
+                    trigger_confirmed=True, entry_price=actual,
+                    invalidation_price=candidate_stop,
+                    target_price=candidate_target,
+                    round_trip_cost_bps=costs.round_trip_bps,
+                    minimum_reward_risk=configuration.minimum_reward_risk,
+                    microstructure_status="NOT_AVAILABLE_HISTORICAL"))
+                if (gate["decision"] == "ENTER"
                         and reward / actual >= decimal(configuration.minimum_reward_fraction)):
                     risk_budget = max(Decimal(0), balance) * risk_fraction
                     opened_quantity = min(risk_budget / risk,
@@ -264,7 +276,13 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                             "entry_price": str(entry), "stop_price": str(stop),
                             "target_price": str(target),
                             "planned_reward_risk": str(reward / risk),
-                            "entry_fee": str(charge)}
+                            "entry_fee": str(charge),
+                            "pretrade_evidence": gate}
+                else:
+                    pretrade_holds += 1
+                    reasons = gate["failure_reasons"] or ["MINIMUM_REWARD_FRACTION"]
+                    for reason in reasons:
+                        pretrade_hold_reasons[reason] = pretrade_hold_reasons.get(reason, 0) + 1
                 pending_entry = None
 
             high = decimal(bar["high"]); low = decimal(bar["low"])
@@ -327,8 +345,11 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
             "win_rate": str(Decimal(wins) / Decimal(closed)) if closed else None,
             "fill_count": fills, "signal_count": signals, "fees": str(fees),
             "detected_setups": detected_setups, "expired_setups": expired_setups,
+            "pretrade_holds": pretrade_holds,
+            "pretrade_hold_reasons": pretrade_hold_reasons,
             "funding": str(funding), "exit_reasons": exits, "episodes": episodes,
             "evidence_sha256": evidence.hexdigest(), "frozen_until_cycles": 100,
             "network_orders": False, "trading_authority": False,
             "automatic_strategy_mutation": False}
+
 

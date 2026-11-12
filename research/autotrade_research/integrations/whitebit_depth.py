@@ -69,6 +69,7 @@ class DepthBookObservation:
     imbalance_top5: str
     bid_quantity_change: str
     ask_quantity_change: str
+    order_flow_imbalance: str
     source_sha256: str
 
 
@@ -181,6 +182,8 @@ class DepthLocalBook:
     def apply(self, update: WhiteBitDepthUpdate, *, generation: int) -> DepthBookObservation:
         if update.market != self.market or type(generation) is not int or generation < 1:
             raise ValueError("depth update binding is invalid")
+        previous_asks = sorted(self.asks.items())[:1]
+        previous_bids = sorted(self.bids.items(), reverse=True)[:1]
         if update.snapshot:
             self.asks = {Decimal(p): Decimal(q) for p, q in update.asks}
             self.bids = {Decimal(p): Decimal(q) for p, q in update.bids}
@@ -198,6 +201,18 @@ class DepthLocalBook:
         if not asks or not bids or bids[0][0] >= asks[0][0]:
             raise PublicDataError("INVALID_LOCAL_DEPTH_BOOK")
         bid, ask = bids[0][0], asks[0][0]
+        bid_quantity, ask_quantity = bids[0][1], asks[0][1]
+        if update.snapshot or not previous_bids or not previous_asks:
+            order_flow_imbalance = Decimal(0)
+        else:
+            previous_bid, previous_bid_quantity = previous_bids[0]
+            previous_ask, previous_ask_quantity = previous_asks[0]
+            # Cont-Kukanov-Stoikov event-level OFI at the best quotes.
+            order_flow_imbalance = (
+                (bid_quantity if bid >= previous_bid else Decimal(0))
+                - (previous_bid_quantity if bid <= previous_bid else Decimal(0))
+                - (ask_quantity if ask <= previous_ask else Decimal(0))
+                + (previous_ask_quantity if ask >= previous_ask else Decimal(0)))
         mid = (bid + ask) / Decimal(2)
         bid_depth = sum((q for _, q in bids[:5]), Decimal(0))
         ask_depth = sum((q for _, q in asks[:5]), Decimal(0))
@@ -208,7 +223,8 @@ class DepthLocalBook:
             format(bid, "f"), format(ask, "f"), format(mid, "f"),
             format((ask - bid) / mid * Decimal(10000), "f"),
             format(bid_depth, "f"), format(ask_depth, "f"), format(imbalance, "f"),
-            format(bid_change, "f"), format(ask_change, "f"), update.digest)
+            format(bid_change, "f"), format(ask_change, "f"),
+            format(order_flow_imbalance, "f"), update.digest)
 
 
 class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):

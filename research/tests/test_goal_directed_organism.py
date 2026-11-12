@@ -233,4 +233,422 @@ class GoalDirectedOrganismTests(unittest.TestCase):
                         "phase": "EVALUATING",
                         "candidate_version": 1,
                         "champion_promotion": False,
-                        "nwÓ­í¢G§²ÚîÆ­yÖ÷CÖÖ&¶WBÀ¢æ÷sÔäõr²F–ÖVFVÇF†Ö–ÆÆ—6V6öæG3Ó3’À¢ÆV&æ–æuöfÆVWEö6†V6·ö–çCÖfÆVWBÀ¢f÷'v&E÷6†F÷uö6†V6·ö–çC×6†F÷rÀ¢&öÆÆ–æuöÇ†ö6†V6·ö–çC×&öÆÆ–ærÀ¢÷÷'GVæ—G•ö6†V6·ö–çCÖ÷÷'GVæ—G’À¢G&FUöfÆ÷uö6†V6·ö–çC×G&FUöfÆ÷rÀ¢fÆ÷u÷&W6V&6…ö6†V6·ö–çCÖfÆ÷u÷&W6V&6‚À¢Ö¶W%÷6†F÷uö6†V6·ö–çCÖÖ¶W"À¢VæöÖ¶W%÷6†F÷uö6†V6·ö–çCÖÖ¶W%öVæÀ¢G&–æwVÆ%÷6†F÷uö6†V6·ö–çC×G&–ævÆRÀ¢¢Wf–FVæ6RÒVç&–6†VE²&÷&væ—6ÕöWf–FVæ6R%Ğ¢6VÆbæ76W'DWVÂ†Wf–FVæ6U²&ÆV&æ–æuöfÆVWB%Õ²&6ö×ÆWFVEöW—6öFW2%ÒÂ"¢6VÆbæ76W'DWVÂ†Wf–FVæ6U²&ÆV&æ–æuöfÆVWB%Õ²'†6Uö6÷VçG2%ÒÂ²$UdÅTD”är#¢Ò¢6VÆbæ76W'DWVÂ†Wf–FVæ6U²&f÷'v&E÷6†F÷r%Õ²&æWE÷æÂ%ÒÂ#ã""¢6VÆbæ76W'DWVÂ†Wf–FVæ6U²&f÷'v&E÷6†F÷r%Õ²'VçF—G’%ÒÂ"Ó""¢6VÆbæ76W'DfÇ6R†Wf–FVæ6U²&f÷'v&E÷6†F÷r%Õ²'G&F–æuöWF†÷&—G’%Ò¢Ç†ÒWf–FVæ6U²'&öÆÆ–æuöæF—fUöÇ†%Ğ¢6VÆbæ76W'DWVÂ†Ç†²&7–6ÆUö6÷VçB%ÒÂ¢6VÆbæ76W'DWVÂ†Ç†²'76VEöÖöFVÅö6÷VçB%ÒÂ¢6VÆbæ76W'DWVÂ†Ç†²&Ö&¶WG2%Õ³Õ²&ÖöFVÇ2%Õ³Õ²'6†÷'B%ÒÂ¢6VÆbæ76W'DWVÂ€¢Ç†²&Ö&¶WG2%Õ³Õ²&ÖöFVÇ2%Õ³Õ²&æWE÷æÅögFW%ö6÷7G5÷V÷FR%ÒÂ"Óbã‚ ¢¢6VÆbæ76W'DfÇ6R†Ç†²&WFöÖF–5÷&öÖ÷F–öâ%Ò¢÷÷'GVæ—G•÷7VÖÖ'’ÒWf–FVæ6U²&÷÷'GVæ—G•÷67&VVâ%Ğ¢6VÆbæ76W'DWVÂ†÷÷'GVæ—G•÷7VÖÖ'•²'6VÆV7FVEöÖ&¶WEö6÷VçB%ÒÂ"¢6VÆbæ76W'DWVÂ†÷÷'GVæ—G•÷7VÖÖ'•²'VÆ–f–VEöÖ&¶WEö6÷VçB%ÒÂ¢6VÆbæ76W'DWVÂ†÷÷'GVæ—G•÷7VÖÖ'•²'&V¦V7FVEöFFö6÷VçB%ÒÂ¢6VÆbæ76W'DfÇ6R†÷÷'GVæ—G•÷7VÖÖ'•²&Ö&¶WG2%Õ³Õ²'&÷7V7F—fU÷VÆ–f–6F–öâ%Ò¢6VÆbæ76W'DfÇ6R†÷÷'GVæ—G•÷7VÖÖ'•²&WFöÖF–5÷&öÖ÷F–öâ%Ò¢G&FUöfÆ÷u÷7VÖÖ'’ÒWf–FVæ6U²'G&FUöfÆ÷u÷67&VVâ%Ğ¢6VÆbæ76W'DWVÂ‡G&FUöfÆ÷u÷7VÖÖ'•²&Ö–æ–×VÕö'V6¶WG2%ÒÂ#c¢6VÆbæ76W'DWVÂ‡G&FUöfÆ÷u÷7VÖÖ'•²&Ö&¶WEö6÷VçB%ÒÂ"¢6VÆbæ76W'DWVÂ‡G&FUöfÆ÷u÷7VÖÖ'•²'VÆ–f–VEöÖ&¶WEö6÷VçB%ÒÂ¢6VÆbæ76W'DWVÂ€¢G&FUöfÆ÷u÷7VÖÖ'•²&Ö&¶WG2%Õ³Õ²&f–Æ&ÆUö6W6Åö'V6¶WG2%ÒÂ3#¢¢6VÆbæ76W'DfÇ6R‡G&FUöfÆ÷u÷7VÖÖ'•²&WFöÖF–5÷&öÖ÷F–öâ%Ò¢6VÆbæ76W'DfÇ6R‡G&FUöfÆ÷u÷7VÖÖ'•²'G&F–æuöWF†÷&—G’%Ò¢fÆ÷u÷&W6V&6…÷7VÖÖ'’ÒWf–FVæ6U²&fÆ÷u÷&W6V&6…÷67&VVâ%Ğ¢6VÆbæ76W'DWVÂ†fÆ÷u÷&W6V&6…÷7VÖÖ'•²&7–6ÆUö6÷VçB%ÒÂ2¢6VÆbæ76W'DWVÂ†fÆ÷u÷&W6V&6…÷7VÖÖ'•²&Æ7Eö7–6ÆU÷6V6öæG2%ÒÂ#Rã#R"¢6VÆbæ76W'DWVÂ€¢fÆ÷u÷&W6V&6…÷7VÖÖ'•²&Æ7E÷&W7VÇB%Õ²'&W7VÇE÷6†#Sb%ÒÂ&"¢c@¢¢6VÆbæ76W'DWVÂ€¢fÆ÷u÷&W6V&6…÷7VÖÖ'•²&Æ7E÷&W7VÇB%Õ²&—6öÆFVEöW'&÷%ö6÷VçB%ÒÂ ¢¢6VÆbæ76W'Dæ÷D–â€¢&Wf–FVæ6U÷F‚"ÂfÆ÷u÷&W6V&6…÷7VÖÖ'•²&Æ7E÷&W7VÇB%Ğ¢¢6VÆbæ76W'DfÇ6R†fÆ÷u÷&W6V&6…÷7VÖÖ'•²&WFöÖF–5÷&öÖ÷F–öâ%Ò¢6VÆbæ76W'DfÇ6R†fÆ÷u÷&W6V&6…÷7VÖÖ'•²'G&F–æuöWF†÷&—G’%Ò¢Ö¶W%÷7VÖÖ'’ÒWf–FVæ6U²&Ö¶W%÷6†F÷r%Ğ¢6VÆbæ76W'DWVÂ†Ö¶W%÷7VÖÖ'•²'6WGFÆVEö7–6ÆW2%ÒÂ"¢6VÆbæ76W'DWVÂ†Ö¶W%÷7VÖÖ'•²'÷6—F—fUö7–6ÆW2%ÒÂ¢6VÆbæ76W'DWVÂ†Ö¶W%÷7VÖÖ'•²&æWE÷æÅ÷V÷FR%ÒÂ"ÓãR"¢6VÆbæ76W'DWVÂ†Ö¶W%÷7VÖÖ'•²'&W6V&6…÷†6R%ÒÂ%$U4T$4…ôd”ÅDU$TB"¢6VÆbæ76W'DWVÂ†Ö¶W%÷7VÖÖ'•²'vfUö7–6ÆW2%ÒÂ¢6VÆbæ76W'DWVÂ€¢Ö¶W%÷7VÖÖ'•²&Æ7E÷V÷FUöFÖ—76–öâ%Õ²'&V6öâ%ÒÂ$D•$T5D”ôäÅôdÄõr ¢¢6VÆbæ76W'EG'VR†Ö¶W%÷7VÖÖ'•²&÷Vå÷V÷FR%Õ²&&–Eöf–ÆÆVB%Ò¢6VÆbæ76W'DWVÂ€¢Ö¶W%÷7VÖÖ'•²&Æ7E÷6WGFÆVB%Õ²&÷WF6öÖR%ÒÂ$$”EôôäÅ•ôdõ$4TEôU„•B ¢¢6VÆbæ76W'DfÇ6R†Ö¶W%÷7VÖÖ'•²&WFöÖF–5÷&öÖ÷F–öâ%Ò¢Væ÷7VÖÖ'’ÒWf–FVæ6U²&VæöÖ¶W%÷6†F÷r%Ğ¢6VÆbæ76W'DWVÂ†Væ÷7VÖÖ'•²&Ö&¶WB%ÒÂ$TäõU4EB"¢6VÆbæ76W'DWVÂ†Væ÷7VÖÖ'•²'&W6V&6…÷†6R%ÒÂ$D•44õdU%’"¢6VÆbæ76W'DWVÂ†Væ÷7VÖÖ'•²&æWE÷æÅ÷V÷FR%ÒÂ#"¢G&–ævÆU÷7VÖÖ'’ÒWf–FVæ6U²'7F&ÆUöf–E÷G&–æwVÆ%÷6†F÷r%Ğ¢6VÆbæ76W'DWVÂ‡G&–ævÆU÷7VÖÖ'•²&ÆFW7EöÖ&¶WEö6÷VçB%ÒÂ’¢6VÆbæ76W'DWVÂ‡G&–ævÆU÷7VÖÖ'•²&7–6ÆU÷&W7VÇEö6÷VçB%ÒÂ‚¢6VÆbæ76W'DWVÂ‡G&–ævÆU÷7VÖÖ'•²&÷÷'GVæ—G•ö6÷VçB%ÒÂ¢6VÆbæ76W'DWVÂ€¢G&–ævÆU÷7VÖÖ'•²&&W7E÷&W7VÇB%Õ²'F‚%ÒÀ¢²%U4EB"Â%U4D2"Â%U4B"Â%U4EB%ÒÀ¢¢6VÆbæ76W'DWVÂ€¢G&–ævÆU÷7VÖÖ'•²&&W7E÷&W7VÇB%Õ²&æWEögFW%÷&W6W'fUö'2%ÒÀ¢"Ó3ã“c#33s33"À¢¢6VÆbæ76W'DfÇ6R‡G&–ævÆU÷7VÖÖ'•²&WFöÖF–5÷&öÖ÷F–öâ%Ò ¢FVbFW7E÷G&–æwVÆ%÷6†F÷u÷&ö¦V7F–öåöf–Ç5ö6Æ÷6VEööåöWF†÷&—G•ö÷%öÖÆf÷&ÖVE÷&W7VÇB‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F—&V7F÷'“ ¢6†V6·ö–çBÒF‚†F—&V7F÷'’’ò'G&–ævÆRæ§6öâ ¢&6RÒ°¢'66†VÖ#¢&WF÷G&FR×v†—FV&—B×G&–æwVÆ"×6†F÷r×7WW'f—6÷"×c"À¢'†6R#¢%%Tää”är"Â'–EöÖöFVÅö6ÆÇ2#¢À¢'&öf—EöwV&çFVVB#¢fÇ6RÀ¢&æWGv÷&µö÷&FW'2#¢fÇ6RÂ'G&F–æuöWF†÷&—G’#¢fÇ6RÀ¢&ÆFW7EöÖ&¶WEö6÷VçB#¢’Â&7–6ÆU÷&W7VÇEö6÷VçB#¢‚À¢&÷÷'GVæ—G•ö6÷VçB#¢Â&æ÷F–öæÂ#¢#"À¢&–×7E÷&W6W'fUö'2#¢#""À¢&&W7E÷&W7VÇB#¢æöæRÀ¢Ğ¢6†V6·ö–çBçw&—FU÷FW‡B†§6öâæGV×2‡²¢¦&6RÂ'G&F–æuöWF†÷&—G’#¢G'VWÒ’À¢Væ6öF–æsÒ'WFbÓ‚"¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&WF†÷&—G’÷"66†VÖ"“ ¢÷G&–æwVÆ%÷6†F÷u÷7VÖÖ'’†6†V6·ö–çB¢6†V6·ö–çBçw&—FU÷FW‡B†§6öâæGV×2‡°¢¢¦&6RÀ¢&&W7E÷&W7VÇB#¢°¢'F‚#¢²%U4EB"Â%U4D2%ÒÀ¢&æWEögFW%÷F¶W%öfVW5ö'2#¢#"À¢&æWEögFW%÷&W6W'fUö'2#¢#ãR"À¢'VÆ–f–VEöf÷%÷6†F÷uöö'6W'fF–öâ#¢G'VRÀ¢'&W7VÇE÷6†#Sb#¢&"¢cBÀ¢ÒÀ¢Ò’ÂVæ6öF–æsÒ'WFbÓ‚"¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&&W7B&W7VÇB—2ÖÆf÷&ÖVB"“ ¢÷G&–æwVÆ%÷6†F÷u÷7VÖÖ'’†6†V6·ö–çB ¢FVbFW7EöfÆ÷u÷&W6V&6…÷&ö¦V7F–öåöf–Ç5ö6Æ÷6VEööåöWF†÷&—G•ö÷%÷&W7VÇB‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F—&V7F÷'“ ¢6†V6·ö–çBÒF‚†F—&V7F÷'’’ò&fÆ÷r×&W6V&6‚æ§6öâ ¢&6RÒ°¢'66†VÖ#¢&WF÷G&FR×v†—FV&—BÖfÆ÷r×&W6V&6‚×7WW'f—6÷"×c"À¢'7FGW2#¢%%Tää”är"Â&7–6ÆUö6÷VçB#¢À¢&Æ7Eö7–6ÆU÷6V6öæG2#¢"ãRÂ&Æ7EöW'&÷%ö6Æ72#¢æöæRÀ¢'WFFVEöB#¢äõræ—6öf÷&ÖB‚’À¢&æW‡E÷'VåöB#¢„äõr²F–ÖVFVÇF†Ö–çWFW3Ó3’’æ—6öf÷&ÖB‚’À¢&Æ7E÷&W7VÇB#¢°¢'&W7VÇE÷6†#Sb#¢&"¢cBÀ¢'föÆF–Æ—G•÷VÆ–f–VEö6÷VçB#¢À¢&ÆVEöÆu÷VÆ–f–VEö6÷VçB#¢À¢&—6öÆFVEöW'&÷%ö6÷VçB#¢À¢ÒÀ¢&WFöÖF–5÷&öÖ÷F–öâ#¢fÇ6RÂ&æWGv÷&µ÷&WVW7G2#¢À¢'–EöÖöFVÅö6ÆÇ2#¢Â&æWGv÷&µö÷&FW'2#¢fÇ6RÀ¢'G&F–æuöWF†÷&—G’#¢fÇ6RÀ¢Ğ¢6†V6·ö–çBçw&—FU÷FW‡B†§6öâæGV×2‡²¢¦&6RÂ&æWGv÷&µö÷&FW'2#¢G'VWÒ’À¢Væ6öF–æsÒ'WFbÓ‚"¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&WF†÷&—G’÷"66†VÖ"“ ¢öfÆ÷u÷&W6V&6…÷7VÖÖ'’†6†V6·ö–çB¢6†V6·ö–çBçw&—FU÷FW‡B†§6öâæGV×2‡°¢¢¦&6RÀ¢&Æ7E÷&W7VÇB#¢²¢¦&6U²&Æ7E÷&W7VÇB%ÒÂ'&W7VÇE÷6†#Sb#¢&&B'ÒÀ¢Ò’ÂVæ6öF–æsÒ'WFbÓ‚"¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&Æ7B&W7VÇB—2ÖÆf÷&ÖVB"“ ¢öfÆ÷u÷&W6V&6…÷7VÖÖ'’†6†V6·ö–çB¢6†V6·ö–çBçw&—FU÷FW‡B†§6öâæGV×2‡²¢¦&6RÂ&Æ7E÷&W7VÇB#¢æöæWÒ’À¢Væ6öF–æsÒ'WFbÓ‚"¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&Æ6·2&W7VÇB"“ ¢öfÆ÷u÷&W6V&6…÷7VÖÖ'’†6†V6·ö–çB ¢FVbFW7EöGFVçF–öå÷'VææW%÷&V&6W5÷&VfW&Væ6UögFW%÷v¶R‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F—&V7F÷'“ ¢&ö÷BÒF‚†F—&V7F÷'’¢÷&væ—6ÒÒ&ö÷Bò&÷&væ—6Ò ¢Öæ–fW7BÒ'V–ÆEöÖæ–fW7B€¢&ö÷CÖ÷&væ—6ÒÀ¢7–Ö&öÇ3Ò‚$%D5õU4EB"Â’À¢7&VFVEöCÔäõrÀ¢¢Ö&¶WBÒ&ö÷Bò&ÆFW7BÖÖ&¶WBæ§6öâ ¢6æ6†÷BÒ°¢'66†VÖ#¢&WF÷G&FR×v†—FV&—B×V&Æ–2×7WW'f—6÷"×c"À¢&Ö&¶WB#¢$%D5õU4EB"À¢'fVçVR#¢%t„•DT$•Eõ5õB"À¢&&–E÷&–6R#¢#“2"À¢&&–E÷VçF—G’#¢#"À¢&6µ÷&–6R#¢#“R"À¢&6µ÷VçF—G’#¢#""À¢'6÷W&6UöWfVçEöB#¢äõræ—6öf÷&ÖB‚’À¢&f–Æ&ÆUöB#¢äõræ—6öf÷&ÖB‚’À¢'V&Æ—6†VEöB#¢äõræ—6öf÷&ÖB‚’À¢'WFFUö–B#¢À¢'7G&VÕövVæW&F–öâ#¢À¢'&uöWf–FVæ6U÷&Vb#¢°¢&'F–f7Eö–B#¢&öæR"À¢'6†#Sb#¢'6†#Sc¢"²#"¢cBÀ¢'6÷W&6U÷W&’#¢'w73¢ò÷w72çv†—FV&—Bæ6öÒ÷w26&ööµF–6¶W""À¢&ö'6W'fVEöB#¢äõræ—6öf÷&ÖB‚’ç&WÆ6R‚"³£"Â%¢"’À¢'&–v‡G5ö–B#¢'v†—FV&—B×V&Æ–2×vV'6ö6¶WBÖ–çFW&æÂ×c"À¢ÒÀ¢'V&Æ–5öFFööæÇ’#¢G'VRÀ¢'G&F–æuöWF†÷&—G’#¢fÇ6RÀ¢Ğ¢Ö&¶WBçw&—FU÷FW‡B†§6öâæGV×2‡6æ6†÷B’ÂVæ6öF–æsÒ'WFbÓ‚"¢&6VÆ–æRÒÖæ–fW7E²'v÷&·7G&V×2%Õ³Ğ¢7FFU÷F‚Ò÷&væ—6Òò&6VÆ–æU²&ÖVÖ÷'•öæÖW76R%Òò&GFVçF–öâ×7FFRæ§6öâ ¢7FFU÷F‚çw&—FU÷FW‡B†§6öâæGV×2‡°¢'&VfW&Væ6U÷&–6R#¢#"À¢&æW‡E÷66†VGVÆVE÷&Wf–Wr#¢„äõr²F–ÖVFVÇF††÷W'3Ó’’æ—6öf÷&ÖB‚’À¢Ò’ÂVæ6öF–æsÒ'WFbÓ‚"¢f—'7BÒ'Våö7–6ÆR€¢÷&væ—6Õ÷&ö÷CÖ÷&væ—6ÒÀ¢Ö&¶WE÷6æ6†÷CÖÖ&¶WBÀ¢æ÷sÔäõr²F–ÖVFVÇF†Ö–ÆÆ—6V6öæG3Ó#’À¢¢&6VÆ–æU÷7FFRÒæW‡B€¢&÷rf÷"&÷r–âf—'7E²'v÷&·7G&V×2%Ò–b&÷u²'&öf–ÆUö–B%ÒÓÒ$$4TÄ”äR ¢¢6VÆbæ76W'DWVÂ†&6VÆ–æU÷7FFU²'&V6öâ%ÒÂ'7F÷ÖÆ÷72&÷VæF'’&V6†VB"¢6VÆbæ76W'DWVÂ†&6VÆ–æU÷7FFU²'&VfW&Væ6U÷&–6R%ÒÂ#“B" ¢6V6öæBÒ'Våö7–6ÆR€¢÷&væ—6Õ÷&ö÷CÖ÷&væ—6ÒÀ¢Ö&¶WE÷6æ6†÷CÖÖ&¶WBÀ¢æ÷sÔäõr²F–ÖVFVÇF‡6V6öæG3Ó’À¢¢&6VÆ–æU÷7FFRÒæW‡B€¢&÷rf÷"&÷r–â6V6öæE²'v÷&·7G&V×2%Ò–b&÷u²'&öf–ÆUö–B%ÒÓÒ$$4TÄ”äR ¢¢6VÆbæ76W'Dæ÷DWVÂ†&6VÆ–æU÷7FFU²'&V6öâ%ÒÂ'7F÷ÖÆ÷72&÷VæF'’&V6†VB" ¢FVbFW7EöGFVçF–öå÷'VææW%÷&V¦V7G5öÖæ–fW7E÷F×W&–ær‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F—&V7F÷'“ ¢&ö÷BÒF‚†F—&V7F÷'’¢'V–ÆEöÖæ–fW7B‡&ö÷C×&ö÷BÂ7–Ö&öÇ3Ò‚$%D5õU4EB"Â’Â7&VFVEöCÔäõr¢Öæ–fW7E÷F‚Ò&ö÷Bò&÷&væ—6Òæ§6öâ ¢Öæ–fW7BÒ§6öâæÆöG2†Öæ–fW7E÷F‚ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’¢Öæ–fW7E²'v÷&·7G&V×2%Õ³Õ²&Ö…÷÷6—F–öåög&7F–öâ%ÒÒ#ãS ¢Öæ–fW7E÷F‚çw&—FU÷FW‡B†§6öâæGV×2†Öæ–fW7B’ÂVæ6öF–æsÒ'WFbÓ‚"¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&F–vW7B"“ ¢'Våö7–6ÆR€¢÷&væ—6Õ÷&ö÷C×&ö÷BÀ¢Ö&¶WE÷6æ6†÷C×&ö÷Bò&æWfW"×&VBæ§6öâ"À¢æ÷sÔäõrÀ¢ ¢FVbFW7E÷W'6—7FVE÷&öf–ÆU÷F×W&–æuö—5÷&V¦V7FVB‡6VÆb“ ¢Fö7VÖVçBÒ7V2‚%D$tUEó#R"’æFö7VÖVçB‚¢Fö7VÖVçE²'&öf–ÆR%Õ²'F&vWE÷&WGW&åög&7F–öâ%ÒÒ#ã#B ¢v—F‚6VÆbæ76W'E&—6W5&VvW‚…fÇVTW'&÷"Â&ÖöF–f–VB"“ ¢v÷&·7G&VÕög&öÕöFö7VÖVçB†Fö7VÖVçB  ¦–bõöæÖUõòÓÒ%õöÖ–åõò# ¢Væ—GFW7BæÖ–â‚     
+                        "network_orders": False,
+                        "trading_authority": False,
+                    },
+                }],
+                "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
+            shadow = root / "shadow.json"
+            shadow.write_text(json.dumps({
+                "schema": "autotrade-whitebit-trend-forward-shadow-v1",
+                "status": "RUNNING",
+                "updated_at": NOW.isoformat(),
+                "market": "SOL_USDT",
+                "completed_live_bars": 2,
+                "current_equity": "1001.2",
+                "net_pnl": "1.2",
+                "return_fraction": "0.0012",
+                "max_drawdown_fraction": "0.01",
+                "quantity": "-12",
+                "holding_bars": 2,
+                "closed_cycles": 0,
+                "last_action": "HOLD_SHORT",
+                "qualification_file_sha256": "sha256:" + "3" * 64,
+                "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
+            rolling = root / "rolling.json"
+            rolling.write_text(json.dumps({
+                "schema": "autotrade-whitebit-rolling-native-alpha-v1",
+                "status": "RUNNING", "updated_at": NOW.isoformat(),
+                "cycle_count": 1, "cycles_today": 1,
+                "next_run_at": (NOW + timedelta(hours=6)).isoformat(),
+                "last_result": {"markets": {"SOL_USDT": {
+                    "evaluation": {
+                        "dataset_identity_sha256": "4" * 64,
+                        "models": {"XGBOOST": {
+                            "executed_trade_count": 1, "long_trade_count": 0,
+                            "short_trade_count": 1,
+                            "net_pnl_after_costs_quote": "-6.8",
+                            "research_gate_passed": False,
+                            "rejection_reasons": ["NO_POSITIVE_RETURN_AFTER_COSTS"],
+                        }},
+                    },
+                }}},
+                "network_orders": False, "trading_authority": False,
+                "automatic_promotion": False,
+            }), encoding="utf-8")
+            opportunity = root / "opportunity.json"
+            opportunity.write_text(json.dumps({
+                "schema": "autotrade-whitebit-opportunity-supervisor-v1",
+                "status": "RUNNING", "updated_at": NOW.isoformat(),
+                "cycle_count": 2,
+                "next_run_at": (NOW + timedelta(days=1)).isoformat(),
+                "last_result": {
+                    "selected_market_count": 2,
+                    "qualified_market_count": 0,
+                    "paid_model_calls": 0,
+                    "markets": {
+                        "XRP_USDT": {
+                            "status": "SCREENED", "rank": 1,
+                            "quote_volume_24h": "2000000",
+                            "screen": {
+                                "prospective_qualification": False,
+                                "train_survivor_count": 0,
+                                "development_survivor_count": 0,
+                                "final_consumed": False,
+                                "final_rejection_reasons": ["NO_TRAIN_SURVIVOR"],
+                                "network_orders": False,
+                                "trading_authority": False,
+                            },
+                        },
+                        "HYPE_USDT": {
+                            "status": "REJECTED_DATA", "rank": 2,
+                            "quote_volume_24h": "1000000",
+                        },
+                    },
+                    "network_orders": False,
+                    "trading_authority": False,
+                },
+                "network_orders": False, "trading_authority": False,
+                "automatic_promotion": False,
+            }), encoding="utf-8")
+            trade_flow = root / "trade-flow.json"
+            trade_flow.write_text(json.dumps({
+                "schema": "autotrade-whitebit-trade-flow-supervisor-v1",
+                "phase": "RUNNING",
+                "checkpointed_at": NOW.isoformat(),
+                "minimum_buckets": 2160,
+                "paid_model_calls": 0,
+                "results": {
+                    "BTC_USDT": {
+                        "status": "WAITING_FOR_CAUSAL_BUCKETS",
+                        "available_causal_buckets": 321,
+                        "prospective_qualification": False,
+                        "final_consumed": False,
+                        "result_sha256": "5" * 64,
+                    },
+                    "SOL_USDT": {
+                        "status": "REJECTED",
+                        "available_causal_buckets": 2160,
+                        "prospective_qualification": False,
+                        "final_consumed": False,
+                        "result_sha256": "6" * 64,
+                    },
+                },
+                "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
+            flow_research = root / "flow-research.json"
+            flow_research.write_text(json.dumps({
+                "schema": "autotrade-whitebit-flow-research-supervisor-v1",
+                "status": "RUNNING", "updated_at": NOW.isoformat(),
+                "cycle_count": 3, "last_cycle_seconds": 15.25,
+                "last_error_class": None,
+                "next_run_at": (NOW + timedelta(minutes=30)).isoformat(),
+                "last_result": {
+                    "result_sha256": "a" * 64,
+                    "volatility_qualified_count": 0,
+                    "lead_lag_qualified_count": 0,
+                    "isolated_error_count": 0,
+                    "evidence_path": "must-not-be-projected.json",
+                },
+                "automatic_promotion": False, "network_requests": 0,
+                "paid_model_calls": 0, "network_orders": False,
+                "trading_authority": False,
+            }), encoding="utf-8")
+            maker = root / "maker.json"
+            maker.write_text(json.dumps({
+                "schema": "autotrade-whitebit-maker-shadow-v1",
+                "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
+                "market": "PEPE_USDT", "settled_cycles": 2,
+                "positive_cycles": 1, "net_pnl_quote": "-0.15",
+                "research_phase": "RESEARCH_FILTERED", "wave_cycles": 1,
+                "wave_positive_cycles": 0, "wave_net_pnl_quote": "-0.25",
+                "last_quote_admission": {
+                    "admitted": False, "reason": "DIRECTIONAL_FLOW",
+                    "network_orders": False, "trading_authority": False,
+                },
+                "open_quote": {
+                    "status": "OPEN", "age_seconds": 12,
+                    "bid_filled": True, "ask_filled": False,
+                    "quote_sha256": "7" * 64,
+                    "network_orders": False, "trading_authority": False,
+                },
+                "last_settled": {
+                    "outcome": "BID_ONLY_FORCED_EXIT",
+                    "net_pnl_quote": "-0.25", "result_sha256": "8" * 64,
+                    "network_orders": False, "trading_authority": False,
+                },
+                "profit_guaranteed": False, "paid_model_calls": 0,
+                "network_orders": False, "trading_authority": False,
+            }), encoding="utf-8")
+            maker_ena = root / "maker-ena.json"
+            maker_ena.write_text(json.dumps({
+                "schema": "autotrade-whitebit-maker-shadow-v1",
+                "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
+                "market": "ENA_USDT", "settled_cycles": 0,
+                "positive_cycles": 0, "net_pnl_quote": "0",
+                "research_phase": "DISCOVERY", "wave_cycles": 0,
+                "wave_positive_cycles": 0, "wave_net_pnl_quote": "0",
+                "open_quote": None, "last_settled": None,
+                "profit_guaranteed": False, "paid_model_calls": 0,
+                "network_orders": False, "trading_authority": False,
+            }), encoding="utf-8")
+            triangle = root / "triangle.json"
+            triangle.write_text(json.dumps({
+                "schema": "autotrade-whitebit-triangular-shadow-supervisor-v1",
+                "phase": "RUNNING", "checkpointed_at": NOW.isoformat(),
+                "latest_market_count": 9, "cycle_result_count": 8,
+                "opportunity_count": 0, "notional": "100",
+                "impact_reserve_bps": "2",
+                "best_result": {
+                    "path": ["USDT", "USDC", "USD", "USDT"],
+                    "net_after_taker_fees_bps": "-29.9612337330",
+                    "net_after_reserve_bps": "-31.9612337330",
+                    "qualified_for_shadow_observation": False,
+                    "result_sha256": "9" * 64,
+                },
+                "profit_guaranteed": False, "paid_model_calls": 0,
+                "network_orders": False, "trading_authority": False,
+            }), encoding="utf-8")
+            enriched = run_cycle(
+                organism_root=organism,
+                market_snapshot=market,
+                now=NOW + timedelta(milliseconds=30),
+                learning_fleet_checkpoint=fleet,
+                forward_shadow_checkpoint=shadow,
+                rolling_alpha_checkpoint=rolling,
+                opportunity_checkpoint=opportunity,
+                trade_flow_checkpoint=trade_flow,
+                flow_research_checkpoint=flow_research,
+                maker_shadow_checkpoint=maker,
+                ena_maker_shadow_checkpoint=maker_ena,
+                triangular_shadow_checkpoint=triangle,
+            )
+            evidence = enriched["organism_evidence"]
+            self.assertEqual(evidence["learning_fleet"]["completed_episodes"], 12)
+            self.assertEqual(evidence["learning_fleet"]["phase_counts"], {"EVALUATING": 1})
+            self.assertEqual(evidence["forward_shadow"]["net_pnl"], "1.2")
+            self.assertEqual(evidence["forward_shadow"]["quantity"], "-12")
+            self.assertFalse(evidence["forward_shadow"]["trading_authority"])
+            alpha = evidence["rolling_native_alpha"]
+            self.assertEqual(alpha["cycle_count"], 1)
+            self.assertEqual(alpha["passed_model_count"], 0)
+            self.assertEqual(alpha["markets"][0]["models"][0]["short"], 1)
+            self.assertEqual(
+                alpha["markets"][0]["models"][0]["net_pnl_after_costs_quote"], "-6.8"
+            )
+            self.assertFalse(alpha["automatic_promotion"])
+            opportunity_summary = evidence["opportunity_screen"]
+            self.assertEqual(opportunity_summary["selected_market_count"], 2)
+            self.assertEqual(opportunity_summary["qualified_market_count"], 0)
+            self.assertEqual(opportunity_summary["rejected_data_count"], 1)
+            self.assertFalse(opportunity_summary["markets"][1]["prospective_qualification"])
+            self.assertFalse(opportunity_summary["automatic_promotion"])
+            trade_flow_summary = evidence["trade_flow_screen"]
+            self.assertEqual(trade_flow_summary["minimum_buckets"], 2160)
+            self.assertEqual(trade_flow_summary["market_count"], 2)
+            self.assertEqual(trade_flow_summary["qualified_market_count"], 0)
+            self.assertEqual(
+                trade_flow_summary["markets"][0]["available_causal_buckets"], 321
+            )
+            self.assertFalse(trade_flow_summary["automatic_promotion"])
+            self.assertFalse(trade_flow_summary["trading_authority"])
+            flow_research_summary = evidence["flow_research_screen"]
+            self.assertEqual(flow_research_summary["cycle_count"], 3)
+            self.assertEqual(flow_research_summary["last_cycle_seconds"], "15.25")
+            self.assertEqual(
+                flow_research_summary["last_result"]["result_sha256"], "a" * 64
+            )
+            self.assertEqual(
+                flow_research_summary["last_result"]["isolated_error_count"], 0
+            )
+            self.assertNotIn(
+                "evidence_path", flow_research_summary["last_result"]
+            )
+            self.assertFalse(flow_research_summary["automatic_promotion"])
+            self.assertFalse(flow_research_summary["trading_authority"])
+            maker_summary = evidence["maker_shadow"]
+            self.assertEqual(maker_summary["settled_cycles"], 2)
+            self.assertEqual(maker_summary["positive_cycles"], 1)
+            self.assertEqual(maker_summary["net_pnl_quote"], "-0.15")
+            self.assertEqual(maker_summary["research_phase"], "RESEARCH_FILTERED")
+            self.assertEqual(maker_summary["wave_cycles"], 1)
+            self.assertEqual(
+                maker_summary["last_quote_admission"]["reason"], "DIRECTIONAL_FLOW"
+            )
+            self.assertTrue(maker_summary["open_quote"]["bid_filled"])
+            self.assertEqual(
+                maker_summary["last_settled"]["outcome"], "BID_ONLY_FORCED_EXIT"
+            )
+            self.assertFalse(maker_summary["automatic_promotion"])
+            ena_summary = evidence["ena_maker_shadow"]
+            self.assertEqual(ena_summary["market"], "ENA_USDT")
+            self.assertEqual(ena_summary["research_phase"], "DISCOVERY")
+            self.assertEqual(ena_summary["net_pnl_quote"], "0")
+            triangle_summary = evidence["stable_fiat_triangular_shadow"]
+            self.assertEqual(triangle_summary["latest_market_count"], 9)
+            self.assertEqual(triangle_summary["cycle_result_count"], 8)
+            self.assertEqual(triangle_summary["opportunity_count"], 0)
+            self.assertEqual(
+                triangle_summary["best_result"]["path"],
+                ["USDT", "USDC", "USD", "USDT"],
+            )
+            self.assertEqual(
+                triangle_summary["best_result"]["net_after_reserve_bps"],
+                "-31.9612337330",
+            )
+            self.assertFalse(triangle_summary["automatic_promotion"])
+
+    def test_triangular_shadow_projection_fails_closed_on_authority_or_malformed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "triangle.json"
+            base = {
+                "schema": "autotrade-whitebit-triangular-shadow-supervisor-v1",
+                "phase": "RUNNING", "paid_model_calls": 0,
+                "profit_guaranteed": False,
+                "network_orders": False, "trading_authority": False,
+                "latest_market_count": 9, "cycle_result_count": 8,
+                "opportunity_count": 0, "notional": "100",
+                "impact_reserve_bps": "2",
+                "best_result": None,
+            }
+            checkpoint.write_text(json.dumps({**base, "trading_authority": True}),
+                                  encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "authority or schema"):
+                _triangular_shadow_summary(checkpoint)
+            checkpoint.write_text(json.dumps({
+                **base,
+                "best_result": {
+                    "path": ["USDT", "USDC"],
+                    "net_after_taker_fees_bps": "1",
+                    "net_after_reserve_bps": "0.5",
+                    "qualified_for_shadow_observation": True,
+                    "result_sha256": "a" * 64,
+                },
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "best result is malformed"):
+                _triangular_shadow_summary(checkpoint)
+
+    def test_flow_research_projection_fails_closed_on_authority_or_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "flow-research.json"
+            base = {
+                "schema": "autotrade-whitebit-flow-research-supervisor-v1",
+                "status": "RUNNING", "cycle_count": 1,
+                "last_cycle_seconds": 12.5, "last_error_class": None,
+                "updated_at": NOW.isoformat(),
+                "next_run_at": (NOW + timedelta(minutes=30)).isoformat(),
+                "last_result": {
+                    "result_sha256": "a" * 64,
+                    "volatility_qualified_count": 0,
+                    "lead_lag_qualified_count": 0,
+                    "isolated_error_count": 0,
+                },
+                "automatic_promotion": False, "network_requests": 0,
+                "paid_model_calls": 0, "network_orders": False,
+                "trading_authority": False,
+            }
+            checkpoint.write_text(json.dumps({**base, "network_orders": True}),
+                                  encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "authority or schema"):
+                _flow_research_summary(checkpoint)
+            checkpoint.write_text(json.dumps({
+                **base,
+                "last_result": {**base["last_result"], "result_sha256": "bad"},
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "last result is malformed"):
+                _flow_research_summary(checkpoint)
+            checkpoint.write_text(json.dumps({**base, "last_result": None}),
+                                  encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lacks result"):
+                _flow_research_summary(checkpoint)
+
+    def test_attention_runner_rebases_reference_after_wake(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            organism = root / "organism"
+            manifest = build_manifest(
+                root=organism,
+                symbols=("BTC_USDT",),
+                created_at=NOW,
+            )
+            market = root / "latest-market.json"
+            snapshot = {
+                "schema": "autotrade-whitebit-public-supervisor-v1",
+                "market": "BTC_USDT",
+                "venue": "WHITEBIT_SPOT",
+                "bid_price": "93",
+                "bid_quantity": "1",
+                "ask_price": "95",
+                "ask_quantity": "2",
+                "source_event_at": NOW.isoformat(),
+                "available_at": NOW.isoformat(),
+                "published_at": NOW.isoformat(),
+                "update_id": 1,
+                "stream_generation": 1,
+                "raw_evidence_ref": {
+                    "artifact_id": "one",
+                    "sha256": "sha256:" + "1" * 64,
+                    "source_uri": "wss://wss.whitebit.com/ws#bookTicker",
+                    "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                    "rights_id": "whitebit-public-websocket-internal-v1",
+                },
+                "public_data_only": True,
+                "trading_authority": False,
+            }
+            market.write_text(json.dumps(snapshot), encoding="utf-8")
+            baseline = manifest["workstreams"][0]
+            state_path = organism / baseline["memory_namespace"] / "attention-state.json"
+            state_path.write_text(json.dumps({
+                "reference_price": "100",
+                "next_scheduled_review": (NOW + timedelta(hours=1)).isoformat(),
+            }), encoding="utf-8")
+            first = run_cycle(
+                organism_root=organism,
+                market_snapshot=market,
+                now=NOW + timedelta(milliseconds=20),
+            )
+            baseline_state = next(
+                row for row in first["workstreams"] if row["profile_id"] == "BASELINE"
+            )
+            self.assertEqual(baseline_state["reason"], "stop-loss boundary reached")
+            self.assertEqual(baseline_state["reference_price"], "94")
+
+            second = run_cycle(
+                organism_root=organism,
+                market_snapshot=market,
+                now=NOW + timedelta(seconds=1),
+            )
+            baseline_state = next(
+                row for row in second["workstreams"] if row["profile_id"] == "BASELINE"
+            )
+            self.assertNotEqual(baseline_state["reason"], "stop-loss boundary reached")
+
+    def test_attention_runner_rejects_manifest_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build_manifest(root=root, symbols=("BTC_USDT",), created_at=NOW)
+            manifest_path = root / "organism.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["workstreams"][0]["max_position_fraction"] = "0.50"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "digest"):
+                run_cycle(
+                    organism_root=root,
+                    market_snapshot=root / "never-read.json",
+                    now=NOW,
+                )
+
+    def test_persisted_profile_tampering_is_rejected(self):
+        document = spec("TARGET_25").document()
+        document["profile"]["target_return_fraction"] = "0.24"
+        with self.assertRaisesRegex(ValueError, "modified"):
+            workstream_from_document(document)
+
+
+if __name__ == "__main__":
+    unittest.main()

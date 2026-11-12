@@ -24,7 +24,7 @@ from research.autotrade_research.integrations.whitebit_public import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 from research.autotrade_research.strategies.maker_shadow import (
-    SCHEMA, advance_evidence_wave, evaluate_quote, open_quote,
+    SCHEMA, advance_evidence_wave, evaluate_quote, open_quote, quote_admission,
 )
 
 
@@ -101,6 +101,16 @@ def main(argv=None) -> int:
                         "wave_net_pnl_quote": str(restored.get("net_pnl_quote", "0")),
                         "wave_outcomes": {},
                     })
+                if (state.get("research_phase") == "RESEARCH_ONLY"
+                        and (state.get("latest_wave_analysis") or {}).get("stage")
+                        in {"DISCOVERY", "EVALUATING"}
+                        and not state.get("adaptive_filter_version")):
+                    state.update({
+                        "research_phase": "RESEARCH_FILTERED",
+                        "wave_cycles": 0, "wave_positive_cycles": 0,
+                        "wave_net_pnl_quote": "0", "wave_outcomes": {},
+                    })
+                state["adaptive_filter_version"] = "NEUTRAL_FLOW_V1"
             client = WhiteBitPublicClient()
             instruments = [item for item in client.instruments() if item.market == market]
             if len(instruments) != 1:
@@ -122,9 +132,16 @@ def main(argv=None) -> int:
                     batch = client.recent_trades(market)
                     current = state.get("open_quote")
                     if current is None:
-                        state["open_quote"] = open_quote(
-                            book, instrument, batch, notional_quote=args.notional_quote,
-                        )
+                        filtered = "FILTERED" in str(state.get("research_phase"))
+                        admission = quote_admission(
+                            book, instrument, batch,
+                            adverse_selection_reserve_bps=args.forced_exit_impact_bps,
+                        ) if filtered else {"admitted": True, "reason": "UNFILTERED_DISCOVERY"}
+                        state["last_quote_admission"] = admission
+                        if admission["admitted"]:
+                            state["open_quote"] = open_quote(
+                                book, instrument, batch, notional_quote=args.notional_quote,
+                            )
                     else:
                         evaluated = evaluate_quote(
                             current, book, batch, now=datetime.now(timezone.utc),
@@ -149,8 +166,7 @@ def main(argv=None) -> int:
                             state["last_settled"] = evaluated
                             state["open_quote"] = (
                                 None if state["research_phase"] == "RESEARCH_ONLY"
-                                else open_quote(book, instrument, batch,
-                                                notional_quote=args.notional_quote)
+                                else None
                             )
                         else:
                             state["open_quote"] = evaluated
@@ -183,5 +199,6 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

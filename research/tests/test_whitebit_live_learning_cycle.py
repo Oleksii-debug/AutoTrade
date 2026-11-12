@@ -67,6 +67,21 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertFalse(cycle["evaluation"]["qualifies_for_research_simulation"])
             self.assertEqual(learner.status()["episode_count"], 2)
 
+    def test_nonpositive_train_families_are_not_frozen_as_candidates(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(root)
+            for index in range(1, 8):
+                self.tick(learner, index, 100)
+            cycle = learner.status()["learning_cycle"]
+            self.assertEqual(cycle["phase"], "COOLDOWN")
+            self.assertEqual(cycle["reason"], "NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS")
+            self.assertTrue(all(Decimal(value) <= 0 for value in cycle["train_scores"].values()))
+            self.assertIsNone(cycle["candidate_version"])
+            self.assertFalse(cycle["champion_promotion"])
+            with closing(sqlite3.connect(learner.database)) as con:
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM models").fetchone()[0], 1)
+
     def test_cost_hurdle_abstains_and_drawdown_pauses_before_new_action(self):
         with TemporaryDirectory() as tmp:
             learner = self.learner(Path(tmp), cycle_episodes=100, max_drawdown_usdt="0.1")

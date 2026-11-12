@@ -28,19 +28,21 @@ class CourseProcessDisciplineTests(unittest.TestCase):
         self.assertEqual(len(packet["source"]["index_sha256"]), 64)
         self.assertEqual(len(packet["packet_sha256"]), 64)
 
-    def test_three_losses_force_pause_and_analysis_without_strategy_mutation(self):
+    def test_first_loss_ends_session_for_analysis_without_strategy_mutation(self):
         result = review_course_episodes([{"market": "BTC_PERP", "episodes": [
-            episode(0, "-10"), episode(1, "-10"), episode(2, "-10")]}])
+            episode(0, "-10")]}])
         self.assertEqual(result["phase"], "PAUSED_ANALYZING")
         self.assertIn("CONSECUTIVE_LOSS_PAUSE_REQUIRED", result["pause_reasons"])
         self.assertEqual(len(result["loss_streak_pause_events"]), 1)
+        self.assertEqual(result["policy"]["maximum_consecutive_losses"], 1)
+        self.assertEqual(result["policy"]["maximum_weekly_loss_fraction"], "0.03")
         self.assertTrue(result["same_frozen_strategy_required"])
         self.assertFalse(result["automatic_strategy_mutation"])
         self.assertFalse(result["development_consumed"])
 
     def test_complete_bounded_series_is_eligible_to_continue(self):
         result = review_course_episodes([{"market": "ETH_PERP", "episodes": [
-            episode(0, "5"), episode(1, "-2"), episode(2, "5")]}])
+            episode(0, "5"), episode(1, "5"), episode(2, "5")]}])
         self.assertEqual(result["phase"], "RUNNING_ELIGIBLE")
         self.assertEqual(result["pause_reasons"], [])
         self.assertTrue(result["journal_complete"])

@@ -106,9 +106,10 @@ def _decimal(value: object, field: str) -> Decimal:
 
 
 def review_course_episodes(
-    sources: list[dict], *, maximum_consecutive_losses: int = 3,
+    sources: list[dict], *, maximum_consecutive_losses: int = 1,
     maximum_trades_per_market_day: int = 4,
     maximum_daily_loss_fraction: Decimal | str = Decimal("0.02"),
+    maximum_weekly_loss_fraction: Decimal | str = Decimal("0.03"),
 ) -> dict:
     """Review closed TRAIN episodes under the course's process rules.
 
@@ -124,6 +125,9 @@ def review_course_episodes(
     daily_loss = _decimal(maximum_daily_loss_fraction, "maximum daily loss")
     if not Decimal("0") < daily_loss <= Decimal("0.20"):
         raise ValueError("maximum daily loss must be within 0..0.20")
+    weekly_loss = _decimal(maximum_weekly_loss_fraction, "maximum weekly loss")
+    if not daily_loss <= weekly_loss <= Decimal("0.50"):
+        raise ValueError("maximum weekly loss must be at least daily and at most 0.50")
     if type(sources) is not list:
         raise TypeError("episode sources must be a list")
 
@@ -171,6 +175,8 @@ def review_course_episodes(
     maximum_observed_streak = 0
     daily: dict[tuple[str, str], dict] = defaultdict(
         lambda: {"trades": 0, "net_return": Decimal("0")})
+    weekly: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"trades": 0, "net_return": Decimal("0")})
     for market, episodes in sorted(by_market.items()):
         streak = 0
         trigger_open = False
@@ -178,6 +184,10 @@ def review_course_episodes(
             key = (market, episode["exited_at"].date().isoformat())
             daily[key]["trades"] += 1
             daily[key]["net_return"] += episode["return_fraction"]
+            iso_year, iso_week, _ = episode["exited_at"].isocalendar()
+            week_key = (market, f"{iso_year:04d}-W{iso_week:02d}")
+            weekly[week_key]["trades"] += 1
+            weekly[week_key]["net_return"] += episode["return_fraction"]
             if episode["profitable"]:
                 streak = 0
                 trigger_open = False
@@ -202,6 +212,13 @@ def review_course_episodes(
                 "trades": value["trades"],
                 "net_return_fraction": str(value["net_return"]),
                 "reasons": reasons})
+    weekly_triggers = []
+    for (market, week), value in sorted(weekly.items()):
+        if value["net_return"] <= -weekly_loss:
+            weekly_triggers.append({"market": market, "utc_week": week,
+                "trades": value["trades"],
+                "net_return_fraction": str(value["net_return"]),
+                "reasons": ["WEEKLY_LOSS_BOUND_REACHED"]})
 
     reasons = []
     if incomplete:
@@ -210,6 +227,8 @@ def review_course_episodes(
         reasons.append("CONSECUTIVE_LOSS_PAUSE_REQUIRED")
     if daily_triggers:
         reasons.append("DAILY_PROCESS_BOUND_REACHED")
+    if weekly_triggers:
+        reasons.append("WEEKLY_PROCESS_BOUND_REACHED")
     if not episode_count:
         phase = "COLLECTING"
     elif reasons:
@@ -227,11 +246,13 @@ def review_course_episodes(
         "maximum_observed_consecutive_losses": maximum_observed_streak,
         "loss_streak_pause_events": streak_triggers,
         "daily_process_events": daily_triggers,
+        "weekly_process_events": weekly_triggers,
         "pause_reasons": reasons,
         "policy": {
             "maximum_consecutive_losses": maximum_consecutive_losses,
             "maximum_trades_per_market_day": maximum_trades_per_market_day,
             "maximum_daily_loss_fraction": str(daily_loss),
+            "maximum_weekly_loss_fraction": str(weekly_loss),
         },
         "resume_condition": (
             "REVIEW_CHECKPOINT_WRITTEN_AND_COOLDOWN_ELAPSED"

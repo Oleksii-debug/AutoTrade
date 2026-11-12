@@ -28,6 +28,32 @@ from research.autotrade_research.strategies.maker_shadow import (
 )
 
 
+def _record_quote_admission(
+    state: dict[str, object], admission: dict[str, object],
+) -> dict[str, object]:
+    """Persist bounded quote-admission evidence across restarts."""
+    if type(state) is not dict or type(admission) is not dict:
+        raise TypeError("maker admission state must be dictionaries")
+    reason = admission.get("reason")
+    admitted = admission.get("admitted")
+    if type(reason) is not str or not reason or type(admitted) is not bool:
+        raise ValueError("maker admission result is invalid")
+    counts = dict(state.get("quote_admission_counts", {}))
+    if any(type(key) is not str or type(value) is not int or value < 0
+           for key, value in counts.items()):
+        raise ValueError("maker admission counters are invalid")
+    counts[reason] = int(counts.get(reason, 0)) + 1
+    attempts = int(state.get("quote_admission_attempts", 0)) + 1
+    admitted_count = int(state.get("quote_admitted_count", 0)) + int(admitted)
+    return {
+        **state,
+        "last_quote_admission": admission,
+        "quote_admission_attempts": attempts,
+        "quote_admitted_count": admitted_count,
+        "quote_admission_counts": dict(sorted(counts.items())),
+    }
+
+
 def _append(path: Path, value: dict[str, object]) -> None:
     if path.exists() and path.stat().st_size >= 8 * 1024 * 1024:
         archive = path.with_suffix(".jsonl.1")
@@ -162,7 +188,7 @@ def main(argv=None) -> int:
                             book, instrument, batch,
                             adverse_selection_reserve_bps=args.forced_exit_impact_bps,
                         ) if filtered else {"admitted": True, "reason": "UNFILTERED_DISCOVERY"}
-                        state["last_quote_admission"] = admission
+                        state = _record_quote_admission(state, admission)
                         if admission["admitted"]:
                             state["open_quote"] = open_quote(
                                 book, instrument, batch, notional_quote=args.notional_quote,

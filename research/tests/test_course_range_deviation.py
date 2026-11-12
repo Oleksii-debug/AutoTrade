@@ -94,6 +94,28 @@ class CourseRangeDeviationTests(unittest.TestCase):
                 self.assertEqual(episode["retest_confirmed_at"], values[2]["closed_at"].isoformat())
                 self.assertEqual(episode["entered_at"], values[3]["opened_at"].isoformat())
 
+    def test_opposing_boundary_target_is_fixed_from_prior_range(self):
+        from dataclasses import replace
+        cfg = RangeDeviationConfiguration(minimum_range_atr="1", minimum_reaction_atr="0.5")
+        values = range_bars(deviation=True)
+        for side in (1, -1):
+            with self.subTest(side=side):
+                data = [dict(row) for row in values]
+                if side < 0:
+                    for row in data:
+                        high, low = Decimal(row["high"]), Decimal(row["low"])
+                        row.update(open=str(200 - Decimal(row["open"])),
+                                   close=str(200 - Decimal(row["close"])),
+                                   high=str(200 - low), low=str(200 - high))
+                baseline = detect_deviation(data, cfg)
+                candidate = detect_deviation(data, replace(cfg, target_mode="OPPOSITE_BOUNDARY"))
+                self.assertEqual(candidate["direction"], side)
+                boundary = "range_upper" if side > 0 else "range_lower"
+                self.assertEqual(candidate["target"], candidate[boundary])
+                self.assertEqual(baseline["target"], baseline["range_midpoint"])
+                self.assertEqual(candidate["stop"], baseline["stop"])
+                self.assertEqual(candidate["shift_level"], baseline["shift_level"])
+
     def test_no_sweep_means_no_trade(self):
         result = simulate(range_bars(300), configuration=RangeDeviationConfiguration(
             range_lookback=96, minimum_range_atr="1", maximum_range_atr="20"))

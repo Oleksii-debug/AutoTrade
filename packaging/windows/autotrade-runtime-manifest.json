@@ -600,6 +600,22 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-course-research",
+      "script": "tools/run_whitebit_course_supervisor.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-course-research-v1-20261112",
+        "--bars", "20000",
+        "--interval-seconds", "21600",
+        "--max-cycles-per-utc-day", "4",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-course-research-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-course-research-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-course-research-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }

@@ -377,3 +377,53 @@ def test_decision_journal_is_append_only_and_secret_free(tmp_path):
     lines = target.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert '"bar":1' in lines[0] and '"bar":2' in lines[1]
+
+
+def test_main_records_shared_portfolio_in_existing_checkpoint(tmp_path, monkeypatch):
+    boundary = datetime(2026, 11, 12, 18, tzinfo=UTC)
+    now = boundary + timedelta(seconds=3)
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    state = _initial(int(boundary.timestamp()) - 1800, boundary - timedelta(minutes=30))
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(json.dumps({"state": state}), encoding="utf-8")
+    module = "tools.run_whitebit_subhour_forward_shadow"
+    monkeypatch.setattr(f"{module}.datetime", FixedClock)
+    monkeypatch.setattr(f"{module}.WhiteBitPublicClient", lambda: object())
+    monkeypatch.setattr(f"{module}._bars", lambda *_: _flat_bars(boundary - timedelta(minutes=15)))
+    monkeypatch.setattr(f"{module}.collect_market_context",
+                        lambda: {"decision": "ALLOW", "evidence_sha256": "news"})
+    calls = []
+
+    def quote(_):
+        calls.append(now)
+        return {"bid": Decimal("99.99"), "ask": Decimal("100.01"),
+                "source_sha256": "new-market-quote", "received_at": now.isoformat()}
+
+    monkeypatch.setattr(f"{module}._quote", quote)
+    assert main(["--state-dir", str(tmp_path), "--depth-database", str(tmp_path / "depth"),
+                 "--stop-file", str(tmp_path / "stop"), "--once"]) == 0
+    saved = json.loads(checkpoint.read_bytes())
+    record = json.loads((tmp_path / "decisions.jsonl").read_bytes())
+    portfolio = saved["state"]["portfolio_observer"]
+    assert len(calls) == 1
+    assert portfolio["queued"] == record["portfolio_observer"]["queued"]
+    assert portfolio["queued"]["action"] == "HOLD"
+    assert portfolio["queued"]["planned_entry_epoch"] == int(boundary.timestamp()) + 900
+    assert portfolio["pending"] is None
+    assert saved["state"]["balance"] == "1000"
+
+
+def test_portfolio_checkpoint_schema_error_does_not_mutate_shadow_state():
+    from tools.run_whitebit_subhour_forward_shadow import _record_portfolio_observation
+    now = datetime(2026, 11, 12, 18, tzinfo=UTC)
+    state = _initial(int(now.timestamp()) - 900, now)
+    state["portfolio_observer"] = "invalid"
+    before = json.loads(json.dumps(state))
+    assert _record_portfolio_observation(state, {"observed_at": now.isoformat()}, now=now) == {
+        "error_class": "PORTFOLIO_CHECKPOINT_SCHEMA_MISMATCH"}
+    assert state == before

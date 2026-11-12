@@ -301,13 +301,61 @@ def _trade_flow_summary(path: Path) -> dict[str, object]:
     }
 
 
+def _maker_shadow_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "NOT_AVAILABLE"}
+    document = _read(path, maximum_bytes=4_000_000)
+    if (type(document) is not dict
+            or document.get("schema") != "autotrade-whitebit-maker-shadow-v1"
+            or document.get("network_orders") is not False
+            or document.get("trading_authority") is not False
+            or int(document.get("paid_model_calls", -1)) != 0):
+        raise ValueError("maker-shadow checkpoint authority or schema differs")
+    opened = document.get("open_quote")
+    if opened is not None and (type(opened) is not dict
+                               or opened.get("network_orders") is not False
+                               or opened.get("trading_authority") is not False):
+        raise ValueError("maker-shadow open quote authority differs")
+    settled = document.get("last_settled")
+    if settled is not None and (type(settled) is not dict
+                                or settled.get("network_orders") is not False
+                                or settled.get("trading_authority") is not False):
+        raise ValueError("maker-shadow result authority differs")
+    return {
+        "status": str(document.get("phase", "UNKNOWN")),
+        "checkpointed_at": document.get("checkpointed_at"),
+        "market": document.get("market"),
+        "settled_cycles": int(document.get("settled_cycles", 0)),
+        "positive_cycles": int(document.get("positive_cycles", 0)),
+        "net_pnl_quote": document.get("net_pnl_quote"),
+        "open_quote": None if opened is None else {
+            "status": opened.get("status"),
+            "age_seconds": opened.get("age_seconds"),
+            "bid_filled": opened.get("bid_filled") is True,
+            "ask_filled": opened.get("ask_filled") is True,
+            "quote_sha256": opened.get("quote_sha256"),
+        },
+        "last_settled": None if settled is None else {
+            "outcome": settled.get("outcome"),
+            "net_pnl_quote": settled.get("net_pnl_quote"),
+            "result_sha256": settled.get("result_sha256"),
+        },
+        "profit_guaranteed": False,
+        "paid_model_calls": 0,
+        "network_orders": False,
+        "trading_authority": False,
+        "automatic_promotion": False,
+    }
+
+
 def run_cycle(*, organism_root: Path, market_snapshot: Path,
               now: datetime | None = None,
               learning_fleet_checkpoint: Path | None = None,
               forward_shadow_checkpoint: Path | None = None,
               rolling_alpha_checkpoint: Path | None = None,
               opportunity_checkpoint: Path | None = None,
-              trade_flow_checkpoint: Path | None = None) -> dict[str, object]:
+              trade_flow_checkpoint: Path | None = None,
+              maker_shadow_checkpoint: Path | None = None) -> dict[str, object]:
     manifest = _read(organism_root / "organism.json")
     if (type(manifest) is not dict or manifest.get("schema") != SCHEMA
             or type(manifest.get("workstreams")) is not list
@@ -410,6 +458,9 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
     trade_flow_path = trade_flow_checkpoint or (
         runtime_root / "whitebit-trade-flow-screen-v1-20261112" / "checkpoint.json"
     )
+    maker_shadow_path = maker_shadow_checkpoint or (
+        runtime_root / "whitebit-pepe-maker-shadow-v1-20261112" / "checkpoint.json"
+    )
     report = {
         "schema": SCHEMA,
         "status": "ATTENTION_CYCLE_COMPLETE",
@@ -425,6 +476,7 @@ def run_cycle(*, organism_root: Path, market_snapshot: Path,
             "rolling_native_alpha": _rolling_alpha_summary(rolling_path),
             "opportunity_screen": _opportunity_summary(opportunity_path),
             "trade_flow_screen": _trade_flow_summary(trade_flow_path),
+            "maker_shadow": _maker_shadow_summary(maker_shadow_path),
         },
         "network_orders": False,
         "trading_authority": False,
@@ -495,5 +547,6 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

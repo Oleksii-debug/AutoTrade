@@ -138,7 +138,7 @@ def predict_model_artifact(data: bytes, *, expected_sha256: str, features) -> np
     backend, native, training = document["backend"], document["native"], document["training"]
     try:
         values = np.asarray(features, dtype=np.float64)
-        if (values.ndim != 2 or not 1 <= len(values) <= 4096 or
+        if (values.ndim != 2 or not 1 <= len(values) <= 20_000 or
                 values.shape[1] != training["lookback"] or not np.isfinite(values).all() or
                 np.max(np.abs(values)) > 10):
             raise AlphaInputError("bounded model feature matrix required")
@@ -219,3 +219,4 @@ def _predict_dlinear(native: dict, features: np.ndarray, lookback: int) -> np.nd
             return prediction.numpy().reshape(-1) * normalizers["yscale"] + normalizers["ymean"]
     finally:
         torch.set_num_threads(old_threads)
+

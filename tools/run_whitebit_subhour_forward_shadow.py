@@ -44,6 +44,7 @@ from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurat
 SCHEMA = "autotrade-whitebit-subhour-forward-shadow-v1"
 MARKET = "SOL_PERP"
 LEARNING_MARKETS = ("BTC_PERP", "ETH_PERP")
+COST_EVIDENCE_MARKETS = ("BCH_PERP", "NEAR_PERP", "SUI_PERP")
 STEP_SECONDS = 900
 MAX_ENTRY_DELAY = timedelta(seconds=90)
 PROSPECTIVE_WAVE_CYCLES = 5
@@ -72,7 +73,7 @@ def _bars(client: WhiteBitPublicClient, now: datetime, limit: int = 250) -> list
 def _quote(client: WhiteBitPublicClient) -> dict:
     quotes = {}
     for row in client.futures_markets():
-        if row.market not in (MARKET, *LEARNING_MARKETS):
+        if row.market not in (MARKET, *LEARNING_MARKETS, *COST_EVIDENCE_MARKETS):
             continue
         bid, ask = Decimal(row.bid), Decimal(row.ask)
         if bid <= 0 or ask <= bid:
@@ -85,8 +86,19 @@ def _quote(client: WhiteBitPublicClient) -> dict:
             "received_at": row.received_at.isoformat(), "source_sha256": row.digest}
     if MARKET not in quotes:
         raise PublicDataError("FUTURES_MARKET_NOT_AVAILABLE")
-    primary = quotes.pop(MARKET)
-    return {**primary, "learning_quotes": quotes}
+    cost_quotes = {}
+    for market in COST_EVIDENCE_MARKETS:
+        if market not in quotes:
+            continue
+        quote = quotes[market]
+        cost_quotes[market] = {
+            "bid": str(quote["bid"]), "ask": str(quote["ask"]),
+            "spread_bps": str((quote["ask"] - quote["bid"]) / quote["mid"] * 10000),
+            "received_at": quote["received_at"], "source_sha256": quote["source_sha256"],
+        }
+    return {**quotes[MARKET], "observed_cost_quotes": cost_quotes,
+            "learning_quotes": {market: quotes[market] for market in LEARNING_MARKETS
+                                if market in quotes}}
 
 
 def _l2_confirmation(path: Path, direction: str, now_epoch: int) -> dict:
@@ -192,20 +204,33 @@ def _observe_execution_outcomes(
         if epoch != due:
             continue
         outcomes = {}
+        entry_bid, entry_ask = Decimal(entry["bid"]), Decimal(entry["ask"])
+        exit_bid, exit_ask = quote["bid"], quote["ask"]
+        midpoint_move = ((exit_bid + exit_ask) - (entry_bid + entry_ask)) / 2
         for side, label in ((1, "LONG"), (-1, "SHORT")):
-            entry_fill = Decimal(entry["ask"] if side > 0 else entry["bid"]) * (
-                1 + side * slippage)
+            entry_touch, exit_touch = (entry_ask, exit_bid) if side > 0 else (entry_bid, exit_ask)
+            entry_fill = entry_touch * (1 + side * slippage)
             quantity = side * notional / entry_fill
             fill, fee, funding, elapsed = _exit_values(
                 {"quantity": str(quantity), "opened_at": entry["quote_received_at"]},
                 quote, received, costs)
-            pnl = quantity * (fill - entry_fill) - notional * fee_ratio - fee - funding
+            executed_pnl = quantity * (fill - entry_fill)
+            midpoint_pnl = quantity * midpoint_move
+            touch_pnl = quantity * (exit_touch - entry_touch)
+            entry_fee = notional * fee_ratio
+            pnl = executed_pnl - entry_fee - fee - funding
             outcomes[label] = {"entry_price": str(entry_fill), "exit_price": str(fill),
+                "gross_midpoint_equity_return": str(midpoint_pnl / starting_equity),
+                "spread_equity_cost": str((midpoint_pnl - touch_pnl) / starting_equity),
+                "slippage_equity_cost": str((touch_pnl - executed_pnl) / starting_equity),
+                "fee_equity_cost": str((entry_fee + fee) / starting_equity),
+                "funding_equity_cost": str(funding / starting_equity),
                 "net_equity_return": str(pnl / starting_equity)}
         settled.append({
             "outcome_id": f"{market}:M15:{entry['entry_boundary_epoch']}:{HORIZON_SECONDS}",
             **entry, "exit_boundary_epoch": epoch, "exit_quote_received_at": received.isoformat(),
             "exit_quote_sha256": quote["source_sha256"], "elapsed_seconds": str(elapsed),
+            "exit_bid": str(exit_bid), "exit_ask": str(exit_ask),
             "kind": "OBSERVED_FIXED_TIME_EXECUTION_OUTCOME", "outcomes": outcomes,
         })
     research["recent"] = (research["recent"] + settled)[-MAX_RECENT_OUTCOMES:]
@@ -645,6 +670,7 @@ def main(argv=None) -> int:
                     "clock_sample": clock_sample,
                     "execution_outcomes": execution_outcomes,
                     "execution_observation": current_observation,
+                    "observed_cost_quotes": quote.get("observed_cost_quotes", {}),
                     "additional_market_research": additional_observations,
                     "network_orders": False, "trading_authority": False,
                 }

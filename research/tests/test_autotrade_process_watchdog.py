@@ -198,6 +198,7 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "whitebit-funding-carry-shadow",
         "whitebit-course-research",
         "whitebit-depth-tape",
+        "whitebit-depth-ofi-screen",
     ]
     assert "sol-trend-forward-shadow" not in {
         row["id"] for row in manifest["processes"]
@@ -261,6 +262,11 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         "BTC_USDT", "ETH_USDT", "SOL_USDT",
         "BTC_PERP", "ETH_PERP", "SOL_PERP",
     ]
+    ofi = processes["whitebit-depth-ofi-screen"]
+    ofi_markets = [ofi["args"][index + 1]
+        for index, value in enumerate(ofi["args"][:-1]) if value == "--market"]
+    assert ofi_markets == ["BTC_PERP", "ETH_PERP", "SOL_PERP"]
+    assert ofi["args"][ofi["args"].index("--minimum-buckets") + 1] == "3600"
 
 
 def test_duplicate_watchdog_does_not_start_or_consume_owner_stop(tmp_path):

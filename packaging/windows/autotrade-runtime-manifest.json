@@ -358,6 +358,24 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-funding-carry-shadow",
+      "script": "tools/run_whitebit_funding_carry_shadow.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-funding-carry-shadow-v1-20261112",
+        "--interval-seconds", "3600",
+        "--notional", "1000",
+        "--horizon-days", "30",
+        "--basis-stress-bps", "25",
+        "--candidate-limit", "8",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-funding-carry-shadow-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-funding-carry-shadow-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-funding-carry-shadow-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }

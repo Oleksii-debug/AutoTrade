@@ -155,6 +155,32 @@
       "backoff_seconds": 2
     },
     {
+      "id": "learning-btc-imbalance-fast",
+      "script": "tools/run_whitebit_live_zero_learning.py",
+      "args": [
+        "--supervisor-state-dir", "${RUNTIME_ROOT}/whitebit-public-supervisor-v2-20261111",
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-fast-v1-20261112",
+        "--interval-seconds", "15",
+        "--cycle-episodes", "12",
+        "--cycle-seconds", "1800",
+        "--evaluation-episodes", "12",
+        "--max-drawdown-usdt", "2",
+        "--cooldown-seconds", "60",
+        "--max-trials", "12",
+        "--max-observation-gap-seconds", "180",
+        "--min-evaluation-trades", "3",
+        "--outcome-horizon-seconds", "60",
+        "--feature-mode", "TOP_BOOK_IMBALANCE",
+        "--short-carry-bps-per-day", "2",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-fast-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-fast-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-fast-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
+    },
+    {
       "id": "learning-eth-fast",
       "script": "tools/run_whitebit_live_zero_learning.py",
       "args": [
@@ -267,6 +293,7 @@
         "--source", "btc-horizon=${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-v1-20261111/checkpoint.json",
         "--source", "btc-horizon-signal=${RUNTIME_ROOT}/whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json",
         "--source", "btc-imbalance=${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-v1-20261112/checkpoint.json",
+        "--source", "btc-imbalance-fast=${RUNTIME_ROOT}/whitebit-live-zero-btc-imbalance-fast-v1-20261112/checkpoint.json",
         "--source", "eth-fast=${RUNTIME_ROOT}/whitebit-live-zero-eth-fast-v1-20261111/checkpoint.json",
         "--source", "sol-fast=${RUNTIME_ROOT}/whitebit-live-zero-sol-fast-v1-20261111/checkpoint.json",
         "--state-dir", "${RUNTIME_ROOT}/learning-fleet-diagnostics-v1-20261112",

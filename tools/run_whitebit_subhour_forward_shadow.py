@@ -35,6 +35,9 @@ from research.autotrade_research.strategies.pretrade_evidence import (
 from research.autotrade_research.strategies.technical_confluence import (
     HOURLY_WINDOWS, TechnicalCosts, summarize_hour_windows, technical_signal,
 )
+from tools.run_whitebit_observed_portfolio import (
+    SCHEMA as PORTFOLIO_SCHEMA, advance as advance_portfolio, new_state as new_portfolio_state,
+)
 from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurations
 
 
@@ -514,6 +517,26 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
     return state
 
 
+def _record_portfolio_observation(state: dict, event: dict, *, now: datetime) -> dict:
+    """Advance the shared research account without interrupting the market worker."""
+    existing = state.get("portfolio_observer")
+    if existing is not None and (type(existing) is not dict or existing.get("schema") != PORTFOLIO_SCHEMA):
+        return {"error_class": "PORTFOLIO_CHECKPOINT_SCHEMA_MISMATCH"}
+    try:
+        portfolio = deepcopy(existing) if existing is not None else new_portfolio_state(
+            datetime.fromisoformat(event["observed_at"]))
+        changed = advance_portfolio(portfolio, event, now=now)
+        report = {"queued": portfolio.get("queued"), "pending": portfolio.get("pending"),
+                  "settled_count": portfolio["settled_count"], "unmatched_count": portfolio["unmatched_count"],
+                  "evaluation": portfolio.get("evaluation")}
+        if changed:
+            portfolio["updated_at"] = now.isoformat()
+            state["portfolio_observer"] = portfolio
+        return report
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        return {"error_class": type(exc).__name__}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, required=True)
@@ -606,7 +629,7 @@ def main(argv=None) -> int:
                     else None)
                 closed = next_state["closed_cycles"]
                 review = next_state.get("wave_analysis")
-                _append_decision(state_dir / "decisions.jsonl", {
+                event = {
                     "schema": SCHEMA, "observed_at": now.isoformat(),
                     "previous_bar_open_epoch": previous_epoch,
                     "processed_bar_open_epoch": next_state["last_bar_open_epoch"],
@@ -624,7 +647,10 @@ def main(argv=None) -> int:
                     "execution_observation": current_observation,
                     "additional_market_research": additional_observations,
                     "network_orders": False, "trading_authority": False,
-                })
+                }
+                event["portfolio_observer"] = _record_portfolio_observation(
+                    next_state, event, now=datetime.now(UTC))
+                _append_decision(state_dir / "decisions.jsonl", event)
                 state = next_state
                 status = "RUNNING"
             else:

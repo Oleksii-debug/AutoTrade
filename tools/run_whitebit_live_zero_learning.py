@@ -136,7 +136,10 @@ def main(argv=None) -> int:
     parser.add_argument("--outcome-horizon-seconds", type=int, default=0)
     parser.add_argument("--signal-lookback-seconds", type=int, default=0)
     parser.add_argument("--short-carry-bps-per-day", default="2")
-    parser.add_argument("--feature-mode", choices=("MID_MOMENTUM", "TOP_BOOK_IMBALANCE"),
+    parser.add_argument("--feature-mode", choices=(
+        "MID_MOMENTUM", "TOP_BOOK_IMBALANCE",
+        "TOP_BOOK_IMBALANCE_PERSISTENCE",
+    ),
                         default="MID_MOMENTUM")
     parser.add_argument("--stop-file")
     args = parser.parse_args(argv)

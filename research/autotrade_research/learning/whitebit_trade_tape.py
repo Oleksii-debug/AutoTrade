@@ -1,7 +1,7 @@
 """Durable, bounded WhiteBIT public trade aggregates for microstructure research."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
 import sqlite3
@@ -13,12 +13,22 @@ from ..integrations.whitebit_public import (
 
 
 SCHEMA = "autotrade-whitebit-public-trade-tape-v1"
+EXECUTION_PRINT_MARKETS = frozenset({"NEAR_PERP", "SUI_PERP"})
+EXECUTION_PRINT_RETENTION_SECONDS = 86400
 
 
 def _sum(left: str, right: str) -> str:
     with localcontext() as context:
         context.prec = 80
         return format(Decimal(left) + Decimal(right), "f")
+
+
+def _utc_microseconds(value: datetime) -> str:
+    if type(value) is not datetime or value.tzinfo is None:
+        raise TypeError("execution print timestamp must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
 
 
 class WhiteBitTradeTapeStore:
@@ -78,6 +88,20 @@ class WhiteBitTradeTapeStore:
                 PRIMARY KEY(market, bucket_epoch)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS buckets_epoch ON buckets(bucket_epoch);
+            CREATE TABLE IF NOT EXISTS execution_prints(
+                market TEXT NOT NULL CHECK(market IN ('NEAR_PERP','SUI_PERP')),
+                trade_id TEXT NOT NULL,
+                trade_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                price TEXT NOT NULL,
+                side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+                base_quantity TEXT NOT NULL,
+                rpi INTEGER NOT NULL CHECK(rpi IN (0,1)),
+                source_sha256 TEXT NOT NULL,
+                PRIMARY KEY(market, trade_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS execution_prints_trade_at
+                ON execution_prints(trade_at);
             CREATE TABLE IF NOT EXISTS metadata(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -165,6 +189,24 @@ class WhiteBitTradeTapeStore:
                     f"INSERT OR REPLACE INTO buckets ({','.join(columns)}) "
                     f"VALUES ({','.join('?' for _ in columns)})", values,
                 )
+                if market in EXECUTION_PRINT_MARKETS:
+                    self.connection.execute(
+                        "INSERT INTO execution_prints("
+                        "market,trade_id,trade_at,received_at,price,side,"
+                        "base_quantity,rpi,source_sha256"
+                        ") VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            market,
+                            str(trade.trade_id),
+                            _utc_microseconds(trade.trade_at),
+                            _utc_microseconds(batch.received_at),
+                            trade.price,
+                            trade.side,
+                            trade.base_quantity,
+                            int(trade.rpi),
+                            batch.digest,
+                        ),
+                    )
             latest = max(trade.trade_id for trade in new)
             self.connection.execute(
                 "INSERT OR REPLACE INTO cursors(market,last_trade_id) VALUES(?,?)",
@@ -172,6 +214,12 @@ class WhiteBitTradeTapeStore:
             )
             cutoff = int(batch.received_at.timestamp()) - self.retention_days * 86400
             self.connection.execute("DELETE FROM buckets WHERE bucket_epoch < ?", (cutoff,))
+            print_cutoff = _utc_microseconds(
+                batch.received_at - timedelta(seconds=EXECUTION_PRINT_RETENTION_SECONDS)
+            )
+            self.connection.execute(
+                "DELETE FROM execution_prints WHERE trade_at < ?", (print_cutoff,)
+            )
         return len(new)
 
     def status(self) -> dict:

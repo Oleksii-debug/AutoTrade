@@ -70,6 +70,30 @@ class CourseRangeDeviationTests(unittest.TestCase):
         self.assertIsNone(detect_deviation(values[:2], cfg, diagnostics=counters))
         self.assertEqual(counters, {"WARMUP": 1})
 
+    def test_retest_waits_for_a_later_closed_bar_and_fills_next_open(self):
+        for side in (1, -1):
+            with self.subTest(side=side):
+                values = range_bars(5)
+                for row in values:
+                    row.update(open="100", high="100.4", low="99.6", close="100")
+                values[1].update(high="101", low="99", close="101" if side > 0 else "99")
+                # Confirmation cannot serve as its own later retest.
+                values[2].update(high="100.2", low="99.8", close="100.1" if side > 0 else "99.9")
+                setup = {"direction": side, "stop": "98" if side > 0 else "102",
+                    "target": "110" if side > 0 else "90", "range_lower": "100",
+                    "range_upper": "100", "shift_level": "100.5" if side > 0 else "99.5",
+                    "age": 0}
+                with patch("research.autotrade_research.strategies.course_range_deviation.detect_deviation",
+                           side_effect=[setup, None, None, None, None]):
+                    result = simulate(values, configuration=RangeDeviationConfiguration(
+                        minimum_shift_confirmation_bars=1, require_boundary_retest=True,
+                        maximum_hold_bars=4))
+                self.assertEqual(result["closed_cycles"], 1)
+                episode = result["episodes"][0]
+                self.assertEqual(episode["shift_confirmed_at"], values[1]["closed_at"].isoformat())
+                self.assertEqual(episode["retest_confirmed_at"], values[2]["closed_at"].isoformat())
+                self.assertEqual(episode["entered_at"], values[3]["opened_at"].isoformat())
+
     def test_no_sweep_means_no_trade(self):
         result = simulate(range_bars(300), configuration=RangeDeviationConfiguration(
             range_lookback=96, minimum_range_atr="1", maximum_range_atr="20"))

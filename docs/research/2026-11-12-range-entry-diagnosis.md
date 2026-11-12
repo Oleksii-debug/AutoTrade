@@ -14,3 +14,13 @@ Local receipt hashes in runtime/course-range-causal-diagnosis-20261112:
 - entry geometry: d8a94f59126703ede98e459e5e2efe6bd560c06588ce5458de9c85b0abd07d69
 
 Validation: 11 focused tests and 6 subtests passed locally. This is simulated research; no real orders, paid model calls, or earned money.
+
+## Completed retest experiment
+
+An opt-in research configuration now waits for confirmation, then a later completed candle that touches the original range boundary and closes back inside. Execution remains at the following open with a renewed economic gate; it is not an assumed limit fill. Pending invalidation and a four-bar retest expiry apply. The default remains disabled.
+
+The single specified experiment used minimum confirmation age 1 and a 60-minute holding cap, retaining the course risk budget (1% equity), maximum notional (2x simulated equity), and 20/5/5 cycle gates. This differs from the Bollinger simulator's 25% notional and is not a matched return comparison. On the same three TRAIN partitions it admitted one DOGE trade: -5.4057686 per 1,000 simulated quote units, exited at the holding cap. SOL and XRP admitted zero trades. DEVELOPMENT and FINAL remained locked. This is a rejected candidate, not a promoted strategy. No follow-up parameter search was performed.
+
+Receipt: 5acc93cc1992a727108a809f60a708d0d9630c7b8451c55c81dd046dd6796815, with protocol saved before execution in runtime/course-range-retest-20261112. Reproduce using authenticated last-8,640-bar SOL/XRP/DOGE cuts, screen_universe(train_count=5184, development_count=1728), and RangeDeviationConfiguration(maximum_hold_bars=4, minimum_shift_confirmation_bars=1, require_boundary_retest=True).
+
+Validation: 12 focused tests and 8 subtests passed, including long/short confirmation -> later retest -> next-open execution.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Locked-final WhiteBIT BTC volatility/volume breakout grid.
+"""Locked-final WhiteBIT spot volatility/volume breakout grid.
 
 Benchmarks are computed once per partition.  Candidate configurations consume
 TRAIN and only eligible candidates consume DEVELOPMENT; one frozen winner may
@@ -152,13 +152,14 @@ def main(argv=None):
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     bars, dataset_sha256, manifest = authenticated_bars(args.manifest)
-    if manifest["market"] != "BTC_USDT":
-        raise ValueError("locked volatility grid currently requires BTC_USDT")
+    market = manifest["market"]
+    if not market.endswith("_USDT"):
+        raise ValueError("locked volatility grid requires a USDT spot market")
     result = locked_final_grid_screen(bars, train_count=args.train_count,
         development_count=args.development_count, dataset_sha256=dataset_sha256,
         configurations=default_grid())
     target = args.output_dir / f"{result['result_sha256']}.json"
-    _atomic(target, {"source": {"venue": "WHITEBIT_SPOT", "market": "BTC_USDT",
+    _atomic(target, {"source": {"venue": "WHITEBIT_SPOT", "market": market,
         "dataset_identity_sha256": dataset_sha256, "manifest": str(args.manifest)},
         "result": result})
     print(json.dumps({"result_path": str(target),
@@ -173,3 +174,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

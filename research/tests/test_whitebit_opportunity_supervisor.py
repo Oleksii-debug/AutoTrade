@@ -3,10 +3,19 @@ from decimal import Decimal
 from types import SimpleNamespace
 import unittest
 
-from tools.run_whitebit_opportunity_supervisor import completed_window, rank_markets
+from tools.run_whitebit_opportunity_supervisor import (
+    completed_window,
+    fast_volatility_grid,
+    rank_markets,
+)
 
 
 class OpportunitySupervisorTests(unittest.TestCase):
+    def test_fast_volatility_grid_is_bounded_and_spans_full_grid(self):
+        grid = fast_volatility_grid()
+        self.assertEqual(len(grid), 16)
+        self.assertEqual(len({repr(item) for item in grid}), 16)
+
     def test_completed_window_excludes_open_hour(self):
         start, end = completed_window(datetime(2026, 11, 12, 1, 35, tzinfo=UTC), 800)
         self.assertEqual(end, int(datetime(2026, 11, 12, 0, tzinfo=UTC).timestamp()))

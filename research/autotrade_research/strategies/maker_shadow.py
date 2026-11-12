@@ -12,6 +12,54 @@ from ..integrations.whitebit_public import PublicBook, PublicInstrument, PublicT
 SCHEMA = "autotrade-whitebit-maker-shadow-v1"
 
 
+def advance_evidence_wave(
+    state: dict[str, object], *, net_pnl_quote: str, outcome: str,
+    target_cycles: int,
+) -> dict[str, object]:
+    """Advance one bounded discovery/evaluation wave without promotion authority."""
+    if type(state) is not dict or type(target_cycles) is not int or not 4 <= target_cycles <= 1000:
+        raise ValueError("maker evidence wave configuration is invalid")
+    phase = str(state.get("research_phase", "DISCOVERY"))
+    if phase not in {"DISCOVERY", "EVALUATING", "QUALIFIED_SHADOW"}:
+        raise ValueError("maker evidence wave is not active")
+    net = _decimal(net_pnl_quote, name="net_pnl_quote")
+    cycles = int(state.get("wave_cycles", 0)) + 1
+    positive = int(state.get("wave_positive_cycles", 0)) + int(net > 0)
+    wave_net = _decimal(state.get("wave_net_pnl_quote", "0"), name="wave_net") + net
+    outcomes = dict(state.get("wave_outcomes", {}))
+    outcomes[outcome] = int(outcomes.get(outcome, 0)) + 1
+    updated = {
+        **state, "wave_cycles": cycles, "wave_positive_cycles": positive,
+        "wave_net_pnl_quote": format(wave_net, "f"),
+        "wave_outcomes": dict(sorted(outcomes.items())),
+    }
+    if cycles < target_cycles:
+        return updated
+    passed = wave_net > 0 and positive >= max(2, target_cycles // 3)
+    next_phase = (
+        "EVALUATING" if phase == "DISCOVERY" and passed else
+        "QUALIFIED_SHADOW" if phase in {"EVALUATING", "QUALIFIED_SHADOW"} and passed else
+        "RESEARCH_ONLY"
+    )
+    analysis = {
+        "stage": phase, "cycles": cycles, "positive_cycles": positive,
+        "net_pnl_quote": format(wave_net, "f"), "outcomes": dict(sorted(outcomes.items())),
+        "passed_after_cost_gate": passed, "next_research_phase": next_phase,
+        "finding": ("PROSPECTIVE_AFTER_COST_EDGE_REQUIRES_NEXT_WAVE"
+                    if next_phase == "EVALUATING" else
+                    "PROSPECTIVE_AFTER_COST_EDGE_REPEATED"
+                    if next_phase == "QUALIFIED_SHADOW" else
+                    "NO_REPEATABLE_AFTER_COST_MAKER_EDGE"),
+        "automatic_promotion": False, "network_orders": False,
+        "trading_authority": False,
+    }
+    return {
+        **updated, "research_phase": next_phase, "latest_wave_analysis": analysis,
+        "wave_cycles": 0, "wave_positive_cycles": 0,
+        "wave_net_pnl_quote": "0", "wave_outcomes": {},
+    }
+
+
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
     try:
         parsed = Decimal(str(value))
@@ -158,4 +206,5 @@ def evaluate_quote(
         result, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     return result
+
 

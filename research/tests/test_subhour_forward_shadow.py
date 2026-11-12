@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from research.autotrade_research.integrations.whitebit_public import PublicDataError
-from research.autotrade_research.strategies.technical_confluence import simulate
+from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
     PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial, process_completed_bar,
 )
@@ -138,6 +138,29 @@ def test_perfect_timing_benchmark_observes_holding_limit_and_costs():
     assert sixty["target_hit_days"]["0.05"] == 0
     bars[4]["open"] = "115"
     assert _perfect_timing_benchmark(bars, 4)["target_hit_days"]["0.05"] == 1
+
+
+def test_clock_returns_measure_elapsed_windows_without_extrapolation():
+    bars = _flat_bars(datetime(2026, 11, 12, 7, 45, tzinfo=UTC), count=32)
+    bars[3].update(high="102.04", close="102.04")
+    for bar in bars[4:]:
+        bar.update(open="102.04", close="102.04", high="102.04", low="102.04")
+    costs = TechnicalCosts(capital_fraction="1", fee_bps_per_fill="0",
+                          spread_bps="0", slippage_bps_per_fill="0",
+                          funding_bps_per_day="0")
+    hold = simulate(bars, candidate="HOLD_LONG", costs=costs, report_hourly_returns=True)
+    clocks = hold["clock_window_returns"]
+    assert [(clocks[h]["complete_windows"], clocks[h]["target_hits"]) for h in ("1", "4", "8")] == [
+        (8, 1), (2, 1), (1, 0)]
+    assert Decimal(clocks["1"]["median_fraction"]) == 0
+    assert Decimal(clocks["8"]["best_fraction"]) == Decimal("0.0204")
+    assert hold["one_hour_with_exposure"]["complete_windows"] == 8
+
+    cash = simulate(bars[1:], candidate="CASH", report_hourly_returns=True)
+    assert cash["clock_window_returns"]["1"]["flat_windows"] == 7
+    assert cash["clock_window_returns"]["4"]["complete_windows"] == 1
+    assert cash["clock_window_returns"]["8"]["complete_windows"] == 0
+    assert cash["one_hour_with_exposure"]["complete_windows"] == 0
 
 
 def test_decision_journal_is_append_only_and_secret_free(tmp_path):

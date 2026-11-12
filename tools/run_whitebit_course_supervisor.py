@@ -77,6 +77,8 @@ def _compact(result: dict) -> dict:
             review.get("loss_streak_pause_events", []))
         review_projection["daily_process_event_count"] = len(
             review.get("daily_process_events", []))
+        review_projection["weekly_process_event_count"] = len(
+            review.get("weekly_process_events", []))
     return {"strategy_schema": result.get("strategy_schema"),
         "train": part("train"), "train_rejection_reasons": result.get("train_rejection_reasons"),
         "train_process_review": review_projection,
@@ -125,6 +127,12 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
         configuration=CourseConfiguration(minimum_shift_confirmation_bars=5,
             shift_expiry_bars=8), minimum_train_cycles=minimum_train,
         minimum_development_cycles=2, minimum_final_cycles=2)
+    trend_top_down = screen_trend(datasets, train_count=train_count,
+        development_count=development_count,
+        configuration=CourseConfiguration(minimum_shift_confirmation_bars=5,
+            shift_expiry_bars=8, require_true_top_down=True),
+        minimum_train_cycles=minimum_train,
+        minimum_development_cycles=2, minimum_final_cycles=2)
     ranges = screen_range(datasets, train_count=train_count,
         development_count=development_count,
         configuration=RangeDeviationConfiguration(),
@@ -134,7 +142,9 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
         "window": {"start_open_epoch": start, "end_open_epoch": end, "bars": bars,
             "train_count": train_count, "development_count": development_count,
             "final_count": final_count}, "manifests": manifests,
-        "families": {"TREND_QUASIMODO": trend, "RANGE_DEVIATION": ranges},
+        "families": {"TREND_QUASIMODO": trend,
+            "TREND_QUASIMODO_TOP_DOWN": trend_top_down,
+            "RANGE_DEVIATION": ranges},
         "session_lifecycle": {"phase": "ANALYSIS_COMPLETE",
             "phase_transitions": ["RUNNING", "PAUSED", "ANALYZING", "COOLDOWN"],
             "analysis_partition": "TRAIN_ONLY",
@@ -142,6 +152,7 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
             "resume_condition": "NEXT_SCHEDULED_COMPLETED_WINDOW_AFTER_COOLDOWN",
             "family_process_phases": {
                 "TREND_QUASIMODO": trend["train_process_review"]["phase"],
+                "TREND_QUASIMODO_TOP_DOWN": trend_top_down["train_process_review"]["phase"],
                 "RANGE_DEVIATION": ranges["train_process_review"]["phase"]},
             "strategy_changed": False},
         "automatic_promotion": False, "network_orders": False,

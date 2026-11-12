@@ -13,3 +13,19 @@ Across 2,159 common recent historical hours:
 The 0.055% taker fee assumption matches WhiteBIT's published Level 0 table checked on this date: https://help.whitebit.com/hc/en-gb/articles/14556440496157-WhiteBIT-VIP-program . Account-specific rates, spread, slippage and funding remain distinct inputs.
 
 Conclusion: the current constrained strategy does not establish the requested hourly outcome. No profit, increased exposure, new model training, or real orders are claimed by this benchmark change.
+
+## Portfolio evaluation on a later quote
+
+[PR #2553](https://github.com/Oleksii-debug/AutoTrade/pull/2553) reuses the running market collector for a shared virtual account. [PR #2554](https://github.com/Oleksii-debug/AutoTrade/pull/2554) freezes the features at each half-hour decision and trains on the next 15-minute boundary's distinct quote and the quote 30 minutes after entry. Reported one-hour windows start at minute 15 and contain two matched holds from the same policy version. At 19:15 Europe/Budapest the local observer matched a previously recorded HOLD to a distinct WhiteBIT quote and restored it across a process restart.
+
+The retrospective SOL replay used identical dates, costs, 25% simulated notional and delayed fills in all three runs. Historical quotes were modeled from M15 opens and declared spread. The final 30 of 60 previously used days yielded 719 matched full-hour windows per run.
+
+| Training labels | Closed directional intervals | Compounded after costs | Hours at or above 1% |
+| --- | ---: | ---: | ---: |
+| Decision quote, prior fit | 149 | −6.1025% | 0 |
+| Later quote, 336 retained half-hour outcomes | 0 | 0.0000% | 0 |
+| Later quote, 48 retained half-hour outcomes | 203 | −7.1199% | 0 |
+
+The 48-outcome comparison matches the prior fit's eligible half-hour lookback on a continuous timeline. The longer fit held throughout the replay. Neither establishes a positive edge. Forward decisions and historical replay remain in separate state. The 24 focused Windows tests for the exact merged code covered label timing, future exit rejection, restart and policy-version separation.
+
+Evidence SHA-256 values are `bc3d5c9f6d7fa03374cfe1b2297d9b15da8fb632d0cdb47200a3467a894d870e` for the default fit and `d72288c2c28484624811486cafe35f1623144d514ede8eef63a66e7a95a064c3` for the 48-outcome comparison.

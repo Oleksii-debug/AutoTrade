@@ -46,6 +46,7 @@ _ALLOWED_SCRIPTS = frozenset({
     "tools/run_goal_directed_attention.py",
     "tools/run_groq_advisory_supervisor.py",
     "tools/run_whitebit_trend_shadow.py",
+    "tools/run_whitebit_rolling_alpha_supervisor.py",
     "tools/run_whitebit_live_zero_learning.py",
     "tools/run_whitebit_public_supervisor.py",
 })
@@ -432,3 +433,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

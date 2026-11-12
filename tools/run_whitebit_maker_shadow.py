@@ -120,6 +120,22 @@ def main(argv=None) -> int:
                         "quote_sha256"
                     )
                     state["open_quote"] = None
+                if not state.get("inventory_hedge_version"):
+                    state["invalidated_delayed_hedge_wave"] = {
+                        "research_phase": state.get("research_phase"),
+                        "wave_cycles": int(state.get("wave_cycles", 0)),
+                        "wave_positive_cycles": int(state.get("wave_positive_cycles", 0)),
+                        "wave_net_pnl_quote": str(state.get("wave_net_pnl_quote", "0")),
+                        "reason": "DELAYED_ONE_SIDED_HEDGE_MODEL",
+                        "experience_preserved": True,
+                        "network_orders": False, "trading_authority": False,
+                    }
+                    state.update({
+                        "wave_cycles": 0, "wave_positive_cycles": 0,
+                        "wave_net_pnl_quote": "0", "wave_outcomes": {},
+                        "open_quote": None,
+                    })
+                state["inventory_hedge_version"] = "IMMEDIATE_NEXT_POLL_V1"
             client = WhiteBitPublicClient()
             instruments = [item for item in client.instruments() if item.market == market]
             if len(instruments) != 1:
@@ -207,6 +223,7 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 

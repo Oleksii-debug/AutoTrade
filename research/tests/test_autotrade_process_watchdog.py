@@ -178,24 +178,8 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
         repo_root=REPO, runtime_root=runtime, state_dir=state,
     )
     assert [row["id"] for row in manifest["processes"]] == [
-        "whitebit-public", "learning-primary", "learning-fast",
-        "learning-btc-horizon",
-        "learning-btc-horizon-signal",
-        "whitebit-public-eth", "learning-btc-imbalance",
-        "learning-btc-imbalance-fast", "learning-eth-fast",
-        "whitebit-public-sol", "learning-sol-fast", "whitebit-public-trade-tape",
+        "whitebit-public-sol",
         "whitebit-public-futures-trade-tape",
-        "whitebit-trade-flow-screen", "whitebit-trade-flow-fast-screen",
-        "whitebit-flow-research-screen",
-        "whitebit-futures-flow-research-screen",
-        "goal-attention",
-        "whitebit-pepe-maker-shadow",
-        "whitebit-ena-maker-shadow",
-        "whitebit-stable-fiat-triangle-shadow",
-        "whitebit-maker-universe-screen",
-        "learning-fleet-diagnostics", "groq-advisory", "rolling-native-alpha",
-        "whitebit-opportunity-screen",
-        "whitebit-funding-carry-shadow",
         "whitebit-course-research",
         "whitebit-depth-tape",
         "whitebit-subhour-screen",
@@ -209,60 +193,16 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     assert "password" not in serialized
     assert "secret" not in serialized
     processes = {row["id"]: row for row in manifest["processes"]}
-    goal_args = processes["goal-attention"]["args"]
-    flow_checkpoint_index = goal_args.index("--flow-research-checkpoint") + 1
-    assert goal_args[flow_checkpoint_index].endswith(
-        "whitebit-flow-research-screen-v1-20261112/checkpoint.json"
-    )
-    for process_id in (
-        "whitebit-public-trade-tape",
-        "whitebit-trade-flow-screen",
-        "whitebit-trade-flow-fast-screen",
-    ):
-        args = processes[process_id]["args"]
-        markets = [
-            args[index + 1] for index, value in enumerate(args[:-1])
-            if value == "--market"
-        ]
-        assert markets == [
-            "BTC_USDT", "ETH_USDT", "SOL_USDT", "PEPE_USDT", "ENA_USDT",
-            "WBT_USDT", "XRP_USDT", "NEAR_USDT", "ZEC_USDT", "UNI_USDT",
-            "SUI_USDT", "DOGE_USDT", "TRX_USDT", "TAO_USDT", "HYPE_USDT",
-        ]
-    futures_markets = [
-        "BTC_PERP", "ETH_PERP", "SOL_PERP", "WBT_PERP", "ZEC_PERP",
-        "XRP_PERP", "HYPE_PERP", "MU_PERP", "NEAR_PERP", "DOGE_PERP",
-        "LTC_PERP", "LINK_PERP", "ADA_PERP", "XAUT_PERP", "QNT_PERP",
-    ]
-    for process_id in (
-        "whitebit-public-futures-trade-tape",
-        "whitebit-futures-flow-research-screen",
-    ):
-        args = processes[process_id]["args"]
-        markets = [
-            args[index + 1] for index, value in enumerate(args[:-1])
-            if value == "--market"
-        ]
-        assert markets == futures_markets
-    futures_screen_args = processes["whitebit-futures-flow-research-screen"]["args"]
-    assert futures_screen_args[futures_screen_args.index("--round-trip-cost-bps") + 1] == "15"
-    assert futures_screen_args[
-        futures_screen_args.index("--medium-round-trip-cost-bps") + 1
-    ] == "15"
-    groq = next(row for row in manifest["processes"] if row["id"] == "groq-advisory")
-    checkpoint_index = groq["args"].index("--checkpoint") + 1
-    assert groq["args"][checkpoint_index].endswith(
-        "whitebit-live-zero-btc-horizon-signal-v2-20261111/checkpoint.json"
-    )
+    tape_args = processes["whitebit-public-futures-trade-tape"]["args"]
+    tape_markets = [tape_args[index + 1]
+        for index, value in enumerate(tape_args[:-1]) if value == "--market"]
+    assert tape_markets == ["BTC_PERP", "ETH_PERP", "SOL_PERP"]
     depth = processes["whitebit-depth-tape"]
     depth_markets = [
         depth["args"][index + 1]
         for index, value in enumerate(depth["args"][:-1]) if value == "--market"
     ]
-    assert depth_markets == [
-        "BTC_USDT", "ETH_USDT", "SOL_USDT",
-        "BTC_PERP", "ETH_PERP", "SOL_PERP",
-    ]
+    assert depth_markets == ["BTC_PERP", "ETH_PERP", "SOL_PERP"]
     subhour = processes["whitebit-subhour-screen"]
     assert subhour["args"][subhour["args"].index("--bars") + 1] == "6000"
     forward = processes["whitebit-subhour-forward-shadow"]

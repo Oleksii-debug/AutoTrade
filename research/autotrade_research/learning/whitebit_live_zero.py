@@ -338,7 +338,14 @@ class WhiteBitLiveZeroLearning(LiveCycle):
         )
         return episode_payload
 
-    def process_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def process_snapshot(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        publish_projections: bool = True,
+    ) -> dict[str, Any]:
+        if type(publish_projections) is not bool:
+            raise TypeError("publish_projections must be an exact bool")
         canonical = validate_public_snapshot(snapshot)
         key = self._observation_key(canonical)
         result: dict[str, Any]
@@ -463,7 +470,8 @@ class WhiteBitLiveZeroLearning(LiveCycle):
                 "matured_episode": episode,
                 "new_decision": decision_payload,
             }
-        self._publish_projections()
+        if publish_projections:
+            self._publish_projections()
         return result
 
     def _publish_projections(self) -> None:

@@ -219,6 +219,31 @@ class PublicKlines:
 
 
 @dataclass(frozen=True)
+class PublicTrade:
+    market: str
+    trade_id: int
+    price: str
+    base_quantity: str
+    quote_quantity: str
+    trade_at: datetime
+    side: str
+    rpi: bool
+
+
+@dataclass(frozen=True)
+class PublicTradeBatch:
+    market: str
+    received_at: datetime
+    trades: tuple[PublicTrade, ...]
+    raw: bytes = field(repr=False)
+    source_uri: str
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + sha256(self.raw).hexdigest()
+
+
+@dataclass(frozen=True)
 class KlineWindow:
     start: int
     end: int
@@ -392,6 +417,60 @@ def parse_orderbook(raw: bytes, market: str, received_at: datetime) -> PublicBoo
                         BASE + "orderbook/" + market + "?limit=100&level=0")
     result.assert_fresh(received_at)
     return result
+
+
+def parse_recent_trades(
+    raw: bytes, market: str, received_at: datetime,
+) -> PublicTradeBatch:
+    """Parse the bounded V4 trade tape without venue naming ambiguity."""
+    market, received_at = _symbol(market), _utc(received_at)
+    document = decode_public_json(raw)
+    if type(document) is not list or not 0 <= len(document) <= 100:
+        raise PublicDataError("INVALID_RECENT_TRADES")
+    expected = {
+        "tradeID", "price", "quote_volume", "base_volume",
+        "trade_timestamp", "type", "rpi",
+    }
+    rows: list[PublicTrade] = []
+    seen: set[int] = set()
+    previous_id: int | None = None
+    for item in document:
+        if type(item) is not dict or set(item) != expected:
+            raise PublicDataError("INVALID_RECENT_TRADE_SCHEMA")
+        trade_id = item["tradeID"]
+        if type(trade_id) is not int or not 1 <= trade_id <= 9_999_999_999_999_999:
+            raise PublicDataError("INVALID_RECENT_TRADE_ID")
+        if trade_id in seen or (previous_id is not None and trade_id >= previous_id):
+            raise PublicDataError("INVALID_RECENT_TRADE_ORDER")
+        seen.add(trade_id)
+        previous_id = trade_id
+        seconds = _epoch_seconds(item["trade_timestamp"])
+        trade_at = datetime.fromtimestamp(seconds, timezone.utc)
+        if trade_at > received_at:
+            raise PublicDataError("FUTURE_RECENT_TRADE")
+        side = item["type"]
+        rpi = item["rpi"]
+        if side not in {"buy", "sell"} or type(rpi) is not bool:
+            raise PublicDataError("INVALID_RECENT_TRADE_CLASSIFICATION")
+        rows.append(PublicTrade(
+            market=market,
+            trade_id=trade_id,
+            price=format(_decimal(item["price"], positive=True), "f"),
+            # WhiteBIT reverses the usual volume labels: quote_volume is the
+            # asset quantity and base_volume is the settlement quantity.
+            base_quantity=format(_decimal(item["quote_volume"], positive=True), "f"),
+            quote_quantity=format(_decimal(item["base_volume"], positive=True), "f"),
+            trade_at=trade_at,
+            side=side,
+            rpi=rpi,
+        ))
+    return PublicTradeBatch(
+        market=market,
+        received_at=received_at,
+        trades=tuple(rows),
+        raw=raw,
+        source_uri=BASE + "trades/" + market,
+    )
 
 
 def parse_spot_markets(raw: bytes) -> tuple[dict[str, Any], ...]:
@@ -744,6 +823,8 @@ def _public_url(endpoint: str, query: tuple[tuple[str, str], ...] = ()) -> str:
         allowed, root = (), BASE
     elif re.fullmatch(r"orderbook/[A-Z0-9]{1,20}_[A-Z0-9]{1,20}", endpoint):
         allowed, root = ("limit", "level"), BASE
+    elif re.fullmatch(r"trades/[A-Z0-9]{1,20}_[A-Z0-9]{1,20}", endpoint):
+        allowed, root = (), BASE
     elif re.fullmatch(r"funding-history/[A-Z0-9]{1,20}_PERP", endpoint):
         allowed, root = ("limit", "offset"), BASE
     elif endpoint == "kline":
@@ -764,6 +845,8 @@ def _public_url(endpoint: str, query: tuple[tuple[str, str], ...] = ()) -> str:
     if endpoint in ("markets", "ticker", "futures") and query:
         raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
     if endpoint.startswith("orderbook/") and query != (("limit", "100"), ("level", "0")):
+        raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
+    if endpoint.startswith("trades/") and query:
         raise PublicDataError("PUBLIC_QUERY_NOT_ALLOWED")
     if endpoint.startswith("funding-history/"):
         expected = (("limit", query[0][1]), ("offset", query[1][1])) if len(query) == 2 else ()
@@ -872,6 +955,11 @@ class WhiteBitPublicClient:
         raw, received = self._read("orderbook/" + market, query)
         return parse_orderbook(raw, market, received)
 
+    def recent_trades(self, market: str) -> PublicTradeBatch:
+        market = _symbol(market)
+        raw, received = self._read("trades/" + market)
+        return parse_recent_trades(raw, market, received)
+
     def spot_market_snapshot(
         self, market: str,
     ) -> tuple[dict[str, Any], PublicBook, str, datetime]:
@@ -944,4 +1032,5 @@ class WhiteBitPublicClient:
         query = (("limit", "100"), ("level", "0"))
         raw, received = self._read("orderbook/" + market, query)
         return parse_orderbook(raw, market, received)
+
 

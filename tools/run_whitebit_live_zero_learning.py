@@ -139,6 +139,7 @@ def main(argv=None) -> int:
     parser.add_argument("--feature-mode", choices=(
         "MID_MOMENTUM", "TOP_BOOK_IMBALANCE",
         "TOP_BOOK_IMBALANCE_PERSISTENCE",
+        "TOP_BOOK_IMBALANCE_CHANGE",
     ),
                         default="MID_MOMENTUM")
     parser.add_argument("--stop-file")

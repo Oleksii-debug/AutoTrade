@@ -41,7 +41,13 @@ def _instant(value: object, *, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def snapshot_from_artifact(manifest: dict, data: bytes) -> dict:
+def snapshot_from_artifact(
+    manifest: dict, data: bytes, *, expected_market: str = "BTC_USDT",
+) -> dict:
+    if (type(expected_market) is not str or not expected_market
+            or expected_market != expected_market.upper()
+            or "_" not in expected_market):
+        raise ValueError("expected market must be a canonical symbol")
     if (manifest.get("media_type") != "application/json"
             or manifest.get("source_refs") != [SOURCE_URI]
             or manifest.get("rights") != {
@@ -51,8 +57,8 @@ def snapshot_from_artifact(manifest: dict, data: bytes) -> dict:
     metadata = manifest.get("metadata")
     if (type(metadata) is not dict
             or metadata.get("provider") != "WHITEBIT"
-            or metadata.get("market") != "BTC_USDT"):
-        raise ValueError("artifact metadata differs from BTC WhiteBIT BBO")
+            or metadata.get("market") != expected_market):
+        raise ValueError("artifact metadata differs from expected WhiteBIT BBO")
     raw = strict_json_loads(data.decode("utf-8"))
     if (type(raw) is not dict or set(raw) != {"method", "params", "id"}
             or raw.get("method") != "bookTicker_update"
@@ -101,13 +107,15 @@ def snapshot_from_artifact(manifest: dict, data: bytes) -> dict:
 
 def replay(*, artifact_root: Path, state_dir: Path, maximum_artifacts: int = 4096,
            outcome_horizon_seconds: int = 60,
-           feature_mode: str = "TOP_BOOK_IMBALANCE") -> dict:
+           feature_mode: str = "TOP_BOOK_IMBALANCE",
+           market: str = "BTC_USDT") -> dict:
     if type(maximum_artifacts) is not int or not 2 <= maximum_artifacts <= 100_000:
         raise ValueError("maximum_artifacts must be 2..100000")
     if type(outcome_horizon_seconds) is not int or not 1 <= outcome_horizon_seconds <= 3600:
         raise ValueError("outcome horizon must be 1..3600 seconds")
     if feature_mode not in {
         "TOP_BOOK_IMBALANCE", "TOP_BOOK_IMBALANCE_PERSISTENCE",
+        "TOP_BOOK_IMBALANCE_CHANGE",
     }:
         raise ValueError("replay feature mode is unsupported")
     store = ArtifactStore(artifact_root)
@@ -127,7 +135,9 @@ def replay(*, artifact_root: Path, state_dir: Path, maximum_artifacts: int = 409
                 raise
             skipped_missing += 1
             continue
-        snapshots.append(snapshot_from_artifact(manifest, data))
+        snapshots.append(snapshot_from_artifact(
+            manifest, data, expected_market=market,
+        ))
     snapshots.sort(key=lambda item: (_instant(item["available_at"], name="available_at"),
                                      int(item["update_id"])))
     learner = WhiteBitLiveZeroLearning(
@@ -164,6 +174,7 @@ def replay(*, artifact_root: Path, state_dir: Path, maximum_artifacts: int = 409
         "last_available_at": None if not snapshots else snapshots[-1]["available_at"],
         "episode_count": checkpoint["episode_count"],
         "model_version_count": checkpoint["model_version_count"],
+        "market": market,
         "feature_mode": feature_mode,
         "learning_cycle": checkpoint["learning_cycle"],
         "public_data_only": True,
@@ -180,8 +191,10 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--maximum-artifacts", type=int, default=4096)
     parser.add_argument("--outcome-horizon-seconds", type=int, default=60)
+    parser.add_argument("--market", default="BTC_USDT")
     parser.add_argument("--feature-mode", choices=(
         "TOP_BOOK_IMBALANCE", "TOP_BOOK_IMBALANCE_PERSISTENCE",
+        "TOP_BOOK_IMBALANCE_CHANGE",
     ), default="TOP_BOOK_IMBALANCE")
     args = parser.parse_args(argv)
     try:
@@ -191,6 +204,7 @@ def main(argv=None) -> int:
             maximum_artifacts=args.maximum_artifacts,
             outcome_horizon_seconds=args.outcome_horizon_seconds,
             feature_mode=args.feature_mode,
+            market=args.market,
         )
     except (OSError, TypeError, ValueError) as exc:
         print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, sort_keys=True))

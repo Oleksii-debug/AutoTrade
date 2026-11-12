@@ -23,17 +23,20 @@ SCHEMA = "autotrade-whitebit-technical-confluence-locked-final-v1"
 
 def default_grid() -> tuple[TechnicalConfiguration, ...]:
     values = []
-    for fast, slow, stop, maximum in product(
-            (8, 12), (32, 48), ("1.5", "2"), (60, 120)):
+    for fast, slow, gap, cooldown in product(
+            (8, 12), (32, 48), ("0.0015", "0.003"), (8, 24)):
         values.append(TechnicalConfiguration(
             family="EMA_RSI_TREND", fast_ema=fast, slow_ema=slow,
-            stop_atr=stop, take_profit_atr="3", maximum_hold_bars=maximum))
-    for period, width, profit in product(
-            (20, 40), ("1.5", "2"), ("2", "3")):
+            stop_atr="2", take_profit_atr="3", maximum_hold_bars=120,
+            minimum_ema_gap_fraction=gap, minimum_expected_move_fraction="0.003",
+            cooldown_bars=cooldown))
+    for period, width, expected in product(
+            (20, 40), ("1.5", "2"), ("0.003", "0.006")):
         values.append(TechnicalConfiguration(
             family="BOLLINGER_RSI_REVERSION", fast_ema=8, slow_ema=32,
             rsi_long_min="35", rsi_short_max="65", bollinger_period=period,
-            bollinger_width=width, stop_atr="2", take_profit_atr=profit,
+            bollinger_width=width, stop_atr="2", take_profit_atr="3",
+            minimum_expected_move_fraction=expected, cooldown_bars=8,
             minimum_hold_bars=2, maximum_hold_bars=60))
     return tuple(values)
 

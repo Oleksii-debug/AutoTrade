@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,8 @@ from research.autotrade_research.learning.observed_quote_learning import (
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
     PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial,
-    _observe_execution_outcomes, _record_clock_sample, main,
+    _midpoint_learning_context, _observe_additional_markets,
+    _observe_execution_outcomes, _quote, _record_clock_sample, main,
     process_completed_bar, protect_open_position,
 )
 from tools.run_whitebit_subhour_supervisor import _perfect_timing_benchmark, compare_horizons
@@ -217,6 +219,52 @@ def test_execution_outcomes_settle_after_restart_without_virtual_fill():
     assert state["execution_outcomes"]["settled_count"] == 1
     assert state["position"] is None
     assert state["closed_cycles"] == 0
+    assert state["balance"] == "1000"
+
+
+def test_shared_quote_feeds_independent_market_learning(tmp_path):
+    start = datetime(2026, 11, 12, 12, tzinfo=UTC)
+    db = tmp_path / "depth.sqlite3"
+    con = sqlite3.connect(db)
+    try:
+        con.execute("CREATE TABLE archived_windows(market, window_epoch, features_json)")
+        end = (int(start.timestamp()) - 60) // 300 * 300
+        for market in ("BTC_PERP", "ETH_PERP"):
+            for i in range(20):
+                epoch = end - (20 - i) * 300
+                feature = {"last_received_at": datetime.fromtimestamp(epoch + 299, UTC).isoformat(),
+                           "last_bucket_epoch": epoch + 299, "generation_count": 2 if i == 7 else 1,
+                           "close_mid": str(99 + Decimal(i) / 10)}
+                con.execute("INSERT INTO archived_windows VALUES(?,?,?)",
+                            (market, epoch, json.dumps(feature)))
+        con.commit()
+    finally:
+        con.close()
+
+    calls = []
+    def snapshots(now):
+        calls.append(now)
+        return [SimpleNamespace(market=market, bid="100", ask="100.01",
+                    received_at=now, digest=market) for market in
+                ("SOL_PERP", "BTC_PERP", "ETH_PERP")]
+
+    state = _initial(int(start.timestamp()) - 900, start)
+    initial_quote = _quote(SimpleNamespace(futures_markets=lambda: snapshots(start)))
+    assert len(calls) == 1
+    assert _midpoint_learning_context(db, "BTC_PERP", initial_quote["learning_quotes"]["BTC_PERP"])
+    result = _observe_additional_markets(state, depth_database=db, boundary=start,
+        quote=initial_quote, now=start, contiguous=True)
+    assert result["BTC_PERP"]["observation"]["entry_quote_sha256"] == "BTC_PERP"
+    assert result["ETH_PERP"]["observation"]["learner_proposal"]["status"] == "COLLECTING_OBSERVATIONS"
+    state = json.loads(json.dumps(state))
+    for minute in (15, 30):
+        now = start + timedelta(minutes=minute)
+        quote = _quote(SimpleNamespace(futures_markets=lambda: snapshots(now)))
+        result = _observe_additional_markets(state, depth_database=db, boundary=now,
+            quote=quote, now=now, contiguous=True)
+    assert result["BTC_PERP"]["settled"][0]["outcome_id"].startswith("BTC_PERP:")
+    assert result["ETH_PERP"]["settled"][0]["outcome_id"].startswith("ETH_PERP:")
+    assert state["position"] is None
     assert state["balance"] == "1000"
 
 

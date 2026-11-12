@@ -237,7 +237,10 @@ def simulate(bars: list[dict], *, candidate: str,
             mark(close)
             if quantity:
                 holding += 1
-                carry = abs(quantity) * close * funding_day / Decimal(1440)
+                seconds = Decimal(str((bar["closed_at"] - bar["opened_at"]).total_seconds()))
+                if not Decimal(0) < seconds <= Decimal(86400 * 7):
+                    raise ValueError("bar duration is outside the funding-cost envelope")
+                carry = abs(quantity) * close * funding_day * seconds / Decimal(86400)
                 balance -= carry; funding += carry; mark(close)
             history.append(bar)
             features = _features(history, configuration)

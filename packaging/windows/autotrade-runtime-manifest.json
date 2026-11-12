@@ -376,28 +376,9 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
-    },
-    {
-      "id": "ohlcv-sol-h24-forward-shadow",
-      "script": "tools/run_whitebit_ohlcv_forward_shadow.py",
-      "args": [
-        "--market", "SOL_USDT",
-        "--model-artifact", "${RUNTIME_ROOT}/ohlcv-alpha-canonical-sol-h24-20261112/sol_usdt-h24-720d08ebba2d4d27aca78c301e67994d37c7252c580f47a12c734d627afca7fb.xgboost.json",
-        "--model-sha256", "ddf34275374b298d24841ac22dca56ce9626ea2b8881e81c1b9cbe913a89f136",
-        "--threshold", "0.005752387806",
-        "--horizon", "24",
-        "--state-dir", "${RUNTIME_ROOT}/ohlcv-alpha-forward-sol-h24-20261112",
-        "--poll-seconds", "60",
-        "--wait-for-artifacts",
-        "--stop-file", "${RUNTIME_ROOT}/ohlcv-alpha-forward-sol-h24-20261112/managed.stop.json"
-      ],
-      "stop_file": "${RUNTIME_ROOT}/ohlcv-alpha-forward-sol-h24-20261112/managed.stop.json",
-      "checkpoint": "${RUNTIME_ROOT}/ohlcv-alpha-forward-sol-h24-20261112/checkpoint.json",
-      "restart_limit": 5,
-      "restart_window_seconds": 300,
-      "backoff_seconds": 2
     }
   ]
 }
+
 
 

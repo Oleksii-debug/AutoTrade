@@ -12,6 +12,9 @@ import json
 from .waves import LearningWavePolicy, MarketWaveSnapshot, evaluate_pause
 
 
+MAX_CONSECUTIVE_COST_FAILURES = 3
+
+
 def digest(value):
     return "sha256:" + sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -63,6 +66,7 @@ class LiveCycle:
         row = con.execute("SELECT state FROM live_cycle WHERE id=1").fetchone()
         if row:
             state = json.loads(row[0])
+            missing_cost_failure_streak = "consecutive_cost_failures" not in state
             persisted_config = state["config"]
             migrated_config = dict(persisted_config)
             for key in ("outcome_horizon_seconds", "signal_lookback_seconds"):
@@ -76,8 +80,23 @@ class LiveCycle:
                 migrated_config["feature_mode"] = "MID_MOMENTUM"
             if migrated_config != self.cycle_config:
                 raise ValueError("persisted learning cycle configuration differs")
+            if missing_cost_failure_streak:
+                state["consecutive_cost_failures"] = self._legacy_cost_failure_streak(con)
+                if (state["consecutive_cost_failures"] >= MAX_CONSECUTIVE_COST_FAILURES
+                        and state["phase"] in {"COOLDOWN", "RESEARCH"}):
+                    state.update(
+                        phase="RESEARCH_ONLY",
+                        reason="REPEATED_NO_TRAIN_EDGE_AFTER_COSTS",
+                        futility_gate={
+                            "basis": "CONSECUTIVE_NO_POSITIVE_TRAIN_FAMILY",
+                            "observed_failures": state["consecutive_cost_failures"],
+                            "failure_limit": MAX_CONSECUTIVE_COST_FAILURES,
+                            "resume_condition": "NEW_PREREGISTERED_FEATURE_OR_COST_MODEL",
+                        },
+                    )
             if migrated_config != persisted_config:
                 state["config"] = migrated_config
+            if migrated_config != persisted_config or missing_cost_failure_streak:
                 self._save_cycle(con, state, event=True)
                 con.commit()
             return
@@ -91,10 +110,25 @@ class LiveCycle:
             phase="PAUSED" if count else "RUNNING", cycle=1, trials=0,
             incumbent_version=version, candidate_version=None, start_sequence=0,
             started_at=None, net="0", peak="0", drawdown="0", episodes=0,
+            consecutive_cost_failures=0,
             reason="LEGACY_MEMORY_REVIEW" if count else "BOUNDED_BOOTSTRAP",
             network_orders=False, champion_promotion=False, trading_authority=False)
         self._save_cycle(con, state, event=True)
         con.commit()
+
+    @staticmethod
+    def _legacy_cost_failure_streak(con):
+        """Recover the restart-safe streak from pre-gate lifecycle evidence."""
+        streak = 0
+        for row in con.execute(
+                "SELECT state FROM live_cycle_events ORDER BY sequence"):
+            event = json.loads(row[0])
+            if (event.get("phase") == "COOLDOWN"
+                    and event.get("reason") == "NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS"):
+                streak += 1
+            elif event.get("phase") in {"EVALUATING", "RUNNING"}:
+                streak = 0
+        return streak
 
     @staticmethod
     def _load_cycle(con):
@@ -279,7 +313,18 @@ class LiveCycle:
             state["phase"] = "TRAINING"
         elif old_phase == "TRAINING":
             rows = self._training_rows(con, state["training_cutoff"])
-            if not rows or state["trials"] >= self.cycle_config["trials"]:
+            if state.get("consecutive_cost_failures", 0) >= MAX_CONSECUTIVE_COST_FAILURES:
+                state.update(
+                    phase="RESEARCH_ONLY",
+                    reason="REPEATED_NO_TRAIN_EDGE_AFTER_COSTS",
+                    futility_gate={
+                        "basis": "CONSECUTIVE_NO_POSITIVE_TRAIN_FAMILY",
+                        "observed_failures": state["consecutive_cost_failures"],
+                        "failure_limit": MAX_CONSECUTIVE_COST_FAILURES,
+                        "resume_condition": "NEW_PREREGISTERED_FEATURE_OR_COST_MODEL",
+                    },
+                )
+            elif not rows or state["trials"] >= self.cycle_config["trials"]:
                 state.update(phase="RESEARCH_ONLY", reason="INSUFFICIENT_TRAIN_OR_TRIAL_BUDGET")
             else:
                 scores = {}
@@ -311,15 +356,26 @@ class LiveCycle:
                     # A least-bad losing family is not a candidate.  Preserve
                     # the evidence, cool down, then collect a fresh causal
                     # wave instead of spending evaluation time on no TRAIN edge.
+                    failures = state.get("consecutive_cost_failures", 0) + 1
+                    exhausted = failures >= MAX_CONSECUTIVE_COST_FAILURES
                     state.update(
-                        phase="COOLDOWN",
+                        phase="RESEARCH_ONLY" if exhausted else "COOLDOWN",
                         cooldown_at=now,
-                        reason="NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS",
+                        reason=("REPEATED_NO_TRAIN_EDGE_AFTER_COSTS" if exhausted
+                                else "NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS"),
                         train_scores=score_projection,
                         trials=state["trials"] + 1,
+                        consecutive_cost_failures=failures,
                         candidate_version=None,
                         champion_promotion=False,
                     )
+                    if exhausted:
+                        state["futility_gate"] = {
+                            "basis": "CONSECUTIVE_NO_POSITIVE_TRAIN_FAMILY",
+                            "observed_failures": failures,
+                            "failure_limit": MAX_CONSECUTIVE_COST_FAILURES,
+                            "resume_condition": "NEW_PREREGISTERED_FEATURE_OR_COST_MODEL",
+                        }
                 else:
                     version = con.execute("SELECT MAX(version)+1 FROM models").fetchone()[0]
                     self._insert_model(con, version=version, created_at=now, parameter=family,
@@ -330,7 +386,8 @@ class LiveCycle:
                         train_scores=score_projection, trials=state["trials"]+1,
                         evaluation=dict(count=0, candidate="0", incumbent="0", peak="0",
                                         drawdown="0", no_trade="0", pending=None,
-                                        candidate_trades=0, incumbent_trades=0, invalid_gap_count=0))
+                                        candidate_trades=0, incumbent_trades=0, invalid_gap_count=0),
+                        consecutive_cost_failures=0)
         elif old_phase == "EVALUATING":
             self._evaluate_shadow(con, state, current, key)
         elif old_phase == "COOLDOWN":

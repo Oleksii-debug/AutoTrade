@@ -79,8 +79,72 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertTrue(all(Decimal(value) <= 0 for value in cycle["train_scores"].values()))
             self.assertIsNone(cycle["candidate_version"])
             self.assertFalse(cycle["champion_promotion"])
+            self.assertEqual(cycle["consecutive_cost_failures"], 1)
             with closing(sqlite3.connect(learner.database)) as con:
                 self.assertEqual(con.execute("SELECT COUNT(*) FROM models").fetchone()[0], 1)
+
+    def test_three_consecutive_cost_failures_open_futility_gate_before_trial_budget(self):
+        with TemporaryDirectory() as tmp:
+            learner = self.learner(Path(tmp), max_trials=12)
+            for index in range(1, 80):
+                self.tick(learner, index, 100)
+                cycle = learner.status()["learning_cycle"]
+                if cycle["phase"] == "RESEARCH_ONLY":
+                    break
+            self.assertEqual(cycle["phase"], "RESEARCH_ONLY")
+            self.assertEqual(cycle["reason"], "REPEATED_NO_TRAIN_EDGE_AFTER_COSTS")
+            self.assertEqual(cycle["trials"], 3)
+            self.assertEqual(cycle["consecutive_cost_failures"], 3)
+            self.assertEqual(cycle["futility_gate"], {
+                "basis": "CONSECUTIVE_NO_POSITIVE_TRAIN_FAMILY",
+                "observed_failures": 3,
+                "failure_limit": 3,
+                "resume_condition": "NEW_PREREGISTERED_FEATURE_OR_COST_MODEL",
+            })
+            self.assertIsNone(cycle["candidate_version"])
+            self.assertFalse(cycle["champion_promotion"])
+            with closing(sqlite3.connect(learner.database)) as con:
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM models").fetchone()[0], 1)
+
+    def test_pre_gate_failure_history_migrates_without_spending_a_fourth_wave(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(root, max_trials=12)
+            with closing(sqlite3.connect(learner.database)) as con:
+                state = json.loads(con.execute(
+                    "SELECT state FROM live_cycle WHERE id=1"
+                ).fetchone()[0])
+                state.pop("consecutive_cost_failures")
+                state.update(
+                    phase="RESEARCH",
+                    reason="NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS",
+                    trials=3,
+                )
+                con.execute("UPDATE live_cycle SET state=? WHERE id=1", (
+                    json.dumps(state, sort_keys=True),
+                ))
+                con.execute("DELETE FROM live_cycle_events")
+                for trial in range(1, 4):
+                    event = dict(state)
+                    event.update(
+                        phase="COOLDOWN",
+                        reason="NO_TRAIN_FAMILY_POSITIVE_AFTER_COSTS",
+                        trials=trial,
+                    )
+                    con.execute(
+                        "INSERT INTO live_cycle_events(state) VALUES(?)",
+                        (json.dumps(event, sort_keys=True),),
+                    )
+                con.commit()
+
+            migrated = self.learner(root, max_trials=12)
+            cycle = migrated.status()["learning_cycle"]
+            self.assertEqual(cycle["phase"], "RESEARCH_ONLY")
+            self.assertEqual(cycle["reason"], "REPEATED_NO_TRAIN_EDGE_AFTER_COSTS")
+            self.assertEqual(cycle["consecutive_cost_failures"], 3)
+            self.assertEqual(cycle["futility_gate"]["failure_limit"], 3)
+            restarted = self.learner(root, max_trials=12)
+            self.assertEqual(restarted.status(), migrated.status())
 
     def test_cost_hurdle_abstains_and_drawdown_pauses_before_new_action(self):
         with TemporaryDirectory() as tmp:

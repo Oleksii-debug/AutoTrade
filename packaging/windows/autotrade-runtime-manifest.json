@@ -654,10 +654,24 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-subhour-forward-shadow",
+      "script": "tools/run_whitebit_subhour_forward_shadow.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-subhour-forward-v1-20261112",
+        "--depth-database", "${RUNTIME_ROOT}/whitebit-depth-tape-v1-20261112/depth-tape.sqlite3",
+        "--poll-seconds", "30",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-subhour-forward-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-subhour-forward-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-subhour-forward-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }
-
 
 
 

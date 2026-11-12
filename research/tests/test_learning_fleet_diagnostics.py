@@ -18,7 +18,8 @@ def checkpoint(path, phase="RUNNING"):
             "config":{"fee_bps":"10", "slippage_bps":"5",
                 "short_carry_bps_per_day":"2", "notional":"100",
                 "outcome_horizon_seconds":300, "signal_lookback_seconds":60,
-                "max_observation_gap_seconds":180, "secret":"excluded"},
+                "max_observation_gap_seconds":180,
+                "feature_mode":"TOP_BOOK_IMBALANCE", "secret":"excluded"},
             "evaluation":{"pending":{"candidate_action":"SELL",
                 "incumbent_action":"BUY", "available_at":"2026-01-01T00:05:00+00:00",
                 "ask":"secret-free-but-unnecessary"}}}}), encoding="utf-8")
@@ -33,6 +34,8 @@ class LearningFleetDiagnosticsTests(unittest.TestCase):
             self.assertEqual(value["learners"][0]["learning_cycle"]["analysis"]["finding"],"costs")
             cycle=value["learners"][0]["learning_cycle"]
             self.assertEqual(cycle["cost_and_horizon_config"]["short_carry_bps_per_day"],"2")
+            self.assertEqual(cycle["cost_and_horizon_config"]["feature_mode"],
+                             "TOP_BOOK_IMBALANCE")
             self.assertEqual(cycle["pending_actions"]["candidate"],"SELL")
             self.assertNotIn("secret",json.dumps(cycle["cost_and_horizon_config"]).lower())
             self.assertNotIn("ask",cycle["pending_actions"])

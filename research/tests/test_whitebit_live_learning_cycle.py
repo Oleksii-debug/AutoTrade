@@ -175,6 +175,55 @@ class LiveLearningCycleTests(unittest.TestCase):
             reference["snapshot_json"] = json.dumps(prior)
             self.assertGreater(learner._signal_feature(current, reference), 0)
 
+    def test_imbalance_change_is_causal_restart_safe_and_signed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learner = self.learner(
+                root, cycle_episodes=100,
+                feature_mode="TOP_BOOK_IMBALANCE_CHANGE",
+            )
+            current = snapshot(2, bid="100", ask="100.01")
+            current["bid_quantity"], current["ask_quantity"] = "3", "1"
+            prior = snapshot(1, bid="100", ask="100.01")
+            prior["bid_quantity"], prior["ask_quantity"] = "1", "3"
+            reference = {
+                "mid": "100.005", "available_at": prior["available_at"],
+                "snapshot_json": json.dumps(prior),
+            }
+            positive = learner._signal_feature(current, reference)
+            self.assertGreater(positive, 0)
+            current["bid_quantity"], current["ask_quantity"] = "1", "3"
+            prior["bid_quantity"], prior["ask_quantity"] = "3", "1"
+            reference["snapshot_json"] = json.dumps(prior)
+            self.assertLess(learner._signal_feature(current, reference), 0)
+            current["bid_quantity"], current["ask_quantity"] = "3", "1"
+            self.assertEqual(learner._signal_feature(current, reference), 0)
+            restarted = self.learner(
+                root, cycle_episodes=100,
+                feature_mode="TOP_BOOK_IMBALANCE_CHANGE",
+            )
+            self.assertEqual(restarted.status(), learner.status())
+            with self.assertRaisesRegex(ValueError, "configuration differs"):
+                self.learner(
+                    root, cycle_episodes=100,
+                    feature_mode="TOP_BOOK_IMBALANCE",
+                )
+
+    def test_imbalance_change_rejects_invalid_prior_book(self):
+        with TemporaryDirectory() as tmp:
+            learner = self.learner(
+                Path(tmp), feature_mode="TOP_BOOK_IMBALANCE_CHANGE",
+            )
+            current = snapshot(2, bid="100", ask="100.01")
+            prior = snapshot(1, bid="100", ask="100.01")
+            prior["bid_quantity"], prior["ask_quantity"] = "0", "0"
+            reference = {
+                "mid": "100.005", "available_at": prior["available_at"],
+                "snapshot_json": json.dumps(prior),
+            }
+            with self.assertRaisesRegex(ValueError, "top-book quantities"):
+                learner._signal_feature(current, reference)
+
     def test_short_candidate_has_symmetric_cost_hurdle_and_outcome(self):
         with TemporaryDirectory() as tmp:
             learner = self.learner(Path(tmp))

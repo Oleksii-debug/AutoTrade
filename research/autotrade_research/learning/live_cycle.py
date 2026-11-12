@@ -27,6 +27,7 @@ class LiveCycle:
             "MID_MOMENTUM",
             "TOP_BOOK_IMBALANCE",
             "TOP_BOOK_IMBALANCE_PERSISTENCE",
+            "TOP_BOOK_IMBALANCE_CHANGE",
         }:
             raise ValueError("feature mode is unsupported")
         for name, value in (("outcome horizon", outcome_horizon),
@@ -195,31 +196,41 @@ class LiveCycle:
     def _cycle_action(self, parameter, feature, snapshot):
         return self._cycle_side(parameter, feature, snapshot) is not None
 
-    def _signal_feature(self, current, reference):
-        mid = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"]))
-        if self.cycle_config["feature_mode"] == "MID_MOMENTUM":
-            return mid - Decimal(reference[0])
-        bid_quantity = Decimal(current["bid_quantity"])
-        ask_quantity = Decimal(current["ask_quantity"])
+    @staticmethod
+    def _book_imbalance(snapshot):
+        bid_quantity = Decimal(snapshot["bid_quantity"])
+        ask_quantity = Decimal(snapshot["ask_quantity"])
         if (not bid_quantity.is_finite() or not ask_quantity.is_finite()
                 or min(bid_quantity, ask_quantity) < 0
                 or bid_quantity + ask_quantity <= 0):
             raise ValueError("top-book quantities are invalid")
-        imbalance = (bid_quantity - ask_quantity) / (bid_quantity + ask_quantity)
-        if self.cycle_config["feature_mode"] == "TOP_BOOK_IMBALANCE_PERSISTENCE":
+        return (bid_quantity - ask_quantity) / (bid_quantity + ask_quantity)
+
+    def _signal_feature(self, current, reference):
+        mid = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"]))
+        if self.cycle_config["feature_mode"] == "MID_MOMENTUM":
+            return mid - Decimal(reference[0])
+        imbalance = self._book_imbalance(current)
+        if self.cycle_config["feature_mode"] in {
+            "TOP_BOOK_IMBALANCE_PERSISTENCE",
+            "TOP_BOOK_IMBALANCE_CHANGE",
+        }:
             prior = json.loads(reference["snapshot_json"])
             if type(prior) is not dict:
                 raise ValueError("prior top-book snapshot is malformed")
-            prior_bid = Decimal(prior["bid_quantity"])
-            prior_ask = Decimal(prior["ask_quantity"])
-            if (not prior_bid.is_finite() or not prior_ask.is_finite()
-                    or min(prior_bid, prior_ask) < 0
-                    or prior_bid + prior_ask <= 0):
-                raise ValueError("prior top-book quantities are invalid")
-            prior_imbalance = (prior_bid - prior_ask) / (prior_bid + prior_ask)
-            if imbalance * prior_imbalance <= 0:
-                return Decimal("0")
-            imbalance = (imbalance + prior_imbalance) / Decimal("2")
+            prior_imbalance = self._book_imbalance(prior)
+            if self.cycle_config["feature_mode"] == "TOP_BOOK_IMBALANCE_CHANGE":
+                # The prior authenticated BBO precedes the decision.  Using the
+                # signed change, rather than the static level, asks whether new
+                # queue pressure arrived before the next-open simulation.  The
+                # existing exact cost hurdle remains the admission gate.
+                imbalance -= prior_imbalance
+            else:
+                # Persistence is deliberately a distinct preregistered family.
+                # A sign flip abstains instead of averaging incompatible books.
+                if imbalance * prior_imbalance <= 0:
+                    return Decimal("0")
+                imbalance = (imbalance + prior_imbalance) / Decimal("2")
         # A preregistered 1% price-equivalent scale lets the existing exact
         # cost hurdle decide whether an imbalance is large enough to test.
         return mid * imbalance / Decimal(100)

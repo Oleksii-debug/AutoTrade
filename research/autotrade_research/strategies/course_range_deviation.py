@@ -4,7 +4,8 @@ The course treats trend and consolidation as different market regimes.  This
 module implements only the consolidation family: a completed-bar range is
 formed from prior data, price sweeps an external boundary, then closes back
 inside with an aggressive reaction.  Entry is at the next bar open, the stop
-is beyond the sweep, and the first target is the range equilibrium.  It has no
+is beyond the sweep. The default target is range equilibrium; an explicit
+research option targets the opposite boundary.  It has no
 network or order-provider dependency.
 """
 from __future__ import annotations
@@ -28,6 +29,7 @@ def _text(value: Decimal) -> str:
 
 @dataclass(frozen=True)
 class RangeDeviationConfiguration:
+    target_mode: str = "EQUILIBRIUM"
     require_boundary_retest: bool = False
     retest_expiry_bars: int = 4
     range_lookback: int = 96
@@ -52,6 +54,8 @@ class RangeDeviationConfiguration:
     cooldown_bars: int = 16
 
     def validate(self) -> None:
+        if self.target_mode not in {"EQUILIBRIUM", "OPPOSITE_BOUNDARY"}:
+            raise ValueError("unsupported range target mode")
         if type(self.require_boundary_retest) is not bool:
             raise ValueError("require_boundary_retest must be boolean")
         if type(self.retest_expiry_bars) is not int or not 1 <= self.retest_expiry_bars <= 16:
@@ -179,10 +183,11 @@ def detect_deviation(history: list[dict],
     shift = close + displacement if direction > 0 else close - displacement
     if (direction > 0 and shift >= midpoint) or (direction < 0 and shift <= midpoint):
         return reject("SHIFT_BEYOND_TARGET")
+    target = midpoint if configuration.target_mode == "EQUILIBRIUM" else (upper if direction > 0 else lower)
     bounded = lambda value: _text(Decimal(str(value)))
     return {"direction": direction, "range_lower": bounded(lower),
         "range_upper": bounded(upper), "range_midpoint": bounded(midpoint),
-        "stop": bounded(stop), "target": bounded(midpoint), "sweep_extreme": bounded(extreme),
+        "stop": bounded(stop), "target": bounded(target), "sweep_extreme": bounded(extreme),
         "atr": bounded(atr), "directional_efficiency": bounded(efficiency),
         "range_width_atr": bounded(width_atr), "shift_level": bounded(shift), "age": 0,
         "lower_boundary_touches": lower_touches,
@@ -316,7 +321,8 @@ def simulate(bars: list[dict], *, costs: TechnicalCosts = TechnicalCosts(),
                     reference = min(opened, stop) if quantity > 0 else max(opened, stop)
                     close_position(reference, "PRECOMMITTED_STOP_EXIT", bar["closed_at"].isoformat())
                 elif targeted:
-                    close_position(target, "RANGE_EQUILIBRIUM_EXIT", bar["closed_at"].isoformat())
+                    close_position(target, "RANGE_EQUILIBRIUM_EXIT" if configuration.target_mode == "EQUILIBRIUM"
+                                   else "OPPOSING_RANGE_BOUNDARY_EXIT", bar["closed_at"].isoformat())
                 elif holding >= configuration.maximum_hold_bars:
                     close_position(close, "MAX_HOLD_EXIT", bar["closed_at"].isoformat())
             mark(close)

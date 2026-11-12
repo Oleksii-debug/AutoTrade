@@ -5,7 +5,7 @@ from research.autotrade_research.integrations.whitebit_public import (
     PublicBook, PublicInstrument, PublicTrade, PublicTradeBatch,
 )
 from research.autotrade_research.strategies.maker_shadow import (
-    evaluate_quote, open_quote,
+    advance_evidence_wave, evaluate_quote, open_quote,
 )
 
 
@@ -80,4 +80,34 @@ def test_insufficient_queue_volume_remains_open_before_expiry():
     )
     assert result["status"] == "OPEN"
     assert result["bid_filled"] is False
+
+
+def test_negative_discovery_wave_stops_new_research_actions():
+    state = {"research_phase": "DISCOVERY"}
+    for _ in range(4):
+        state = advance_evidence_wave(
+            state, net_pnl_quote="-0.1", outcome="BID_ONLY_FORCED_EXIT",
+            target_cycles=4,
+        )
+    assert state["research_phase"] == "RESEARCH_ONLY"
+    assert state["latest_wave_analysis"]["passed_after_cost_gate"] is False
+    assert state["latest_wave_analysis"]["automatic_promotion"] is False
+
+
+def test_positive_discovery_requires_separate_positive_evaluation_wave():
+    state = {"research_phase": "DISCOVERY"}
+    for _ in range(4):
+        state = advance_evidence_wave(
+            state, net_pnl_quote="0.1", outcome="BOTH_SIDES_FILLED",
+            target_cycles=4,
+        )
+    assert state["research_phase"] == "EVALUATING"
+    for _ in range(4):
+        state = advance_evidence_wave(
+            state, net_pnl_quote="0.1", outcome="BOTH_SIDES_FILLED",
+            target_cycles=4,
+        )
+    assert state["research_phase"] == "QUALIFIED_SHADOW"
+    assert state["latest_wave_analysis"]["automatic_promotion"] is False
+
 

@@ -307,6 +307,7 @@
         "--maximum-quote-seconds", "60",
         "--notional-quote", "100",
         "--forced-exit-impact-bps", "5",
+        "--cycle-cycles", "12",
         "--stop-file", "${RUNTIME_ROOT}/whitebit-pepe-maker-shadow-v1-20261112/managed.stop.json"
       ],
       "stop_file": "${RUNTIME_ROOT}/whitebit-pepe-maker-shadow-v1-20261112/managed.stop.json",
@@ -410,6 +411,7 @@
     }
   ]
 }
+
 
 
 

@@ -47,6 +47,7 @@ _ALLOWED_SCRIPTS = frozenset({
     "tools/run_groq_advisory_supervisor.py",
     "tools/run_whitebit_trend_shadow.py",
     "tools/run_whitebit_rolling_alpha_supervisor.py",
+    "tools/run_whitebit_opportunity_supervisor.py",
     "tools/run_whitebit_live_zero_learning.py",
     "tools/run_whitebit_public_supervisor.py",
 })

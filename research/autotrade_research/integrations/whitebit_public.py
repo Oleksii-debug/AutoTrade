@@ -660,6 +660,11 @@ class WhiteBitPublicClient:
             raise PublicDataError("MARKET_ACTIVITY_NOT_FOUND")
         return matches[0]
 
+    def market_activities(self) -> tuple[PublicTicker, ...]:
+        """Return the complete current ticker set with one bounded public read."""
+        raw, received = self._read("ticker")
+        return parse_market_activity(raw, received)
+
     def klines(
         self,
         market: str,
@@ -693,3 +698,4 @@ class WhiteBitPublicClient:
         query = (("limit", "100"), ("level", "0"))
         raw, received = self._read("orderbook/" + market, query)
         return parse_orderbook(raw, market, received)
+

@@ -286,6 +286,23 @@
       "restart_limit": 5,
       "restart_window_seconds": 300,
       "backoff_seconds": 2
+    },
+    {
+      "id": "whitebit-opportunity-screen",
+      "script": "tools/run_whitebit_opportunity_supervisor.py",
+      "args": [
+        "--state-dir", "${RUNTIME_ROOT}/whitebit-opportunity-screen-v1-20261112",
+        "--bars", "2000",
+        "--market-limit", "12",
+        "--minimum-quote-volume", "1000000",
+        "--interval-seconds", "86400",
+        "--stop-file", "${RUNTIME_ROOT}/whitebit-opportunity-screen-v1-20261112/managed.stop.json"
+      ],
+      "stop_file": "${RUNTIME_ROOT}/whitebit-opportunity-screen-v1-20261112/managed.stop.json",
+      "checkpoint": "${RUNTIME_ROOT}/whitebit-opportunity-screen-v1-20261112/checkpoint.json",
+      "restart_limit": 5,
+      "restart_window_seconds": 300,
+      "backoff_seconds": 2
     }
   ]
 }

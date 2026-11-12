@@ -79,7 +79,7 @@ def _perfect_timing_benchmark(rows: list[dict], hold_cap: int) -> dict:
 def _compare_variant(cut: list[dict], hold_cap: int) -> dict:
     result = simulate(cut, candidate="TECHNICAL_CONFLUENCE",
                       configuration=replace(configurations()[0], maximum_hold_bars=hold_cap),
-                      report_daily_returns=True)
+                      report_daily_returns=True, report_hourly_returns=True)
     result["perfect_timing_benchmark"] = _perfect_timing_benchmark(cut, hold_cap)
     return result
 

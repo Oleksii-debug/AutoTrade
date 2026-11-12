@@ -12,6 +12,7 @@ from datetime import UTC, timedelta
 from decimal import Decimal, ROUND_DOWN, localcontext
 from hashlib import sha256
 import json
+from statistics import median
 
 from .fast_screen import decimal, validate_bars
 from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
@@ -20,6 +21,8 @@ from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 VERSION = "technical-confluence-futures-v1"
 CANDIDATES = ("CASH", "HOLD_LONG", "HOLD_SHORT", "TECHNICAL_CONFLUENCE")
 DAILY_RETURN_TARGETS = (Decimal("0.05"), Decimal("0.10"), Decimal("0.20"))
+HOURLY_TARGET = Decimal("0.0051")
+HOURLY_WINDOWS = (1, 4, 8)
 
 
 def digest(value) -> str:
@@ -40,6 +43,22 @@ def summarize_daily_returns(returns: list[Decimal]) -> dict:
             str(target): sum(value >= target for value in returns)
             for target in DAILY_RETURN_TARGETS
         },
+    }
+
+
+def _summarize_hour_windows(returns: list[Decimal], hours: int) -> dict:
+    target = hours * HOURLY_TARGET
+    return {
+        "complete_windows": len(returns),
+        "target_fraction": str(target),
+        "target_hits": sum(value >= target for value in returns),
+        "positive_windows": sum(value > 0 for value in returns),
+        "flat_windows": sum(value == 0 for value in returns),
+        "negative_windows": sum(value < 0 for value in returns),
+        "average_fraction": str(sum(returns) / len(returns)) if returns else None,
+        "median_fraction": str(median(returns)) if returns else None,
+        "best_fraction": str(max(returns)) if returns else None,
+        "worst_fraction": str(min(returns)) if returns else None,
     }
 
 
@@ -234,7 +253,8 @@ def technical_signal(history: list[dict],
 def simulate(bars: list[dict], *, candidate: str,
              costs: TechnicalCosts = TechnicalCosts(),
              configuration: TechnicalConfiguration = TechnicalConfiguration(),
-             report_daily_returns: bool = False) -> dict:
+             report_daily_returns: bool = False,
+             report_hourly_returns: bool = False) -> dict:
     """Run one partition with causal next-open perpetual-futures fills."""
     validate_bars(bars, require_ohlcv=True)
     costs.validate(); configuration.validate()
@@ -260,27 +280,39 @@ def simulate(bars: list[dict], *, candidate: str,
         exit_reasons: dict[str, int] = {}
         entries_by_day: dict[str, int] = {}
         evidence = sha256()
-        daily_returns: list[Decimal] = []
-        midnight = bars[0]["opened_at"].astimezone(UTC)
-        daily_baseline = (
-            (midnight, initial) if midnight == midnight.replace(
-                hour=0, minute=0, second=0, microsecond=0) else None)
+        window_hours = ((HOURLY_WINDOWS if report_hourly_returns else ())
+                        + ((24,) if report_daily_returns else ()))
+        window_returns: dict[int, list[Decimal]] = {hours: [] for hours in window_hours}
+        exposed_hour_returns: list[Decimal] = []
+        hour_had_exposure = False
+        start = bars[0]["opened_at"].astimezone(UTC)
+        baselines = {}
+        if not (start.minute or start.second or start.microsecond):
+            baselines = {hours: (start, initial) for hours in window_hours if start.hour % hours == 0}
 
-        def record_midnight(at, reference: Decimal) -> None:
-            nonlocal daily_baseline
+        def record_boundary(at, reference: Decimal) -> None:
+            nonlocal hour_had_exposure
             at = at.astimezone(UTC)
-            if at != at.replace(hour=0, minute=0, second=0, microsecond=0):
+            if at.minute or at.second or at.microsecond:
                 return
             equity = balance
             if quantity:
                 exit_price = reference * (1 - adverse if quantity > 0 else 1 + adverse)
                 equity += quantity * (exit_price - entry_price)
                 equity -= abs(quantity) * exit_price * fee_ratio
-            if daily_baseline is not None:
-                previous_at, previous_equity = daily_baseline
-                if at - previous_at == timedelta(days=1) and previous_equity > 0:
-                    daily_returns.append((equity - previous_equity) / previous_equity)
-            daily_baseline = (at, equity)
+            for hours in window_hours:
+                if at.hour % hours:
+                    continue
+                prior = baselines.get(hours)
+                if prior is not None:
+                    previous_at, previous_equity = prior
+                    if at - previous_at == timedelta(hours=hours) and previous_equity > 0:
+                        change = (equity - previous_equity) / previous_equity
+                        window_returns[hours].append(change)
+                        if hours == 1 and hour_had_exposure:
+                            exposed_hour_returns.append(change)
+                baselines[hours] = (at, equity)
+            hour_had_exposure = False
 
         def mark(price: Decimal) -> Decimal:
             nonlocal peak, max_drawdown
@@ -363,14 +395,15 @@ def simulate(bars: list[dict], *, candidate: str,
                 cooldown_remaining -= 1
             mark(close)
             if quantity:
+                hour_had_exposure = True
                 holding += 1
                 seconds = Decimal(str((bar["closed_at"] - bar["opened_at"]).total_seconds()))
                 if not Decimal(0) < seconds <= Decimal(86400 * 7):
                     raise ValueError("bar duration is outside the funding-cost envelope")
                 carry = abs(quantity) * close * funding_day * seconds / Decimal(86400)
                 balance -= carry; funding += carry; mark(close)
-            if report_daily_returns:
-                record_midnight(bar["closed_at"], close)
+            if window_hours:
+                record_boundary(bar["closed_at"], close)
             history.append(bar)
             features = _features(history, configuration)
             if candidate != "TECHNICAL_CONFLUENCE" or features is None:
@@ -420,5 +453,11 @@ def simulate(bars: list[dict], *, candidate: str,
             "network_orders": False, "trading_authority": False,
         }
         if report_daily_returns:
-            result["daily_returns"] = summarize_daily_returns(daily_returns)
+            result["daily_returns"] = summarize_daily_returns(window_returns[24])
+        if report_hourly_returns:
+            result["clock_window_returns"] = {
+                str(hours): _summarize_hour_windows(window_returns[hours], hours)
+                for hours in HOURLY_WINDOWS
+            }
+            result["one_hour_with_exposure"] = _summarize_hour_windows(exposed_hour_returns, 1)
         return result

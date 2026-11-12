@@ -41,6 +41,11 @@ class LiveLearningCycleTests(unittest.TestCase):
             cycle = learner.status()["learning_cycle"]
             self.assertEqual(cycle["phase"], "RUNNING")
             self.assertEqual(cycle["incumbent_version"], 1)
+            self.assertEqual(set(cycle["train_scores"]), {
+                "MOMENTUM_COST_HURDLE", "CONTRARIAN_COST_HURDLE",
+                "MOMENTUM_SHORT_COST_HURDLE",
+                "CONTRARIAN_SHORT_COST_HURDLE",
+            })
             self.assertTrue(cycle["evaluation"]["qualifies_for_research_simulation"])
             self.assertFalse(cycle["champion_promotion"])
             with closing(sqlite3.connect(learner.database)) as con:
@@ -72,6 +77,24 @@ class LiveLearningCycleTests(unittest.TestCase):
             result = self.tick(learner, 3, 100)
             self.assertIsNone(result["new_decision"])
             self.assertIn("LEARNING_WAVE.DRAWDOWN_THRESHOLD", learner.status()["learning_cycle"]["pause_reasons"])
+
+    def test_short_candidate_has_symmetric_cost_hurdle_and_outcome(self):
+        with TemporaryDirectory() as tmp:
+            learner = self.learner(Path(tmp))
+            quote = dict(ask_price="100.01", bid_price="100")
+            self.assertEqual(
+                learner._cycle_side(
+                    "MOMENTUM_SHORT_COST_HURDLE", Decimal("-2"), quote,
+                ),
+                "SHORT",
+            )
+            self.assertIsNone(learner._cycle_side(
+                "MOMENTUM_SHORT_COST_HURDLE", Decimal("-0.01"), quote,
+            ))
+            winning = learner._short_outcome("100", "90")[3]
+            losing = learner._short_outcome("100", "110")[3]
+            self.assertGreater(winning, 0)
+            self.assertLess(losing, 0)
 
     def test_legacy_memory_migrates_paused_and_retains_pending_and_evaluation(self):
         with TemporaryDirectory() as tmp:

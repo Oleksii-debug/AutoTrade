@@ -100,19 +100,40 @@ class LiveCycle:
             fees = (self.notional + quantity * exit_price) * self.fee_bps / 10000
             return quantity, gross, fees, gross - fees
 
-    def _cycle_action(self, parameter, feature, snapshot):
+    def _short_outcome(self, bid, ask):
+        # Symmetric virtual short proxy. It carries no real borrow/margin
+        # authority; both execution legs and both fees remain explicit.
+        with localcontext() as context:
+            context.prec = 42
+            entry = Decimal(bid) * (1 - self.slippage_bps / 10000)
+            exit_price = Decimal(ask) * (1 + self.slippage_bps / 10000)
+            quantity = self.notional / entry
+            gross = quantity * (entry - exit_price)
+            fees = (self.notional + quantity * exit_price) * self.fee_bps / 10000
+            return quantity, gross, fees, gross - fees
+
+    def _cycle_side(self, parameter, feature, snapshot):
         signed = -feature if parameter.startswith("CONTRARIAN") else feature
+        short = "_SHORT_" in parameter
         if not parameter.endswith("COST_HURDLE"):
-            return signed > 0
+            if short:
+                return "SHORT" if signed < 0 else None
+            return "BUY" if signed > 0 else None
         # Price movement is merely a preregistered signal, not expected profit.
-        # Exact break-even next bid includes both fees and both slippage legs.
+        # Exact current-spread hurdle covers both fees and both slippage legs.
         with localcontext() as context:
             context.prec = 42
             fee = self.fee_bps / 10000
             slip = self.slippage_bps / 10000
             ask, bid = Decimal(snapshot["ask_price"]), Decimal(snapshot["bid_price"])
-            required_bid = ask * (1 + slip) * (1 + fee) / ((1 - slip) * (1 - fee))
-            return signed > required_bid - bid
+            if short:
+                break_even_ask = bid * (1-slip) * (1-fee) / ((1+slip)*(1+fee))
+                return "SHORT" if -signed > ask-break_even_ask else None
+            required_bid = ask * (1+slip) * (1+fee) / ((1-slip)*(1-fee))
+            return "BUY" if signed > required_bid-bid else None
+
+    def _cycle_action(self, parameter, feature, snapshot):
+        return self._cycle_side(parameter, feature, snapshot) is not None
 
     def _signal_reference(self, con, current, key):
         lookback = self.cycle_config["signal_lookback_seconds"]
@@ -137,7 +158,7 @@ class LiveCycle:
         return reference
 
     def _training_rows(self, con, cutoff):
-        rows = con.execute("""SELECT d.*,o.ask,o.bid,x.bid AS exit_bid,
+        rows = con.execute("""SELECT d.*,o.ask,o.bid,x.bid AS exit_bid,x.ask AS exit_ask,
             o.available_at AS entry_at,x.available_at AS exit_at
             FROM decisions d JOIN observations o ON o.observation_key=d.observation_key
             JOIN observations x ON x.observation_key=d.outcome_observation_key
@@ -207,10 +228,23 @@ class LiveCycle:
                 state.update(phase="RESEARCH_ONLY", reason="INSUFFICIENT_TRAIN_OR_TRIAL_BUDGET")
             else:
                 scores = {}
-                for family in ("MOMENTUM_COST_HURDLE", "CONTRARIAN_COST_HURDLE"):
-                    scores[family] = sum((self._buy_outcome(r["ask"], r["exit_bid"])[3]
-                        for r in rows if self._cycle_action(family, Decimal(r["feature_momentum"]),
-                            dict(ask_price=r["ask"], bid_price=r["bid"]))), Decimal(0))
+                families = (
+                    "MOMENTUM_COST_HURDLE", "CONTRARIAN_COST_HURDLE",
+                    "MOMENTUM_SHORT_COST_HURDLE",
+                    "CONTRARIAN_SHORT_COST_HURDLE",
+                )
+                for family in families:
+                    score = Decimal(0)
+                    for row in rows:
+                        side = self._cycle_side(
+                            family, Decimal(row["feature_momentum"]),
+                            dict(ask_price=row["ask"], bid_price=row["bid"]),
+                        )
+                        if side == "BUY":
+                            score += self._buy_outcome(row["ask"], row["exit_bid"])[3]
+                        elif side == "SHORT":
+                            score += self._short_outcome(row["bid"], row["exit_ask"])[3]
+                    scores[family] = score
                 family = max(scores, key=scores.get)
                 version = con.execute("SELECT MAX(version)+1 FROM models").fetchone()[0]
                 self._insert_model(con, version=version, created_at=now, parameter=family,
@@ -248,17 +282,33 @@ class LiveCycle:
             pending["last_available_at"] = current["available_at"]
             return
         if pending:
-            outcome = self._buy_outcome(pending["ask"], current["bid_price"])[3]
+            outcomes = {}
+            for name in ("candidate", "incumbent"):
+                action = pending.get(name+"_action")
+                if action is None and pending.get(name) is True:
+                    action = "BUY"
+                if action == "BUY":
+                    outcomes[name] = self._buy_outcome(
+                        pending["ask"], current["bid_price"])[3]
+                elif action == "SHORT":
+                    outcomes[name] = self._short_outcome(
+                        pending["bid"], current["ask_price"])[3]
+                else:
+                    outcomes[name] = Decimal(0)
             con.execute("INSERT INTO live_shadow_episodes(cycle,evidence) VALUES(?,?)",
                 (state["cycle"], json.dumps(dict(entry=pending, outcome_key=key,
                     outcome_available_at=current["available_at"],
                     candidate_version=state["candidate_version"],
                     incumbent_version=state["incumbent_version"],
-                    buy_net_usdt=str(outcome), shadow_only=True,
+                    candidate_net_usdt=str(outcomes["candidate"]),
+                    incumbent_net_usdt=str(outcomes["incumbent"]), shadow_only=True,
                     training_eligible=False), sort_keys=True)))
             for name in ("candidate", "incumbent"):
-                evaluation[name] = str(Decimal(evaluation[name]) + (outcome if pending[name] else Decimal(0)))
-                evaluation[name+"_trades"] += int(pending[name])
+                action = pending.get(name+"_action")
+                if action is None and pending.get(name) is True:
+                    action = "BUY"
+                evaluation[name] = str(Decimal(evaluation[name])+outcomes[name])
+                evaluation[name+"_trades"] += int(action in {"BUY", "SHORT"})
             total = Decimal(evaluation["candidate"])
             peak = max(Decimal(evaluation["peak"]), total)
             evaluation.update(count=evaluation["count"]+1, peak=str(peak),
@@ -292,11 +342,14 @@ class LiveCycle:
         reference = self._signal_reference(con, current, key)
         if reference:
             feature = self._mid(Decimal(current["bid_price"]), Decimal(current["ask_price"])) - Decimal(reference[0])
-            pending = dict(ask=current["ask_price"], observation_key=key,
+            pending = dict(ask=current["ask_price"], bid=current["bid_price"],
+                           observation_key=key,
                            available_at=current["available_at"],
                            last_available_at=current["available_at"])
             for name in ("candidate", "incumbent"):
                 parameter = con.execute("SELECT parameter FROM models WHERE version=?",
                     (state[name+"_version"],)).fetchone()[0]
-                pending[name] = self._cycle_action(parameter, feature, current)
+                action = self._cycle_side(parameter, feature, current)
+                pending[name] = action is not None
+                pending[name+"_action"] = action
             evaluation["pending"] = pending

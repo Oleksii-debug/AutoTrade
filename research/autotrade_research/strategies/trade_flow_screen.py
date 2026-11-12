@@ -12,7 +12,14 @@ import sqlite3
 from ..integrations.whitebit_public import _symbol
 
 
-SCHEMA = "autotrade-whitebit-trade-flow-screen-v1"
+SCHEMA = "autotrade-whitebit-trade-flow-screen-v2"
+CANDIDATE_REGISTRY_VERSION = "FLOW_PRICE_RESPONSE_V2"
+FAMILIES = (
+    "MOMENTUM",
+    "CONTRARIAN",
+    "CONFIRMED_MOMENTUM",
+    "ABSORPTION_REVERSAL",
+)
 
 
 @dataclass(frozen=True)
@@ -26,7 +33,7 @@ class FlowCandidate:
 def candidates() -> tuple[FlowCandidate, ...]:
     return tuple(
         FlowCandidate(family, lookback, threshold, horizon)
-        for family in ("MOMENTUM", "CONTRARIAN")
+        for family in FAMILIES
         for lookback in (1, 3, 12)
         for threshold in ("0.2", "0.5", "0.8")
         for horizon in (1, 3, 12)
@@ -88,6 +95,8 @@ def _read_rows(path: Path, market: str, *, maximum_gap_buckets: int = 12) -> lis
 
 
 def _simulate(rows: list[dict], candidate: FlowCandidate, cost: Decimal) -> dict:
+    if candidate.family not in FAMILIES:
+        raise ValueError("unknown trade-flow family")
     equity = Decimal("1")
     peak = equity
     maximum_drawdown = Decimal(0)
@@ -103,6 +112,16 @@ def _simulate(rows: list[dict], candidate: FlowCandidate, cost: Decimal) -> dict
         direction = 1 if imbalance >= threshold else -1 if imbalance <= -threshold else 0
         if candidate.family == "CONTRARIAN":
             direction = -direction
+        elif direction and candidate.family in (
+            "CONFIRMED_MOMENTUM", "ABSORPTION_REVERSAL",
+        ):
+            first = Decimal(window[0]["first_price"])
+            response = Decimal(window[-1]["last_price"]) / first - Decimal(1)
+            aligned = Decimal(direction) * response > 0
+            if candidate.family == "CONFIRMED_MOMENTUM":
+                direction = direction if aligned else 0
+            else:
+                direction = 0 if aligned else -direction
         if direction == 0:
             index += 1
             continue
@@ -151,6 +170,7 @@ def screen_trade_flow(
     rows = _read_rows(path, market)
     base = {
         "schema": SCHEMA, "market": _symbol(market),
+        "candidate_registry_version": CANDIDATE_REGISTRY_VERSION,
         "bucket_count": len(rows), "available_causal_buckets": len(rows),
         "minimum_buckets": minimum_buckets,
         "round_trip_cost_bps": format(Decimal(round_trip_cost_bps), "f"),
@@ -206,6 +226,7 @@ def screen_trade_flow(
         "prospective_qualification": qualified,
         "automatic_promotion": False,
         "limitations": ["SPOT_PRICE_SHORT_PROXY", "FIXED_COST_MODEL",
+                        "PRICE_RESPONSE_USES_CURRENT_COMPLETED_BUCKET_ONLY",
                         "REST_RECENT_TRADE_SAMPLING", "NO_LIVE_ORDER_AUTHORITY"],
     }
     result["result_sha256"] = sha256(json.dumps(result, sort_keys=True,

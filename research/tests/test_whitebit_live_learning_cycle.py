@@ -93,6 +93,24 @@ class LiveLearningCycleTests(unittest.TestCase):
             self.assertIsNone(result["new_decision"])
             self.assertIn("LEARNING_WAVE.DRAWDOWN_THRESHOLD", learner.status()["learning_cycle"]["pause_reasons"])
 
+    def test_persistent_imbalance_abstains_on_sign_flip(self):
+        with TemporaryDirectory() as tmp:
+            learner = self.learner(
+                Path(tmp), feature_mode="TOP_BOOK_IMBALANCE_PERSISTENCE",
+            )
+            current = snapshot(2, bid="100", ask="100.01")
+            current["bid_quantity"], current["ask_quantity"] = "3", "1"
+            prior = snapshot(1, bid="100", ask="100.01")
+            prior["bid_quantity"], prior["ask_quantity"] = "1", "3"
+            reference = {
+                "mid": "100.005", "available_at": prior["available_at"],
+                "snapshot_json": json.dumps(prior),
+            }
+            self.assertEqual(learner._signal_feature(current, reference), 0)
+            prior["bid_quantity"], prior["ask_quantity"] = "2", "1"
+            reference["snapshot_json"] = json.dumps(prior)
+            self.assertGreater(learner._signal_feature(current, reference), 0)
+
     def test_short_candidate_has_symmetric_cost_hurdle_and_outcome(self):
         with TemporaryDirectory() as tmp:
             learner = self.learner(Path(tmp))

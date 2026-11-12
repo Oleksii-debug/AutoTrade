@@ -40,6 +40,8 @@ STEP_SECONDS = 900
 MAX_ENTRY_DELAY = timedelta(seconds=90)
 PROSPECTIVE_WAVE_CYCLES = 5
 MAX_HOURLY_SAMPLES = 7 * 24 + 1
+OUTCOME_HORIZON_SECONDS = 2 * STEP_SECONDS
+MAX_RECENT_OUTCOMES = 96
 MAX_DECISION_JOURNAL_BYTES = 16 * 1024 * 1024
 
 
@@ -118,6 +120,7 @@ def _initial(last_bar_epoch: int, now: datetime) -> dict:
 
 
 def _hold(state: dict, reason: str) -> None:
+    state["last_hold_reason"] = reason
     state["holds"][reason] = state["holds"].get(reason, 0) + 1
 
 
@@ -133,6 +136,74 @@ def _exit_values(position: dict, quote: dict, now: datetime,
     funding = (abs(quantity) * fill * Decimal(costs.funding_bps_per_day)
                / Decimal(10000) * elapsed / Decimal(86400))
     return fill, fee, funding, elapsed
+
+
+def _observe_execution_outcomes(
+    state: dict, *, boundary: datetime, quote: dict, now: datetime,
+    contiguous: bool, policy_action: str,
+) -> list[dict]:
+    """Label earlier observations with the next observed 30-minute BBO outcome."""
+    research = state.setdefault("execution_outcomes", {
+        "pending": [], "recent": [], "settled_count": 0,
+    })
+    epoch = int(boundary.timestamp())
+    if epoch <= research.get("last_boundary_epoch", -1):
+        return []
+    research["last_boundary_epoch"] = epoch
+    if not contiguous:
+        research["pending"] = []
+    received = datetime.fromisoformat(quote["received_at"])
+    if (not timedelta(0) <= now - received <= timedelta(seconds=5)
+            or not timedelta(0) <= received - boundary <= MAX_ENTRY_DELAY):
+        research["pending"] = [
+            row for row in research["pending"]
+            if row["entry_boundary_epoch"] + OUTCOME_HORIZON_SECONDS > epoch
+        ]
+        return []
+
+    costs = TechnicalCosts()
+    starting_equity = Decimal(costs.initial_equity)
+    notional = starting_equity * Decimal(costs.capital_fraction)
+    fee_ratio = Decimal(costs.fee_bps_per_fill) / Decimal(10000)
+    slippage = Decimal(costs.slippage_bps_per_fill) / Decimal(10000)
+    settled = []
+    pending = []
+    for entry in research["pending"]:
+        due = entry["entry_boundary_epoch"] + OUTCOME_HORIZON_SECONDS
+        if epoch < due:
+            pending.append(entry)
+            continue
+        if epoch != due:
+            continue
+        outcomes = {}
+        for side, label in ((1, "LONG"), (-1, "SHORT")):
+            entry_fill = Decimal(entry["ask"] if side > 0 else entry["bid"]) * (
+                1 + side * slippage)
+            quantity = side * notional / entry_fill
+            fill, fee, funding, elapsed = _exit_values(
+                {"quantity": str(quantity), "opened_at": entry["quote_received_at"]},
+                quote, received, costs)
+            pnl = quantity * (fill - entry_fill) - notional * fee_ratio - fee - funding
+            outcomes[label] = {"entry_price": str(entry_fill), "exit_price": str(fill),
+                "net_equity_return": str(pnl / starting_equity)}
+        settled.append({
+            "outcome_id": f"{MARKET}:M15:{entry['entry_boundary_epoch']}:{OUTCOME_HORIZON_SECONDS}",
+            **entry, "exit_boundary_epoch": epoch, "exit_quote_received_at": received.isoformat(),
+            "exit_quote_sha256": quote["source_sha256"], "elapsed_seconds": str(elapsed),
+            "kind": "OBSERVED_FIXED_TIME_EXECUTION_OUTCOME", "outcomes": outcomes,
+        })
+    pending.append({
+        "entry_boundary_epoch": epoch, "quote_received_at": received.isoformat(),
+        "entry_quote_sha256": quote["source_sha256"], "bid": str(quote["bid"]),
+        "ask": str(quote["ask"]), "policy_action": policy_action,
+        "technical": state.get("last_technical_signal"),
+        "news_decision": state.get("last_news_context", {}).get("decision"),
+        "l2_status": state.get("last_l2_context", {}).get("status"),
+    })
+    research["pending"] = pending
+    research["recent"] = (research["recent"] + settled)[-MAX_RECENT_OUTCOMES:]
+    research["settled_count"] += len(settled)
+    return settled
 
 
 def _record_clock_sample(state: dict, *, boundary: datetime, quote: dict,
@@ -292,6 +363,7 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
     state["technical_analyses"] += 1; state["news_analyses"] += 1
     state["l2_analyses"] += int(l2.get("status") != "NOT_REQUESTED")
     state.pop("last_pretrade_thesis", None)
+    state.pop("last_hold_reason", None)
     signal = technical_signal(history, config)
     state["last_technical_signal"] = signal
     if gap and position is None:
@@ -436,6 +508,16 @@ def main(argv=None) -> int:
                 clock_sample = _record_clock_sample(
                     next_state, boundary=history[-1]["closed_at"], quote=quote, now=now,
                     contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS)
+                if state["position"] is not None:
+                    action = "POSITION_MANAGEMENT"
+                elif next_state["position"] is not None:
+                    action = "VIRTUAL_ENTRY"
+                else:
+                    action = next_state.get("last_hold_reason", "HOLD")
+                execution_outcomes = _observe_execution_outcomes(
+                    next_state, boundary=history[-1]["closed_at"], quote=quote, now=now,
+                    contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS,
+                    policy_action=action)
                 closed = next_state["closed_cycles"]
                 review = next_state.get("wave_analysis")
                 _append_decision(state_dir / "decisions.jsonl", {
@@ -452,6 +534,7 @@ def main(argv=None) -> int:
                                       and review.get("closed_through_cycle") == closed else None),
                     "net_pnl": next_state["net_pnl"],
                     "clock_sample": clock_sample,
+                    "execution_outcomes": execution_outcomes,
                     "network_orders": False, "trading_authority": False,
                 })
                 state = next_state

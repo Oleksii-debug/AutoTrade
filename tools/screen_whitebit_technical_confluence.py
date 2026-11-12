@@ -19,6 +19,7 @@ from tools.screen_whitebit_trend_regime import authenticated_bars
 
 
 SCHEMA = "autotrade-whitebit-technical-confluence-locked-final-v1"
+GATE_POLICIES = ("BEAT_ALL_CONTROLS", "POSITIVE_AFTER_COSTS")
 
 
 def default_grid() -> tuple[TechnicalConfiguration, ...]:
@@ -42,12 +43,19 @@ def default_grid() -> tuple[TechnicalConfiguration, ...]:
 
 
 def _reasons(candidate: dict, controls: list[dict], *, stage: str,
-             minimum_cycles: int, maximum_drawdown: Decimal) -> list[str]:
+             minimum_cycles: int, maximum_drawdown: Decimal,
+             gate_policy: str) -> list[str]:
     reasons = []
     if candidate["closed_cycles"] < minimum_cycles:
         reasons.append(f"MINIMUM_{stage}_CYCLES_NOT_MET")
-    if Decimal(candidate["net_pnl"]) <= max(Decimal(row["net_pnl"]) for row in controls):
-        reasons.append(f"{stage}_DID_NOT_BEAT_CASH_LONG_AND_SHORT_CONTROLS")
+    if gate_policy == "BEAT_ALL_CONTROLS":
+        if Decimal(candidate["net_pnl"]) <= max(Decimal(row["net_pnl"]) for row in controls):
+            reasons.append(f"{stage}_DID_NOT_BEAT_CASH_LONG_AND_SHORT_CONTROLS")
+    elif gate_policy == "POSITIVE_AFTER_COSTS":
+        if Decimal(candidate["net_pnl"]) <= 0:
+            reasons.append(f"{stage}_NO_POSITIVE_AFTER_COST_PNL")
+    else:
+        raise ValueError("unsupported technical gate policy")
     if Decimal(candidate["maximum_drawdown_fraction"]) > maximum_drawdown:
         reasons.append(f"{stage}_DRAWDOWN_LIMIT_EXCEEDED")
     return reasons
@@ -57,7 +65,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
         development_count: int, dataset_sha256: str,
         configurations: tuple[TechnicalConfiguration, ...],
         costs: TechnicalCosts = TechnicalCosts(), minimum_cycles: int = 10,
-        maximum_drawdown_fraction: str = "0.20") -> dict:
+        maximum_drawdown_fraction: str = "0.20",
+        gate_policy: str = "BEAT_ALL_CONTROLS") -> dict:
     validate_bars(bars, require_ohlcv=True); costs.validate()
     if not 1 <= len(configurations) <= 128:
         raise ValueError("technical grid must contain 1..128 configurations")
@@ -68,6 +77,8 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
     maximum = Decimal(maximum_drawdown_fraction)
     if not Decimal(0) <= maximum <= Decimal(1):
         raise ValueError("maximum drawdown must be in [0,1]")
+    if gate_policy not in GATE_POLICIES:
+        raise ValueError("unsupported technical gate policy")
     unique = {}
     for config in configurations:
         config.validate(); identity = digest(asdict(config))
@@ -86,14 +97,15 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
         train = simulate(parts["TRAIN"], candidate=CANDIDATES[-1], costs=costs,
                          configuration=config)
         train_reasons = _reasons(train, controls["TRAIN"], stage="TRAIN",
-            minimum_cycles=minimum_cycles, maximum_drawdown=maximum)
+            minimum_cycles=minimum_cycles, maximum_drawdown=maximum,
+            gate_policy=gate_policy)
         development = None; development_reasons = []; score = None
         if not train_reasons:
             development = simulate(parts["DEVELOPMENT"], candidate=CANDIDATES[-1],
                                    costs=costs, configuration=config)
             development_reasons = _reasons(development, controls["DEVELOPMENT"],
                 stage="DEVELOPMENT", minimum_cycles=minimum_cycles,
-                maximum_drawdown=maximum)
+                maximum_drawdown=maximum, gate_policy=gate_policy)
             if not development_reasons:
                 score = str(min(
                     Decimal(train["net_pnl"]) - max(Decimal(x["net_pnl"]) for x in controls["TRAIN"]),
@@ -113,15 +125,18 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
                           configuration=config) for name in CANDIDATES]
         candidate = final[-1]
         final_reasons = _reasons(candidate, final[:-1], stage="FINAL",
-            minimum_cycles=minimum_cycles, maximum_drawdown=maximum)
+            minimum_cycles=minimum_cycles, maximum_drawdown=maximum,
+            gate_policy=gate_policy)
     qualified = bool(selected and not final_reasons)
     result = {"schema": SCHEMA, "dataset_identity_sha256": dataset_sha256,
         "train_count": train_count, "development_count": development_count,
         "final_count": len(parts["FINAL"]), "costs": asdict(costs),
         "round_trip_cost_bps": str(costs.round_trip_bps),
         "minimum_cycles": minimum_cycles,
+        "gate_policy": gate_policy,
         "maximum_drawdown_fraction": str(maximum),
-        "configuration_count": len(unique), "screened": screened,
+        "configuration_count": len(unique), "controls": controls,
+        "screened": screened,
         "selected_configuration_sha256": None if selected is None else selected["configuration_sha256"],
         "selected_configuration": None if selected is None else selected["configuration"],
         "final": final, "final_consumed": bool(final),
@@ -157,16 +172,19 @@ def main(argv=None) -> int:
     parser.add_argument("--train-count", type=int, required=True)
     parser.add_argument("--development-count", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--gate-policy", choices=GATE_POLICIES,
+                        default="BEAT_ALL_CONTROLS")
     args = parser.parse_args(argv)
     bars, dataset, manifest = authenticated_bars(args.manifest)
     result = locked_final_screen(bars, train_count=args.train_count,
         development_count=args.development_count, dataset_sha256=dataset,
-        configurations=default_grid())
+        configurations=default_grid(), gate_policy=args.gate_policy)
     target = args.output_dir / f"{result['result_sha256']}.json"
     _atomic(target, {"source": {"venue": "WHITEBIT_PUBLIC", "market": manifest["market"],
         "dataset_identity_sha256": dataset, "manifest": str(args.manifest)}, "result": result})
     print(json.dumps({"result_path": str(target),
         "configuration_count": result["configuration_count"],
+        "gate_policy": result["gate_policy"],
         "selected_configuration_sha256": result["selected_configuration_sha256"],
         "final_consumed": result["final_consumed"],
         "prospective_qualification": result["prospective_qualification"],

@@ -180,6 +180,8 @@ def main(argv=None) -> int:
     parser.add_argument("--slippage-bps", default="1")
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--wait-for-artifacts", action="store_true",
+        help="persist a safe waiting checkpoint until the frozen model appears")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     if not 1 <= args.horizon <= 24 or not 10 <= args.poll_seconds <= 3600:
@@ -194,7 +196,9 @@ def main(argv=None) -> int:
               state.get("threshold"), state.get("horizon_bars"))
     if actual != expected or state.get("schema") != SCHEMA:
         raise ValueError("persisted shadow identity differs from launch arguments")
-    model = _model(args.model_artifact, args.model_sha256)
+    model = None
+    if not args.wait_for_artifacts:
+        model = _model(args.model_artifact, args.model_sha256)
     client = WhiteBitPublicClient()
     while True:
         if args.stop_file and args.stop_file.exists():
@@ -202,6 +206,21 @@ def main(argv=None) -> int:
                 "+00:00", "Z"))
             _atomic(checkpoint, state)
             return 0
+        if model is None:
+            try:
+                model = _model(args.model_artifact, args.model_sha256)
+                state.update(status="RUNNING", last_error_class=None,
+                    updated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+            except (OSError, ValueError) as error:
+                state.update(status="WAITING_FOR_QUALIFIED_ARTIFACTS",
+                    last_error_class=type(error).__name__,
+                    updated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+                _atomic(checkpoint, state)
+                if args.once:
+                    print(json.dumps(state, sort_keys=True, allow_nan=False))
+                    return 0
+                time.sleep(args.poll_seconds)
+                continue
         try:
             state, evidence = run_cycle(client, model, state,
                 fee_bps=Decimal(args.fee_bps), slippage_bps=Decimal(args.slippage_bps))
@@ -221,4 +240,5 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

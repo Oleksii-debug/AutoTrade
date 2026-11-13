@@ -20,6 +20,9 @@ from research.autotrade_research.artifacts.store import (
     _manifest_integrity_hash,
 )
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
+from research.autotrade_research.integrations.whitebit_websocket import (
+    WhiteBitWebSocketDiagnostic,
+)
 from tools.run_whitebit_public_supervisor import (
     SCHEMA,
     SOURCE_URI,
@@ -632,6 +635,19 @@ class FailureOutputTests(unittest.TestCase):
 
 
 class DiagnosticJournalTests(unittest.TestCase):
+    def test_only_rejection_events_carry_an_allowed_reason(self):
+        with TemporaryDirectory() as directory:
+            journal = WhiteBitPublicDiagnosticJournal(Path(directory), market="BTC_USDT")
+            with self.assertRaisesRegex(ValueError, "unsupported WhiteBIT rejection reason"):
+                WhiteBitWebSocketDiagnostic("SCHEMA_REJECTED", 1, 1, rejection_reason="unsafe text")
+            journal.transport(WhiteBitWebSocketDiagnostic(
+                "SCHEMA_REJECTED", 1, 1, rejection_reason="FUTURE_WEBSOCKET_TIMESTAMP"
+            ))
+            journal.transport(WhiteBitWebSocketDiagnostic("RECONNECT_WAIT", 1, 1))
+            rejected, retry = map(json.loads, journal.active_path.read_bytes().splitlines())
+            self.assertEqual(rejected["rejection_reason"], "FUTURE_WEBSOCKET_TIMESTAMP")
+            self.assertNotIn("rejection_reason", retry)
+
     def test_heartbeat_rotates_boundedly_and_recovers_sequence(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "diagnostics"

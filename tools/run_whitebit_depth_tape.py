@@ -21,6 +21,7 @@ from research.autotrade_research.artifacts.checkpoint_retry import publish_check
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.integrations.whitebit_depth import (
+    DepthBookObservation,
     WhiteBitDepthWebSocketTransport,
 )
 from research.autotrade_research.integrations.whitebit_public import _symbol
@@ -30,6 +31,8 @@ from research.autotrade_research.learning.whitebit_depth_tape import (
 
 
 TIMING_WINDOW_SECONDS = 300
+INGEST_BATCH_SIZE = 32
+INGEST_BATCH_SECONDS = 0.05
 
 
 async def _checkpoint(path: Path, status: dict, *, phase: str,
@@ -57,16 +60,44 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     }
     added = 0
     last_archive_boundary = None
-    timing_samples: deque[tuple[float, dict[str, float], dict[str, float]]] = deque()
+    timing_samples: deque[tuple[float, dict[str, float], dict[str, float], dict[str, float]]] = deque()
     last_observation: dict[str, tuple[float, int]] = {}
     observation_gaps: dict[str, float] = {}
+    message_lags: dict[str, float] = {}
+    pending_observations: list[DepthBookObservation] = []
+    flush_timer: asyncio.TimerHandle | None = None
+    flush_error: Exception | None = None
     max_ingest = 0.0
     checkpoint_write = 0.0
     checkpoint_retries = 0
     expected_wakeup = monotonic()
+    loop = asyncio.get_running_loop()
+
+    def flush_observations() -> None:
+        nonlocal added, max_ingest, flush_timer, flush_error
+        if flush_timer is not None:
+            flush_timer.cancel()
+            flush_timer = None
+        if not pending_observations or flush_error is not None:
+            return
+        started = monotonic()
+        try:
+            store.ingest_many(pending_observations)
+        except Exception as exc:
+            # Timer callbacks run outside the collector task. Propagate their
+            # failure through the next heartbeat without retrying this batch.
+            flush_error = exc
+            stop.set()
+            return
+        max_ingest = max(max_ingest, monotonic() - started)
+        added += len(pending_observations)
+        pending_observations.clear()
 
     async def publish(phase: str, *, wakeup_delay: float, archive_time: float) -> None:
         nonlocal added, max_ingest, checkpoint_write, checkpoint_retries
+        flush_observations()
+        if flush_error is not None:
+            raise flush_error
         status_start = monotonic()
         status = store.status()
         measured_at = monotonic()
@@ -76,18 +107,22 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             "sqlite_archive": archive_time,
             "sqlite_status": measured_at - status_start,
             "previous_checkpoint_write": checkpoint_write,
-        }, observation_gaps.copy()))
+        }, observation_gaps.copy(), message_lags.copy()))
         max_ingest = 0.0
         observation_gaps.clear()
+        message_lags.clear()
         while measured_at - timing_samples[0][0] > TIMING_WINDOW_SECONDS:
             timing_samples.popleft()
         maxima: dict[str, float] = {}
         max_gaps: dict[str, float] = {}
-        for _, durations, gaps in timing_samples:
+        max_message_lags: dict[str, float] = {}
+        for _, durations, gaps, lags in timing_samples:
             for name, seconds in durations.items():
                 maxima[name] = max(maxima.get(name, 0), seconds)
             for market, seconds in gaps.items():
                 max_gaps[market] = max(max_gaps.get(market, 0), seconds)
+            for market, seconds in lags.items():
+                max_message_lags[market] = max(max_message_lags.get(market, seconds), seconds)
         timing = {
             "recent_window_seconds": TIMING_WINDOW_SECONDS,
             "last_wakeup_delay_ms": round(wakeup_delay * 1000, 3),
@@ -103,6 +138,10 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                         round(max_gaps[market] * 1000, 3) if market in max_gaps else None
                     ),
                     "generation": generation,
+                    "recent_max_raw_message_lag_ms": (
+                        round(max_message_lags[market] * 1000, 3)
+                        if market in max_message_lags else None
+                    ),
                 }
                 for market, (at, generation) in last_observation.items()
             },
@@ -148,24 +187,34 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             errors[market] = value.code
 
     async def consume(market: str) -> None:
-        nonlocal added, max_ingest
+        nonlocal flush_timer
         transport = WhiteBitDepthWebSocketTransport(
             market=market, limit=args.depth_limit,
             diagnostic=lambda value: diagnostic(market, value),
         )
         async for observation in transport.observations(stop):
+            if flush_error is not None:
+                break
             received = monotonic()
             if market in last_observation:
                 gap = received - last_observation[market][0]
                 observation_gaps[market] = max(observation_gaps.get(market, 0), gap)
             last_observation[market] = (received, observation.generation)
-            store.ingest(observation)
-            max_ingest = max(max_ingest, monotonic() - received)
-            added += 1
+            if observation.message_time is not None:
+                # Diagnostic only. This difference includes host clock offset.
+                lag = (observation.received_at - observation.message_time).total_seconds()
+                message_lags[market] = max(message_lags.get(market, lag), lag)
+            pending_observations.append(observation)
+            if len(pending_observations) >= INGEST_BATCH_SIZE:
+                flush_observations()
+            elif flush_timer is None:
+                flush_timer = loop.call_later(INGEST_BATCH_SECONDS, flush_observations)
 
     consumers = [asyncio.create_task(consume(market)) for market in markets]
     try:
         while not stopped.is_set() and not args.stop_file.exists():
+            if flush_error is not None:
+                raise flush_error
             wakeup_delay = max(0, monotonic() - expected_wakeup)
             if all(value == "RUNNING" for value in phases.values()):
                 phase = "RUNNING"
@@ -177,6 +226,9 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             archive_boundary = (now_epoch - ARCHIVE_SETTLE_SECONDS) // ARCHIVE_WINDOW_SECONDS
             archive_time = 0.0
             if archive_boundary != last_archive_boundary:
+                flush_observations()
+                if flush_error is not None:
+                    raise flush_error
                 archive_start = monotonic()
                 store.archive_completed_windows(markets, now_epoch=now_epoch)
                 archive_time = monotonic() - archive_start

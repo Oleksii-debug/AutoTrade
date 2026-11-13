@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import signal
 from threading import Event
 import sys
+from time import monotonic
 
 ROOT = Path(__file__).resolve().parents[1]
 for dependency_root in (ROOT, ROOT / "research"):
@@ -26,13 +28,17 @@ from research.autotrade_research.learning.whitebit_depth_tape import (
 )
 
 
-def _checkpoint(path: Path, store: WhiteBitDepthTapeStore, *, phase: str,
+TIMING_WINDOW_SECONDS = 300
+
+
+def _checkpoint(path: Path, status: dict, *, phase: str,
                 markets: tuple[str, ...], observations: int,
-                errors: dict[str, str]) -> None:
+                errors: dict[str, str], timing: dict) -> None:
     atomic_write_json(path, {
-        **store.status(), "phase": phase,
+        **status, "phase": phase,
         "transport": "WHITEBIT_PUBLIC_DEPTH_V1", "markets": list(markets),
         "new_observations_last_checkpoint": observations, "errors": errors,
+        "timing": timing,
         "checkpointed_at": datetime.now(timezone.utc).isoformat(),
         "secrets_in_state": False, "paid_model_calls": 0,
     })
@@ -43,10 +49,69 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     stop = asyncio.Event()
     phases = {market: "STARTING" for market in markets}
     errors: dict[str, str] = {}
+    transport_events = {
+        market: {"DEPTH_UPDATE_TIMEOUT": 0, "CONNECTION_LOST": 0}
+        for market in markets
+    }
     added = 0
     last_archive_boundary = None
+    timing_samples: deque[tuple[float, dict[str, float], dict[str, float]]] = deque()
+    last_observation: dict[str, tuple[float, int]] = {}
+    observation_gaps: dict[str, float] = {}
+    max_ingest = 0.0
+    checkpoint_write = 0.0
+    expected_wakeup = monotonic()
+
+    def publish(phase: str, *, wakeup_delay: float, archive_time: float) -> None:
+        nonlocal max_ingest, checkpoint_write
+        status_start = monotonic()
+        status = store.status()
+        measured_at = monotonic()
+        timing_samples.append((measured_at, {
+            "wakeup_delay": wakeup_delay,
+            "sqlite_ingest": max_ingest,
+            "sqlite_archive": archive_time,
+            "sqlite_status": measured_at - status_start,
+            "previous_checkpoint_write": checkpoint_write,
+        }, observation_gaps.copy()))
+        max_ingest = 0.0
+        observation_gaps.clear()
+        while measured_at - timing_samples[0][0] > TIMING_WINDOW_SECONDS:
+            timing_samples.popleft()
+        maxima: dict[str, float] = {}
+        max_gaps: dict[str, float] = {}
+        for _, durations, gaps in timing_samples:
+            for name, seconds in durations.items():
+                maxima[name] = max(maxima.get(name, 0), seconds)
+            for market, seconds in gaps.items():
+                max_gaps[market] = max(max_gaps.get(market, 0), seconds)
+        timing = {
+            "recent_window_seconds": TIMING_WINDOW_SECONDS,
+            "last_wakeup_delay_ms": round(wakeup_delay * 1000, 3),
+            "recent_max_ms": {name: round(value * 1000, 3) for name, value in maxima.items()},
+            "transport_events_since_start": {
+                market: counts.copy() for market, counts in transport_events.items()
+            },
+            "markets": {
+                market: {
+                    "observation_age_ms": round((measured_at - at) * 1000, 3),
+                    "recent_max_observation_gap_ms": (
+                        round(max_gaps[market] * 1000, 3) if market in max_gaps else None
+                    ),
+                    "generation": generation,
+                }
+                for market, (at, generation) in last_observation.items()
+            },
+        }
+        write_start = monotonic()
+        _checkpoint(checkpoint, status, phase=phase, markets=markets,
+                    observations=added, errors=errors, timing=timing)
+        checkpoint_write = monotonic() - write_start
 
     def diagnostic(market: str, value) -> None:
+        counts = transport_events[market]
+        if value.code in counts:
+            counts[value.code] += 1
         if value.code == "SUBSCRIBED":
             phases[market] = "RUNNING"
             errors.pop(market, None)
@@ -57,18 +122,25 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             errors[market] = value.code
 
     async def consume(market: str) -> None:
-        nonlocal added
+        nonlocal added, max_ingest
         transport = WhiteBitDepthWebSocketTransport(
             market=market, limit=args.depth_limit,
             diagnostic=lambda value: diagnostic(market, value),
         )
         async for observation in transport.observations(stop):
+            received = monotonic()
+            if market in last_observation:
+                gap = received - last_observation[market][0]
+                observation_gaps[market] = max(observation_gaps.get(market, 0), gap)
+            last_observation[market] = (received, observation.generation)
             store.ingest(observation)
+            max_ingest = max(max_ingest, monotonic() - received)
             added += 1
 
     consumers = [asyncio.create_task(consume(market)) for market in markets]
     try:
         while not stopped.is_set() and not args.stop_file.exists():
+            wakeup_delay = max(0, monotonic() - expected_wakeup)
             if all(value == "RUNNING" for value in phases.values()):
                 phase = "RUNNING"
             elif any(value == "RUNNING" for value in phases.values()):
@@ -77,12 +149,15 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                 phase = "STARTING" if not errors else "DEGRADED"
             now_epoch = int(datetime.now(timezone.utc).timestamp())
             archive_boundary = (now_epoch - ARCHIVE_SETTLE_SECONDS) // ARCHIVE_WINDOW_SECONDS
+            archive_time = 0.0
             if archive_boundary != last_archive_boundary:
+                archive_start = monotonic()
                 store.archive_completed_windows(markets, now_epoch=now_epoch)
+                archive_time = monotonic() - archive_start
                 last_archive_boundary = archive_boundary
-            _checkpoint(checkpoint, store, phase=phase, markets=markets,
-                        observations=added, errors=errors)
+            publish(phase, wakeup_delay=wakeup_delay, archive_time=archive_time)
             added = 0
+            expected_wakeup = monotonic() + args.poll_seconds
             await asyncio.sleep(args.poll_seconds)
     finally:
         stop.set()
@@ -90,8 +165,7 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
         for task in pending:
             task.cancel()
         await asyncio.gather(*consumers, return_exceptions=True)
-        _checkpoint(checkpoint, store, phase="STOPPED", markets=markets,
-                    observations=added, errors=errors)
+        publish("STOPPED", wakeup_delay=0, archive_time=0)
 
 
 def main(argv=None) -> int:

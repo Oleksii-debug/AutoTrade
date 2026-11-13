@@ -28,6 +28,8 @@ from .whitebit_websocket import (
 SCHEMA = "autotrade-whitebit-public-depth-v1"
 SOURCE_URI = "wss://wss.whitebit.com/ws#depth"
 MAX_DEPTH_CLOCK_SKEW = timedelta(seconds=5)
+# WhiteBIT sends a snapshot after 10 seconds without an incremental update.
+DEPTH_UPDATE_TIMEOUT_SECONDS = 15
 
 
 class DepthSequenceGap(PublicDataError):
@@ -239,9 +241,11 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
     async def observations(self, stop: asyncio.Event) -> AsyncIterator[DepthBookObservation]:
         if type(stop) is not asyncio.Event:
             raise TypeError("stop must be an exact asyncio.Event")
+        loop = asyncio.get_running_loop()
         attempt = generation = 0; backoff = self.initial_backoff_seconds
         while not stop.is_set():
-            attempt += 1; subscribed = False; schema_failure = False
+            attempt += 1; subscribed = False
+            failure_code = "CONNECTION_LOST"
             heartbeat = None
             self._emit("CONNECTING", attempt=attempt, generation=generation)
             try:
@@ -254,14 +258,21 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
                         "params": [self.market, self.limit, "0", True]},
                         separators=(",", ":")))
                     heartbeat = asyncio.create_task(self._heartbeat(socket, stop))
-                    deadline = asyncio.get_running_loop().time() + self.acknowledgement_timeout_seconds
+                    deadline = loop.time() + self.acknowledgement_timeout_seconds
                     while not stop.is_set():
-                        remaining = deadline - asyncio.get_running_loop().time()
-                        if not subscribed and remaining <= 0:
-                            raise PublicDataError("WEBSOCKET_SUBSCRIBE_TIMEOUT")
-                        message = await asyncio.wait_for(
-                            self._receive(socket, stop, heartbeat),
-                            timeout=None if subscribed else remaining)
+                        if loop.time() >= deadline:
+                            if not subscribed:
+                                raise PublicDataError("WEBSOCKET_SUBSCRIBE_TIMEOUT")
+                            failure_code = "DEPTH_UPDATE_TIMEOUT"
+                            break
+                        read_timeout = asyncio.timeout_at(deadline)
+                        try:
+                            async with read_timeout:
+                                message = await self._receive(socket, stop, heartbeat)
+                        except TimeoutError:
+                            if subscribed and read_timeout.expired():
+                                failure_code = "DEPTH_UPDATE_TIMEOUT"
+                            raise
                         if message is None: break
                         parsed = parse_depth_message(message, market=self.market,
                             received_at=datetime.now(timezone.utc))
@@ -270,6 +281,7 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
                                 if parsed.request_id != request_id or subscribed:
                                     raise PublicDataError("UNEXPECTED_WEBSOCKET_SUBSCRIPTION_ACK")
                                 subscribed = True
+                                deadline = loop.time() + DEPTH_UPDATE_TIMEOUT_SECONDS
                                 self._emit("SUBSCRIBED", attempt=attempt, generation=generation)
                             continue
                         if not subscribed:
@@ -279,6 +291,7 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
                         except DepthSequenceGap:
                             raise PublicDataError("DEPTH_SEQUENCE_GAP") from None
                         backoff = self.initial_backoff_seconds
+                        deadline = loop.time() + DEPTH_UPDATE_TIMEOUT_SECONDS
                         yield observation
                     if subscribed and stop.is_set():
                         try:
@@ -293,15 +306,14 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
             except asyncio.CancelledError:
                 raise
             except PublicDataError:
-                schema_failure = True
+                failure_code = "SCHEMA_REJECTED"
             except Exception:
-                schema_failure = False
+                pass
             finally:
                 if heartbeat is not None:
                     heartbeat.cancel(); await asyncio.gather(heartbeat, return_exceptions=True)
             if stop.is_set(): break
-            self._emit("SCHEMA_REJECTED" if schema_failure else "CONNECTION_LOST",
-                attempt=attempt, generation=generation)
+            self._emit(failure_code, attempt=attempt, generation=generation)
             self._emit("RECONNECT_WAIT", attempt=attempt, generation=generation, retry=backoff)
             try: await asyncio.wait_for(stop.wait(), timeout=backoff)
             except TimeoutError: pass

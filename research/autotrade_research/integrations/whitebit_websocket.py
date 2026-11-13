@@ -37,6 +37,7 @@ _DIAGNOSTIC_CODES = frozenset(
         "CONNECTING",
         "SUBSCRIBED",
         "CONNECTION_LOST",
+        "DEPTH_UPDATE_TIMEOUT",
         "SCHEMA_REJECTED",
         "RECONNECT_WAIT",
         "STOPPED",

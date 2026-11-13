@@ -1,15 +1,20 @@
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
 from research.autotrade_research.integrations.whitebit_depth import (
-    DepthBookObservation, DepthLocalBook, DepthSequenceGap, parse_depth_message,
+    DepthBookObservation, DepthLocalBook, DepthSequenceGap,
+    WhiteBitDepthWebSocketTransport, parse_depth_message,
 )
 from research.autotrade_research.learning.whitebit_depth_tape import (
     WhiteBitDepthTapeStore,
 )
+from tools import run_whitebit_depth_tape
 
 
 NOW=datetime(2026,11,12,12,tzinfo=timezone.utc)
@@ -39,6 +44,100 @@ def test_gap_fails_and_requires_fresh_snapshot():
     book.apply(parse_depth_message(frame(),market="BTC_USDT",received_at=NOW),generation=1)
     bad=parse_depth_message(frame(False,9,11),market="BTC_USDT",received_at=NOW)
     with pytest.raises(DepthSequenceGap): book.apply(bad,generation=1)
+
+
+def test_depth_reconnects_after_silence_despite_pongs_and_accepts_quiet_snapshots(monkeypatch):
+    class Socket:
+        def __init__(self):
+            self.messages = asyncio.Queue()
+            self.receives = 0
+            self.closed = False
+
+        async def send(self, message):
+            request = json.loads(message)
+            if request["method"] == "depth_subscribe":
+                self.messages.put_nowait(json.dumps({
+                    "id": request["id"], "result": {"status": "success"}, "error": None,
+                }))
+
+        async def recv(self):
+            self.receives += 1
+            return await self.messages.get()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            self.closed = True
+
+    async def spin_until(predicate):
+        for _ in range(100):
+            if predicate():
+                return
+            await asyncio.sleep(0)
+        assert predicate()
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        stop = asyncio.Event()
+        first, second = Socket(), Socket()
+        sockets = iter((first, second))
+        diagnostics = []
+        transport = WhiteBitDepthWebSocketTransport(
+            market="BTC_USDT", connector=lambda *_, **__: next(sockets),
+            diagnostic=diagnostics.append, initial_backoff_seconds=1,
+        )
+        observations = transport.observations(stop)
+        pending = None
+        with monkeypatch.context() as clock:
+            clock.setattr(loop, "time", lambda: now)
+            try:
+                pending = asyncio.create_task(anext(observations))
+                await spin_until(lambda: first.receives == 2)
+                first.messages.put_nowait(frame(update=10))
+                await spin_until(pending.done)
+                assert pending.result().generation == 1
+
+                # Documented quiet keepalive can replace the book at the same generation.
+                pending = asyncio.create_task(anext(observations))
+                await spin_until(lambda: first.receives == 3)
+                now += 10
+                first.messages.put_nowait(frame(update=30))
+                await spin_until(pending.done)
+                quiet = pending.result()
+                assert (quiet.snapshot, quiet.update_id, quiet.generation) == (True, 30, 1)
+
+                pending = asyncio.create_task(anext(observations))
+                await spin_until(lambda: first.receives == 4)
+                pong = json.dumps({"id": 99, "result": "pong", "error": None})
+                now += 8
+                first.messages.put_nowait(pong)
+                await spin_until(lambda: first.receives == 5)
+                now += 6
+                first.messages.put_nowait(pong)
+                await spin_until(lambda: first.receives == 6)
+                assert not first.closed
+
+                now += 1.1
+                await spin_until(lambda: diagnostics[-1].code == "RECONNECT_WAIT")
+                assert first.closed
+                assert diagnostics[-2].code == "DEPTH_UPDATE_TIMEOUT"
+                assert diagnostics[-1].retry_in_seconds == 1
+
+                now += 1.1
+                await spin_until(lambda: second.receives == 2)
+                second.messages.put_nowait(frame(update=40))
+                await spin_until(pending.done)
+                recovered = pending.result()
+                assert (recovered.snapshot, recovered.update_id, recovered.generation) == (True, 40, 2)
+            finally:
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                await observations.aclose()
+
+    asyncio.run(run())
 
 
 def test_zero_quantity_removes_level_and_control_is_bounded():
@@ -74,6 +173,83 @@ def test_depth_tape_is_restart_safe_and_public_only(tmp_path):
     assert status["market_bucket_counts"] == {"BTC_USDT": 1}
     assert status["public_data_only"] is True
     assert status["trading_authority"] is False
+
+
+def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp_path, monkeypatch):
+    stopped = Event()
+    args = SimpleNamespace(depth_limit=20, poll_seconds=1, stop_file=tmp_path / "stop")
+    clock = 100.0
+    heartbeats = []
+    sleep = asyncio.sleep
+
+    class Transport:
+        def __init__(self, *, market, limit, diagnostic):
+            self.diagnostic = diagnostic
+
+        async def observations(self, stop):
+            for code in (
+                "DEPTH_UPDATE_TIMEOUT", "RECONNECT_WAIT", "CONNECTION_LOST",
+                "RECONNECT_WAIT", "SUBSCRIBED",
+            ):
+                self.diagnostic(SimpleNamespace(code=code))
+            yield SimpleNamespace(generation=7)
+            await stop.wait()
+
+    class Store:
+        def status(self):
+            nonlocal clock
+            clock += 0.05
+            return {"bucket_count": 1}
+
+        def ingest(self, observation):
+            nonlocal clock
+            clock += 0.025
+
+        def archive_completed_windows(self, markets, *, now_epoch):
+            nonlocal clock
+            clock += 0.12
+
+    async def tick(seconds):
+        nonlocal clock
+        await sleep(0)
+        clock += seconds + 0.4
+        if len(heartbeats) >= 2:
+            stopped.set()
+
+    def capture(path, data):
+        nonlocal clock
+        heartbeats.append(data)
+        clock += 0.06
+
+    monkeypatch.setattr(run_whitebit_depth_tape, "WhiteBitDepthWebSocketTransport", Transport)
+    monkeypatch.setattr(run_whitebit_depth_tape, "monotonic", lambda: clock)
+    monkeypatch.setattr(run_whitebit_depth_tape, "atomic_write_json", capture)
+    monkeypatch.setattr(run_whitebit_depth_tape.asyncio, "sleep", tick)
+    asyncio.run(run_whitebit_depth_tape._collect(
+        args, stopped, Store(), tmp_path / "checkpoint.json", ("BTC_USDT",),
+    ))
+
+    running = heartbeats[1]
+    assert running["phase"] == "RUNNING"
+    assert running["new_observations_last_checkpoint"] == 1
+    assert running["errors"] == {}
+    timing = running["timing"]
+    assert timing["recent_max_ms"] == {
+        "wakeup_delay": 425.0, "sqlite_ingest": 25.0, "sqlite_archive": 120.0,
+        "sqlite_status": 50.0, "previous_checkpoint_write": 60.0,
+    }
+    assert timing["markets"]["BTC_USDT"] == {
+        "observation_age_ms": 1475.0, "recent_max_observation_gap_ms": None, "generation": 7,
+    }
+    assert len(heartbeats) == 3
+    assert heartbeats[-1]["phase"] == "STOPPED"
+    event_field = "transport_events_since_start"
+    assert heartbeats[0]["timing"][event_field] == {
+        "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 0, "CONNECTION_LOST": 0},
+    }
+    assert timing[event_field] == heartbeats[-1]["timing"][event_field] == {
+        "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 1, "CONNECTION_LOST": 1},
+    }
 
 
 def test_execution_bbo_retains_exact_latest_prices_and_sizes(tmp_path):

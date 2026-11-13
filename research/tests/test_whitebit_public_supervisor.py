@@ -154,6 +154,29 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(attempts), 3)
             self.assertTrue(all(item[0] == destination for item in attempts))
 
+    async def test_atomic_publication_retries_transient_disk_full_only(self):
+        destination = Path("latest-market.json")
+        module = "tools.run_whitebit_public_supervisor"
+        full = OSError(28, "disk full")
+        for events, expected_attempts, failure in (
+            ([full, None], 2, None),
+            ([full] * 4, 4, full),
+            ([OSError(5, "unrelated I/O")], 1, OSError),
+        ):
+            with patch(module + ".atomic_write_json", side_effect=events) as publish:
+                with patch(module + ".time.sleep") as delay:
+                    if failure is None:
+                        _atomic_write_json_with_reader_retry(destination, {"ready": True})
+                    else:
+                        try:
+                            _atomic_write_json_with_reader_retry(destination, {"ready": True})
+                        except OSError as caught:
+                            assert caught is events[-1]
+                        else:
+                            raise AssertionError("A permanent publication failure must propagate")
+                assert publish.call_count == expected_attempts
+                assert delay.call_count == expected_attempts - 1
+
     async def test_failed_latest_publication_does_not_checkpoint_unpublished_cut(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "state"

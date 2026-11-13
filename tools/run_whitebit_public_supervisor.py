@@ -11,6 +11,7 @@ import argparse
 import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from errno import ENOSPC
 from hashlib import sha256
 import json
 import os
@@ -391,10 +392,11 @@ def _atomic_write_json_with_reader_retry(path: Path, value: Any) -> None:
     The status and learning readers intentionally consume immutable cuts without
     taking the writer lock. A Windows CRT reader can temporarily deny the
     atomic replace even though it only holds the file for a few milliseconds.
-    Retry only that narrow OS condition; every other publication failure still
-    fails closed.
+    Retry brief sharing failures and transient volume exhaustion. A persistent
+    failure still propagates to the watchdog with its original error code.
     """
 
+    disk_retries = 0
     for attempt in range(64):
         try:
             atomic_write_json(path, value)
@@ -403,6 +405,14 @@ def _atomic_write_json_with_reader_retry(path: Path, value: Any) -> None:
             if attempt == 63:
                 raise
             time.sleep(min(0.005 * (2 ** attempt), 0.1))
+        except OSError as error:
+            # Win32 ERROR_HANDLE_DISK_FULL and ERROR_DISK_FULL.
+            if (error.errno != ENOSPC and getattr(error, "winerror", None) not in (39, 112)):
+                raise
+            if disk_retries == 3 or attempt == 63:
+                raise
+            disk_retries += 1
+            time.sleep(0.25 * disk_retries)
 
 
 def _read_restart_state(

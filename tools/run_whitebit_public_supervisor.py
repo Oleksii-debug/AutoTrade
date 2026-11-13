@@ -773,13 +773,6 @@ async def supervise(
                 market=canonical_market,
                 artifacts=artifacts,
             )
-            artifact_quota.recover(
-                protected_artifact_id=(
-                    None
-                    if latest is None
-                    else latest["raw_evidence_ref"]["artifact_id"]
-                ),
-            )
             journal.start()
             _checkpoint(
                 state_dir / "supervisor-state.json",
@@ -789,6 +782,15 @@ async def supervise(
                 latest=latest,
                 clock=clock,
             )
+            failure_stage = "RECOVER_RETENTION"
+            artifact_quota.recover(
+                protected_artifact_id=(
+                    None
+                    if latest is None
+                    else latest["raw_evidence_ref"]["artifact_id"]
+                ),
+            )
+            failure_stage = "STARTUP"
             transport = WhiteBitPublicWebSocketTransport(
                 market=canonical_market,
                 connector=connector,

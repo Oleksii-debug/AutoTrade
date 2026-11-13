@@ -18,6 +18,12 @@ from tools.screen_whitebit_trend_regime import authenticated_bars
 SCHEMA = "autotrade-whitebit-private-course-universe-screen-v1"
 
 
+def _counter_totals(values: dict[str, dict], key: str) -> dict[str, int]:
+    names = sorted({name for row in values.values() for name in row[key]})
+    return {name: sum(row[key].get(name, 0) for row in values.values())
+            for name in names}
+
+
 def _aggregate(values: dict[str, dict]) -> dict:
     total = lambda key: sum((Decimal(row[key]) for row in values.values()), Decimal(0))
     cycles = sum(row["closed_cycles"] for row in values.values())
@@ -27,9 +33,14 @@ def _aggregate(values: dict[str, dict]) -> dict:
         "win_rate": str(Decimal(wins) / Decimal(cycles)) if cycles else None,
         "net_pnl": str(total("net_pnl")), "fees": str(total("fees")),
         "funding": str(total("funding")),
+        "signal_count": sum(row["signal_count"] for row in values.values()),
+        "pretrade_holds": sum(row["pretrade_holds"] for row in values.values()),
+        "pretrade_hold_reasons": _counter_totals(values, "pretrade_hold_reasons"),
         "markets": {market: {"closed_cycles": row["closed_cycles"],
             "net_pnl": row["net_pnl"], "wins": row["wins"], "losses": row["losses"],
-            "exit_reasons": row["exit_reasons"], "evidence_sha256": row["evidence_sha256"]}
+            "exit_reasons": row["exit_reasons"], "evidence_sha256": row["evidence_sha256"],
+            "signal_count": row["signal_count"], "pretrade_holds": row["pretrade_holds"],
+            "pretrade_hold_reasons": row["pretrade_hold_reasons"]}
             for market, row in sorted(values.items())}}
 
 

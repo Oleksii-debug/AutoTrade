@@ -51,6 +51,25 @@ class CourseSupervisorTests(unittest.TestCase):
         self.assertEqual(value["train_process_review"]["loss_streak_pause_event_count"], 1)
         self.assertEqual(value["train_process_review"]["weekly_process_event_count"], 0)
         self.assertNotIn("loss_streak_pause_events", value["train_process_review"])
+        self.assertIsNone(value["train"]["signal_count"])
+
+    def test_checkpoint_projection_preserves_aggregate_diagnostics_only(self):
+        value = _compact({"strategy_schema": "range-v1", "train": {
+            "market_count": 2, "closed_cycles": 0, "wins": 0, "losses": 0,
+            "win_rate": None, "net_pnl": "0", "fees": "0", "funding": "0",
+            "signal_count": 2, "detected_setups": 4, "expired_setups": 1,
+            "detection_rejections": {"NO_REENTRY_SWEEP": 12},
+            "confirmation_rejections": {"STOP_INVALIDATED": 3},
+            "pretrade_holds": 1, "pretrade_hold_reasons": {"REWARD_RISK": 1},
+            "markets": {"BTC_PERP": {"signal_count": 2}}},
+            "train_rejection_reasons": ["MINIMUM_TRAIN_CYCLES_NOT_MET"],
+            "development": None, "development_rejection_reasons": [],
+            "final": None, "final_rejection_reasons": ["LOCKED"],
+            "development_consumed": False, "final_consumed": False,
+            "prospective_qualification": False, "result_sha256": "a" * 64})
+        self.assertEqual(value["train"]["detection_rejections"],
+                         {"NO_REENTRY_SWEEP": 12})
+        self.assertNotIn("markets", value["train"])
 
 
 if __name__ == "__main__":

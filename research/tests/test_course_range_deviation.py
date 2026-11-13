@@ -6,7 +6,7 @@ from unittest.mock import patch
 from research.autotrade_research.strategies.course_range_deviation import (
     RangeDeviationConfiguration, detect_deviation, simulate,
 )
-from tools.screen_whitebit_course_range_universe import screen_universe
+from tools.screen_whitebit_course_range_universe import _aggregate, screen_universe
 
 
 def range_bars(count=120, *, deviation=False):
@@ -28,6 +28,26 @@ def range_bars(count=120, *, deviation=False):
 
 
 class CourseRangeDeviationTests(unittest.TestCase):
+    def test_universe_preserves_market_and_total_diagnostic_counters(self):
+        base = {"closed_cycles": 0, "wins": 0, "losses": 0, "net_pnl": "0",
+            "fees": "0", "funding": "0", "exit_reasons": {},
+            "evidence_sha256": "a" * 64, "signal_count": 0,
+            "detected_setups": 0, "expired_setups": 0,
+            "detection_rejections": {}, "confirmation_rejections": {},
+            "pretrade_holds": 0, "pretrade_hold_reasons": {}}
+        btc = {**base, "signal_count": 2, "detected_setups": 4,
+            "expired_setups": 1, "detection_rejections": {"NO_REENTRY_SWEEP": 7},
+            "confirmation_rejections": {"STOP_INVALIDATED": 2},
+            "pretrade_holds": 1, "pretrade_hold_reasons": {"REWARD_RISK": 1}}
+        eth = {**base, "detected_setups": 3,
+            "detection_rejections": {"NO_REENTRY_SWEEP": 5, "RANGE_WIDTH": 4},
+            "confirmation_rejections": {"STOP_INVALIDATED": 1}}
+        result = _aggregate({"ETH_PERP": eth, "BTC_PERP": btc})
+        self.assertEqual(result["detection_rejections"],
+                         {"NO_REENTRY_SWEEP": 12, "RANGE_WIDTH": 4})
+        self.assertEqual(result["markets"]["BTC_PERP"]["confirmation_rejections"],
+                         {"STOP_INVALIDATED": 2})
+
     def test_detects_causal_reentry_after_external_liquidity_sweep(self):
         config = RangeDeviationConfiguration(range_lookback=96,
             minimum_range_atr="1", maximum_range_atr="20",

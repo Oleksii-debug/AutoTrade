@@ -2,8 +2,8 @@
 
 `tools/run_autotrade_process_watchdog.py` runs the checked-in WhiteBIT market
 collectors, historical research workers, and SOL forward simulator as local
-Windows processes independently of a Codex chat. The
-checked-in manifest contains no credentials and every child remains
+Windows background processes managed by the watchdog. The checked-in manifest
+contains no credentials and every child remains
 non-trading (`network_orders=false`, `trading_authority=false`).
 
 Run it from the repository root with a persistent runtime directory that is

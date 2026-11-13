@@ -133,8 +133,8 @@ To exercise a lost response, use a new directory and add `--fault-after-send` to
 - `contracts/jsonschema/` — materialized language-neutral contract schemas.
 - `contracts/openapi/host-api.yaml` — canonical host/UI API entrypoint.
 - `control/work-packages/bank.json` — machine-readable bank of 65 implementation packages.
-- `docs/engineering/12_UNIVERSAL_WORKER_PROMPT.md` — stable implementation-worker instruction.
-- `docs/engineering/13_UNIVERSAL_AUDITOR_PROMPT.md` — stable auditor instruction.
+- [Implementation guidelines](docs/engineering/12_UNIVERSAL_WORKER_PROMPT.md)
+- [Independent review guidelines](docs/engineering/13_UNIVERSAL_AUDITOR_PROMPT.md)
 
 ## Bootstrap state
 

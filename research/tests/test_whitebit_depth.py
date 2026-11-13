@@ -47,7 +47,14 @@ def test_gap_fails_and_requires_fresh_snapshot():
     with pytest.raises(DepthSequenceGap): book.apply(bad,generation=1)
 
 
-def test_depth_reconnects_after_silence_despite_pongs_and_accepts_quiet_snapshots(monkeypatch):
+@pytest.mark.parametrize(("bad_frame", "reason"), [
+    (None, None),
+    (frame(False, 20, 31), "DEPTH_SEQUENCE_GAP"),
+    ('{"id":99,"result":null,"error":{"message":"private provider detail"}}',
+     "WEBSOCKET_PROVIDER_ERROR"),
+    ('{"id":null,"id":"private provider detail"}', "OTHER_PUBLIC_DATA_ERROR"),
+])
+def test_depth_reconnects_after_silence_or_schema_failure(monkeypatch, bad_frame, reason):
     class Socket:
         def __init__(self):
             self.messages = asyncio.Queue()
@@ -111,19 +118,25 @@ def test_depth_reconnects_after_silence_despite_pongs_and_accepts_quiet_snapshot
 
                 pending = asyncio.create_task(anext(observations))
                 await spin_until(lambda: first.receives == 4)
-                pong = json.dumps({"id": 99, "result": "pong", "error": None})
-                now += 8
-                first.messages.put_nowait(pong)
-                await spin_until(lambda: first.receives == 5)
-                now += 6
-                first.messages.put_nowait(pong)
-                await spin_until(lambda: first.receives == 6)
-                assert not first.closed
-
-                now += 1.1
+                if bad_frame is None:
+                    pong = json.dumps({"id": 99, "result": "pong", "error": None})
+                    now += 8
+                    first.messages.put_nowait(pong)
+                    await spin_until(lambda: first.receives == 5)
+                    now += 6
+                    first.messages.put_nowait(pong)
+                    await spin_until(lambda: first.receives == 6)
+                    assert not first.closed
+                    now += 1.1
+                else:
+                    first.messages.put_nowait(bad_frame)
                 await spin_until(lambda: diagnostics[-1].code == "RECONNECT_WAIT")
                 assert first.closed
-                assert diagnostics[-2].code == "DEPTH_UPDATE_TIMEOUT"
+                assert diagnostics[-2].code == (
+                    "DEPTH_UPDATE_TIMEOUT" if reason is None else "SCHEMA_REJECTED"
+                )
+                assert diagnostics[-2].rejection_reason == reason
+                assert "private provider detail" not in repr(diagnostics)
                 assert diagnostics[-1].retry_in_seconds == 1
 
                 now += 1.1
@@ -228,11 +241,15 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
             self.diagnostic = diagnostic
 
         async def observations(self, stop):
-            for code in (
-                "DEPTH_UPDATE_TIMEOUT", "RECONNECT_WAIT", "CONNECTION_LOST",
-                "RECONNECT_WAIT", "SUBSCRIBED",
+            for code, reason in (
+                ("DEPTH_UPDATE_TIMEOUT", None), ("RECONNECT_WAIT", None),
+                ("CONNECTION_LOST", None), ("RECONNECT_WAIT", None),
+                ("SCHEMA_REJECTED", "DEPTH_SEQUENCE_GAP"), ("RECONNECT_WAIT", None),
+                ("SCHEMA_REJECTED", "DEPTH_SEQUENCE_GAP"), ("RECONNECT_WAIT", None),
+                ("SCHEMA_REJECTED", "INVALID_LOCAL_DEPTH_BOOK"), ("RECONNECT_WAIT", None),
+                ("SUBSCRIBED", None),
             ):
-                self.diagnostic(SimpleNamespace(code=code))
+                self.diagnostic(SimpleNamespace(code=code, rejection_reason=reason))
             yield SimpleNamespace(generation=7, received_at=NOW,
                                   message_time=NOW - timedelta(milliseconds=2400))
             await stop.wait()
@@ -292,10 +309,15 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     assert heartbeats[-1]["phase"] == "STOPPED"
     event_field = "transport_events_since_start"
     assert heartbeats[0]["timing"][event_field] == {
-        "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 0, "CONNECTION_LOST": 0},
+        "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 0, "CONNECTION_LOST": 0, "SCHEMA_REJECTED": 0},
     }
     assert timing[event_field] == heartbeats[-1]["timing"][event_field] == {
-        "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 1, "CONNECTION_LOST": 1},
+        "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 1, "CONNECTION_LOST": 1, "SCHEMA_REJECTED": 3},
+    }
+    reason_field = "schema_rejections_by_reason_since_start"
+    assert heartbeats[0]["timing"][reason_field] == {"BTC_USDT": {}}
+    assert timing[reason_field] == heartbeats[-1]["timing"][reason_field] == {
+        "BTC_USDT": {"DEPTH_SEQUENCE_GAP": 2, "INVALID_LOCAL_DEPTH_BOOK": 1},
     }
 
 

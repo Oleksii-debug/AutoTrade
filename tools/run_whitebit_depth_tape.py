@@ -55,9 +55,10 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     phases = {market: "STARTING" for market in markets}
     errors: dict[str, str] = {}
     transport_events = {
-        market: {"DEPTH_UPDATE_TIMEOUT": 0, "CONNECTION_LOST": 0}
+        market: {"DEPTH_UPDATE_TIMEOUT": 0, "CONNECTION_LOST": 0, "SCHEMA_REJECTED": 0}
         for market in markets
     }
+    rejection_counts: dict[str, dict[str, int]] = {market: {} for market in markets}
     added = 0
     last_archive_boundary = None
     timing_samples: deque[tuple[float, dict[str, float], dict[str, float], dict[str, float]]] = deque()
@@ -131,6 +132,9 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             "transport_events_since_start": {
                 market: counts.copy() for market, counts in transport_events.items()
             },
+            "schema_rejections_by_reason_since_start": {
+                market: counts.copy() for market, counts in rejection_counts.items()
+            },
             "markets": {
                 market: {
                     "observation_age_ms": round((measured_at - at) * 1000, 3),
@@ -177,6 +181,9 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
         counts = transport_events[market]
         if value.code in counts:
             counts[value.code] += 1
+        if value.code == "SCHEMA_REJECTED" and value.rejection_reason is not None:
+            reasons = rejection_counts[market]
+            reasons[value.rejection_reason] = reasons.get(value.rejection_reason, 0) + 1
         if value.code == "SUBSCRIBED":
             phases[market] = "RUNNING"
             errors.pop(market, None)

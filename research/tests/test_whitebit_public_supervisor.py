@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
+import io
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -24,6 +26,7 @@ from tools.run_whitebit_public_supervisor import (
     WhiteBitArtifactQuota,
     WhiteBitPublicDiagnosticJournal,
     _atomic_write_json_with_reader_retry,
+    main,
     supervise,
 )
 
@@ -168,7 +171,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                 "tools.run_whitebit_public_supervisor._atomic_write_json_with_reader_retry",
                 side_effect=fail_latest,
             ):
-                with self.assertRaises(PermissionError):
+                with self.assertRaises(PermissionError) as failed:
                     await supervise(
                         market="BTC_USDT",
                         state_dir=root,
@@ -176,6 +179,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                         install_signals=False,
                     )
 
+            self.assertEqual(failed.exception.autotrade_failure_stage, "PUBLISH_LATEST")
             state = json.loads((root / "supervisor-state.json").read_text("utf-8"))
             self.assertEqual(state["phase"], "FAILED")
             self.assertEqual(state["observation_count"], 0)
@@ -569,6 +573,20 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                     "raw_evidence_ref"
                 ],
             )
+
+
+class FailureOutputTests(unittest.TestCase):
+    def test_cli_exposes_safe_numeric_error_without_exception_text(self):
+        error = OSError(13, "never-log-proxy-secret")
+        error.autotrade_failure_stage = "APPLY_ARTIFACT_QUOTA"
+        output = io.StringIO()
+        with patch("tools.run_whitebit_public_supervisor.supervise", side_effect=error):
+            with redirect_stdout(output):
+                self.assertEqual(main(["--market", "SOL_USDT", "--state-dir", "unused"]), 2)
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["failure_stage"], "APPLY_ARTIFACT_QUOTA")
+        self.assertEqual(value["errno"], 13)
+        self.assertNotIn("never-log-proxy-secret", output.getvalue())
 
 
 class DiagnosticJournalTests(unittest.TestCase):

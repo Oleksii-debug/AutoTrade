@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,9 @@ _SENSITIVE_OPTIONS = frozenset({
     "--private-key", "--secret", "--token",
 })
 _SAFE_ID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
+_CANONICAL_SOL_STATE = "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111"
+_CANONICAL_SOL_STOP = _CANONICAL_SOL_STATE + "/managed.stop.json"
+_CANONICAL_SOL_CHECKPOINT = _CANONICAL_SOL_STATE + "/supervisor-state.json"
 _ALLOWED_SCRIPTS = frozenset({
     "tools/run_learning_fleet_diagnostics.py",
     "tools/run_goal_directed_attention.py",
@@ -131,6 +135,20 @@ def _ordinary_directory(path: Path, label: str) -> Path:
     return resolved
 
 
+def _existing_ordinary_directory(path: Path, label: str) -> Path:
+    """Admit an existing directory without following redirected ancestors."""
+    lexical = path.absolute()
+    current = Path(lexical.anchor)
+    for component in lexical.parts[1:]:
+        current /= component
+        is_junction = getattr(current, "is_junction", lambda: False)
+        if current.is_symlink() or is_junction():
+            raise ValueError(f"{label} must not be redirected")
+    if not lexical.exists() or not lexical.is_dir():
+        raise ValueError(f"{label} must be an existing ordinary directory")
+    return lexical.resolve(strict=True)
+
+
 def _within(root: Path, candidate: Path, label: str) -> Path:
     # Windows can hand TemporaryDirectory (and other callers) an 8.3 root
     # while resolving a descendant expands that same root to its long form.
@@ -152,9 +170,116 @@ def _expand(value: str, *, repo_root: Path, runtime_root: Path,
                  .replace("${WATCHDOG_STATE}", str(state_dir)))
 
 
+def _argument_value(arguments: list[str], option: str) -> str:
+    values: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument == option:
+            if index + 1 >= len(arguments) or arguments[index + 1].startswith("--"):
+                raise ValueError(f"SOL secondary state requires a value for {option}")
+            values.append(arguments[index + 1])
+        elif argument.startswith(option + "="):
+            values.append(argument.split("=", 1)[1])
+    if len(values) != 1 or not values[0]:
+        raise ValueError(f"SOL secondary state requires exactly one {option}")
+    return values[0]
+
+
+def _replace_argument_value(
+    arguments: list[str], option: str, replacement: str
+) -> list[str]:
+    rewritten = list(arguments)
+    for index, argument in enumerate(rewritten):
+        if argument == option:
+            rewritten[index + 1] = replacement
+        elif argument.startswith(option + "="):
+            rewritten[index] = option + "=" + replacement
+    return rewritten
+
+
+def _rewrite_canonical_sol_resources(
+    row: dict[str, Any], arguments: list[str], secondary_root: Path
+) -> tuple[list[str], str, str]:
+    """Redirect only the complete checked-in SOL resource tuple."""
+    bindings = (
+        _argument_value(arguments, "--state-dir") == _CANONICAL_SOL_STATE,
+        _argument_value(arguments, "--stop-file") == _CANONICAL_SOL_STOP,
+        row["stop_file"] == _CANONICAL_SOL_STOP,
+        row["checkpoint"] == _CANONICAL_SOL_CHECKPOINT,
+    )
+    if not all(bindings):
+        raise ValueError(
+            "SOL secondary state requires exact canonical resource paths in all fields"
+        )
+    state = str(secondary_root)
+    stop = str(secondary_root / "managed.stop.json")
+    checkpoint = str(secondary_root / "supervisor-state.json")
+    rewritten = _replace_argument_value(arguments, "--state-dir", state)
+    rewritten = _replace_argument_value(rewritten, "--stop-file", stop)
+    return rewritten, stop, checkpoint
+
+
+def _validate_sol_secondary_binding(
+    row: dict[str, Any],
+    *,
+    arguments: list[str],
+    stop_file: Path,
+    checkpoint: Path,
+    secondary_root: Path,
+) -> None:
+    if row["script"] != "tools/run_whitebit_public_supervisor.py":
+        raise ValueError("SOL secondary state requires the public SOL supervisor")
+    if _argument_value(arguments, "--market") != "SOL_USDT":
+        raise ValueError("SOL secondary state is restricted to SOL_USDT")
+    state_argument = Path(_argument_value(arguments, "--state-dir")).resolve(
+        strict=False
+    )
+    stop_argument = Path(_argument_value(arguments, "--stop-file")).resolve(
+        strict=False
+    )
+    expected_stop = secondary_root / "managed.stop.json"
+    expected_checkpoint = secondary_root / "supervisor-state.json"
+    if state_argument != secondary_root:
+        raise ValueError("SOL --state-dir does not bind the admitted secondary root")
+    if stop_argument != expected_stop or stop_file != expected_stop:
+        raise ValueError("SOL --stop-file does not bind the admitted secondary root")
+    if checkpoint != expected_checkpoint:
+        raise ValueError("SOL checkpoint does not bind the actual secondary checkpoint")
+    if checkpoint.is_symlink() or not checkpoint.is_file():
+        raise ValueError("SOL secondary state requires its actual checkpoint file")
+
+
+def _disjoint_secondary_root(runtime_root: Path, candidate: Path) -> Path:
+    secondary = _existing_ordinary_directory(
+        candidate, "SOL secondary state root"
+    )
+    runtime = runtime_root.resolve(strict=False)
+    if secondary == runtime:
+        raise ValueError("SOL secondary state root must be distinct from runtime root")
+    try:
+        secondary.relative_to(runtime)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("SOL secondary state root must be disjoint from runtime root")
+    try:
+        runtime.relative_to(secondary)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("SOL secondary state root must be disjoint from runtime root")
+    return secondary
+
+
 def load_manifest(path: Path, *, repo_root: Path, runtime_root: Path,
-                  state_dir: Path) -> tuple[dict[str, Any], str]:
+                  state_dir: Path,
+                  sol_secondary_state_root: Path | None = None,
+                  ) -> tuple[dict[str, Any], str]:
     """Load and validate the closed process manifest."""
+    secondary_root = (
+        None
+        if sol_secondary_state_root is None
+        else _disjoint_secondary_root(runtime_root, sol_secondary_state_root)
+    )
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 256_000:
         raise ValueError("watchdog manifest is missing, redirected, or unbounded")
     raw = path.read_bytes()
@@ -170,6 +295,7 @@ def load_manifest(path: Path, *, repo_root: Path, runtime_root: Path,
         raise ValueError("watchdog manifest process count is invalid")
     admitted: list[dict[str, Any]] = []
     identifiers: set[str] = set()
+    secondary_sol_admitted = False
     for row in document["processes"]:
         required = {
             "id", "script", "args", "stop_file", "checkpoint",
@@ -196,28 +322,83 @@ def load_manifest(path: Path, *, repo_root: Path, runtime_root: Path,
         if (type(args) is not list or len(args) > 64
                 or any(type(argument) is not str or len(argument) > 4096 for argument in args)):
             raise ValueError("watchdog process arguments are invalid")
-        for index, argument in enumerate(args):
+        if any(type(row[name]) is not str or not row[name]
+               for name in ("stop_file", "checkpoint")):
+            raise ValueError("watchdog state paths are invalid")
+        effective_args = list(args)
+        effective_stop = row["stop_file"]
+        effective_checkpoint = row["checkpoint"]
+        if identifier == "whitebit-public-sol" and secondary_root is not None:
+            effective_args, effective_stop, effective_checkpoint = (
+                _rewrite_canonical_sol_resources(row, args, secondary_root)
+            )
+        expanded_args = [
+            _expand(
+                argument,
+                repo_root=repo_root,
+                runtime_root=runtime_root,
+                state_dir=state_dir,
+            )
+            for argument in effective_args
+        ]
+        for index, (argument, expanded) in enumerate(
+            zip(effective_args, expanded_args, strict=True)
+        ):
             option = argument.split("=", 1)[0].lower()
             if option in _SENSITIVE_OPTIONS:
                 raise ValueError("secrets are forbidden in watchdog arguments")
-            if index and args[index - 1].split("=", 1)[0].lower() in _SENSITIVE_OPTIONS:
+            if (
+                index
+                and effective_args[index - 1].split("=", 1)[0].lower()
+                in _SENSITIVE_OPTIONS
+            ):
                 raise ValueError("secrets are forbidden in watchdog arguments")
             lowered = argument.lower()
             if lowered.startswith(("gsk_", "sk-")) or "bearer " in lowered:
                 raise ValueError("secret-like values are forbidden in watchdog arguments")
-            expanded = _expand(argument, repo_root=repo_root,
-                               runtime_root=runtime_root, state_dir=state_dir)
             if "${" in expanded:
                 raise ValueError("watchdog argument contains an unknown placeholder")
-        if any(type(row[name]) is not str or not row[name]
-               for name in ("stop_file", "checkpoint")):
-            raise ValueError("watchdog state paths are invalid")
-        stop_file = _within(runtime_root, Path(_expand(
-            row["stop_file"], repo_root=repo_root, runtime_root=runtime_root,
-            state_dir=state_dir)), "watchdog stop file")
-        checkpoint = _within(runtime_root, Path(_expand(
-            row["checkpoint"], repo_root=repo_root, runtime_root=runtime_root,
-            state_dir=state_dir)), "watchdog checkpoint")
+        expanded_stop = Path(_expand(
+            effective_stop, repo_root=repo_root, runtime_root=runtime_root,
+            state_dir=state_dir))
+        expanded_checkpoint = Path(_expand(
+            effective_checkpoint, repo_root=repo_root, runtime_root=runtime_root,
+            state_dir=state_dir))
+        if "${" in str(expanded_stop) or "${" in str(expanded_checkpoint):
+            raise ValueError("watchdog state path contains an unknown placeholder")
+        if identifier == "whitebit-public-sol" and secondary_root is not None:
+            for candidate, label in (
+                (expanded_stop, "SOL secondary stop file"),
+                (expanded_checkpoint, "SOL secondary checkpoint"),
+            ):
+                try:
+                    raw_info = candidate.lstat()
+                except FileNotFoundError:
+                    continue
+                attributes = getattr(raw_info, "st_file_attributes", 0)
+                if candidate.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError(f"{label} must not be a reparse point")
+            stop_file = _within(
+                secondary_root, expanded_stop, "SOL secondary stop file"
+            )
+            checkpoint = _within(
+                secondary_root, expanded_checkpoint, "SOL secondary checkpoint"
+            )
+            _validate_sol_secondary_binding(
+                row,
+                arguments=expanded_args,
+                stop_file=stop_file,
+                checkpoint=checkpoint,
+                secondary_root=secondary_root,
+            )
+            secondary_sol_admitted = True
+        else:
+            stop_file = _within(
+                runtime_root, expanded_stop, "watchdog stop file"
+            )
+            checkpoint = _within(
+                runtime_root, expanded_checkpoint, "watchdog checkpoint"
+            )
         for name in ("restart_limit", "restart_window_seconds"):
             if type(row[name]) is not int or row[name] < 1:
                 raise ValueError(f"watchdog {name} is invalid")
@@ -227,11 +408,12 @@ def load_manifest(path: Path, *, repo_root: Path, runtime_root: Path,
         admitted.append({
             **row,
             "script": str(script),
-            "args": [_expand(argument, repo_root=repo_root, runtime_root=runtime_root,
-                             state_dir=state_dir) for argument in args],
+            "args": expanded_args,
             "stop_file": str(stop_file),
             "checkpoint": str(checkpoint),
         })
+    if secondary_root is not None and not secondary_sol_admitted:
+        raise ValueError("SOL secondary state root requires a SOL worker")
     return {"schema": MANIFEST_SCHEMA, "processes": admitted}, sha256(raw).hexdigest()
 
 
@@ -438,6 +620,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--runtime-root", required=True)
+    parser.add_argument(
+        "--sol-secondary-state-root",
+        help="Existing ordinary state root used only by whitebit-public-sol",
+    )
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--respect-stop-marker", action="store_true",
@@ -449,7 +635,12 @@ def main(argv: list[str] | None = None) -> int:
     if not 0.1 <= args.poll_seconds <= 60:
         raise SystemExit("poll-seconds must be 0.1..60")
     manifest, digest = load_manifest(Path(args.manifest), repo_root=repo_root,
-                                     runtime_root=runtime_root, state_dir=state_dir)
+                                     runtime_root=runtime_root, state_dir=state_dir,
+                                     sol_secondary_state_root=(
+                                         None
+                                         if args.sol_secondary_state_root is None
+                                         else Path(args.sol_secondary_state_root)
+                                     ))
     stop_file = state_dir / "watchdog.stop.json"
     try:
         with ResourceLock(state_dir / "watchdog.lock"):

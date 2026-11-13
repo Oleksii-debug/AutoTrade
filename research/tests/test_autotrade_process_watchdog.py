@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import io
 import os
+import stat
 import subprocess
+from hashlib import sha256
 from pathlib import Path
 from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
@@ -56,6 +58,26 @@ def _row(*, restart_limit: int = 2, args: list[str] | None = None) -> dict:
         "restart_limit": restart_limit,
         "restart_window_seconds": 60,
         "backoff_seconds": 0,
+    }
+
+
+def _sol_secondary_row() -> dict:
+    root = "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111"
+    return {
+        "id": "whitebit-public-sol",
+        "script": "tools/run_whitebit_public_supervisor.py",
+        "args": [
+            "--market", "SOL_USDT",
+            "--state-dir", root,
+            "--checkpoint-seconds", "15",
+            "--max-artifacts", "4096",
+            "--stop-file", f"{root}/managed.stop.json",
+        ],
+        "stop_file": f"{root}/managed.stop.json",
+        "checkpoint": f"{root}/supervisor-state.json",
+        "restart_limit": 5,
+        "restart_window_seconds": 300,
+        "backoff_seconds": 2,
     }
 
 
@@ -126,6 +148,181 @@ def test_manifest_expands_only_bounded_paths_and_rejects_secrets(tmp_path):
     with unittest.TestCase().assertRaisesRegex(ValueError, "secrets are forbidden"):
         load_manifest(bad, repo_root=REPO, runtime_root=runtime,
                       state_dir=tmp_path / "watchdog")
+
+
+def test_manifest_admits_exact_sol_secondary_state_binding_only(tmp_path):
+    tmp_path = tmp_path.resolve()
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "watchdog"
+    secondary = tmp_path / "existing-c-sol-state"
+    for directory in (runtime, state, secondary):
+        directory.mkdir()
+    (secondary / "supervisor-state.json").write_text("{}", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    document = {
+        "schema": MANIFEST_SCHEMA,
+        "processes": [_sol_secondary_row(), _row()],
+    }
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    manifest, _digest = load_manifest(
+        manifest_path,
+        repo_root=REPO,
+        runtime_root=runtime,
+        state_dir=state,
+        sol_secondary_state_root=secondary,
+    )
+
+    sol, ordinary = manifest["processes"]
+    assert Path(sol["args"][sol["args"].index("--state-dir") + 1]) == secondary
+    assert Path(sol["args"][sol["args"].index("--stop-file") + 1]) == (
+        secondary / "managed.stop.json"
+    )
+    assert Path(sol["stop_file"]) == secondary / "managed.stop.json"
+    assert Path(sol["checkpoint"]) == secondary / "supervisor-state.json"
+    assert Path(ordinary["stop_file"]).is_relative_to(runtime)
+    assert Path(ordinary["checkpoint"]).is_relative_to(runtime)
+
+
+def test_checked_in_manifest_remaps_only_sol_without_changing_manifest_sha(tmp_path):
+    tmp_path = tmp_path.resolve()
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "watchdog"
+    secondary = tmp_path / "existing-c-sol-state"
+    for directory in (runtime, state, secondary):
+        directory.mkdir()
+    (secondary / "supervisor-state.json").write_text("{}", encoding="utf-8")
+    manifest_path = REPO / "packaging/windows/autotrade-runtime-manifest.json"
+    original = manifest_path.read_bytes()
+
+    manifest, digest = load_manifest(
+        manifest_path,
+        repo_root=REPO,
+        runtime_root=runtime,
+        state_dir=state,
+        sol_secondary_state_root=secondary,
+    )
+
+    assert manifest_path.read_bytes() == original
+    assert digest == sha256(original).hexdigest()
+    processes = {row["id"]: row for row in manifest["processes"]}
+    sol = processes["whitebit-public-sol"]
+    assert Path(sol["args"][sol["args"].index("--state-dir") + 1]) == secondary
+    assert Path(sol["stop_file"]) == secondary / "managed.stop.json"
+    assert Path(sol["checkpoint"]) == secondary / "supervisor-state.json"
+    for identifier, process in processes.items():
+        if identifier != "whitebit-public-sol":
+            assert Path(process["stop_file"]).is_relative_to(runtime)
+            assert Path(process["checkpoint"]).is_relative_to(runtime)
+
+
+def test_sol_secondary_state_admission_fails_closed_for_every_root_binding(tmp_path):
+    tmp_path = tmp_path.resolve()
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "watchdog"
+    secondary = tmp_path / "existing-c-sol-state"
+    for directory in (runtime, state, secondary):
+        directory.mkdir()
+    (secondary / "supervisor-state.json").write_text("{}", encoding="utf-8")
+
+    def rejected(row, root, message):
+        manifest_path = tmp_path / f"manifest-{len(list(tmp_path.glob('manifest-*')))}.json"
+        _write_manifest(manifest_path, row)
+        with unittest.TestCase().assertRaisesRegex(ValueError, message):
+            load_manifest(
+                manifest_path,
+                repo_root=REPO,
+                runtime_root=runtime,
+                state_dir=state,
+                sol_secondary_state_root=root,
+            )
+
+    rejected(_sol_secondary_row(), tmp_path / "absent", "existing ordinary")
+    rejected(_sol_secondary_row(), runtime, "distinct")
+    nested = runtime / "nested"
+    nested.mkdir()
+    rejected(_sol_secondary_row(), nested, "disjoint")
+
+    rejected(_row(), secondary, "requires a SOL worker")
+
+    wrong_market = _sol_secondary_row()
+    wrong_market["args"][1] = "BTC_USDT"
+    rejected(wrong_market, secondary, "restricted to SOL_USDT")
+
+    wrong_state = _sol_secondary_row()
+    wrong_state["args"][3] = "${RUNTIME_ROOT}/other-sol-state"
+    rejected(wrong_state, secondary, "exact canonical resource paths")
+
+    wrong_arg_stop = _sol_secondary_row()
+    wrong_arg_stop["args"][-1] = "${RUNTIME_ROOT}/other.stop.json"
+    rejected(wrong_arg_stop, secondary, "exact canonical resource paths")
+
+    wrong_declared_stop = _sol_secondary_row()
+    wrong_declared_stop["stop_file"] = "${RUNTIME_ROOT}/other.stop.json"
+    rejected(wrong_declared_stop, secondary, "exact canonical resource paths")
+
+    wrong_checkpoint = _sol_secondary_row()
+    wrong_checkpoint["checkpoint"] = "${RUNTIME_ROOT}/latest-market.json"
+    rejected(wrong_checkpoint, secondary, "exact canonical resource paths")
+
+    duplicate_state = _sol_secondary_row()
+    duplicate_state["args"].append("--state-dir=elsewhere")
+    rejected(duplicate_state, secondary, "exactly one --state-dir")
+
+    real_lstat = Path.lstat
+    stop_marker = secondary / "managed.stop.json"
+    stop_marker.write_text("{}", encoding="utf-8")
+
+    class ReparseInfo:
+        st_mode = stat.S_IFREG | 0o600
+        st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+    def reparse_stop(path):
+        if path == stop_marker:
+            return ReparseInfo()
+        return real_lstat(path)
+
+    with patch.object(Path, "lstat", autospec=True, side_effect=reparse_stop):
+        rejected(_sol_secondary_row(), secondary, "stop file must not be a reparse")
+    stop_marker.unlink()
+
+    checkpoint = secondary / "supervisor-state.json"
+
+    def reparse_checkpoint(path):
+        if path == checkpoint:
+            return ReparseInfo()
+        return real_lstat(path)
+
+    with patch.object(Path, "lstat", autospec=True, side_effect=reparse_checkpoint):
+        rejected(_sol_secondary_row(), secondary, "checkpoint must not be a reparse")
+
+    (secondary / "supervisor-state.json").unlink()
+    rejected(_sol_secondary_row(), secondary, "actual checkpoint file")
+
+
+def test_main_passes_explicit_sol_secondary_root_to_manifest_admission(tmp_path):
+    tmp_path = tmp_path.resolve()
+    runtime = tmp_path / "runtime"
+    state = tmp_path / "watchdog"
+    secondary = tmp_path / "existing-c-sol-state"
+    for directory in (runtime, state, secondary):
+        directory.mkdir()
+    (secondary / "supervisor-state.json").write_text("{}", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, _sol_secondary_row())
+
+    with patch("tools.run_autotrade_process_watchdog.ProcessWatchdog") as runner:
+        runner.return_value.run.return_value = 0
+        result = main([
+            "--manifest", str(manifest_path),
+            "--runtime-root", str(runtime),
+            "--sol-secondary-state-root", str(secondary),
+            "--state-dir", str(state),
+        ])
+
+    assert result == 0
+    admitted = runner.call_args.args[0]["processes"][0]
+    assert Path(admitted["checkpoint"]) == secondary / "supervisor-state.json"
 
 
 def test_watchdog_restarts_then_opens_bounded_crash_circuit(tmp_path):
@@ -365,6 +562,24 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_manifest_contract(self):
         self._run_with_temp(test_manifest_expands_only_bounded_paths_and_rejects_secrets)
+
+    def test_sol_secondary_binding(self):
+        self._run_with_temp(test_manifest_admits_exact_sol_secondary_state_binding_only)
+
+    def test_checked_in_sol_secondary_binding(self):
+        self._run_with_temp(
+            test_checked_in_manifest_remaps_only_sol_without_changing_manifest_sha
+        )
+
+    def test_sol_secondary_fail_closed(self):
+        self._run_with_temp(
+            test_sol_secondary_state_admission_fails_closed_for_every_root_binding
+        )
+
+    def test_sol_secondary_cli(self):
+        self._run_with_temp(
+            test_main_passes_explicit_sol_secondary_root_to_manifest_admission
+        )
 
     def test_atomic_publish_retry(self):
         self._run_with_temp(test_atomic_state_publish_retries_transient_windows_sharing_violation)

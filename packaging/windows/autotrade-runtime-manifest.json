@@ -9,6 +9,7 @@
         "--state-dir", "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111",
         "--checkpoint-seconds", "15",
         "--max-artifacts", "4096",
+        "--minimum-persist-interval-ms", "1000",
         "--stop-file", "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111/managed.stop.json"
       ],
       "stop_file": "${RUNTIME_ROOT}/whitebit-public-sol-v1-20261111/managed.stop.json",

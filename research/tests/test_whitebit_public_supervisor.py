@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import redirect_stdout
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,12 +23,14 @@ from research.autotrade_research.artifacts.store import (
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.integrations.whitebit_websocket import (
     WhiteBitWebSocketDiagnostic,
+    WhiteBitWebSocketMarketFeed,
 )
 from tools.run_whitebit_public_supervisor import (
     SCHEMA,
     SOURCE_URI,
     WhiteBitArtifactQuota,
     WhiteBitPublicDiagnosticJournal,
+    _PersistenceSampler,
     _atomic_write_json_with_reader_retry,
     main,
     supervise,
@@ -43,14 +45,14 @@ def _subscription(request_id: int = 1) -> bytes:
     return _encoded({"id": request_id, "result": {"status": "success"}, "error": None})
 
 
-def _ticker(update_id: int) -> bytes:
+def _ticker(update_id: int, market: str = "BTC_USDT") -> bytes:
     return _encoded(
         {
             "method": "bookTicker_update",
             "params": [[
                 1792303200.1,
                 1792303200.2,
-                "BTC_USDT",
+                market,
                 update_id,
                 "100.00",
                 "2.5",
@@ -107,6 +109,127 @@ class Connector:
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    def test_sampling_admission_uses_elapsed_time_and_resets_for_generation(self):
+        start = datetime(2026, 11, 13, 12, tzinfo=timezone.utc)
+
+        def observation(update_id, milliseconds, generation=1):
+            ticker = type("Ticker", (), {
+                "received_at": start + timedelta(milliseconds=milliseconds),
+                "update_id": update_id,
+            })()
+            return type("Observation", (), {
+                "ticker": ticker,
+                "generation": generation,
+            })()
+
+        sampler = _PersistenceSampler(1000)
+        values = [
+            observation(1, 0),
+            observation(2, 999),
+            observation(3, 1000),
+            observation(4, 1001, generation=2),
+        ]
+        self.assertEqual(
+            [value.ticker.update_id for value in values if sampler.admit(value)],
+            [1, 3, 4],
+        )
+
+    async def test_sol_sampling_validates_all_frames_and_persists_first_per_generation(self):
+        with TemporaryDirectory() as directory:
+            root = (Path(directory) / "state").resolve()
+            first = FakeSocket([
+                _subscription(), _ticker(1, "SOL_USDT"), Disconnect("offline")
+            ])
+            second = FakeSocket([
+                _subscription(2), _ticker(2, "SOL_USDT"), _ticker(3, "SOL_USDT")
+            ])
+            connector = Connector([first, second])
+            stop = asyncio.Event()
+            admitted = []
+            real_commit = WhiteBitWebSocketMarketFeed._commit_with_authenticated_manifest
+
+            def capture_commit(feed, observation):
+                admitted.append(observation.ticker.update_id)
+                return real_commit(feed, observation)
+
+            with patch.object(
+                WhiteBitWebSocketMarketFeed,
+                "_commit_with_authenticated_manifest",
+                new=capture_commit,
+            ):
+                task = asyncio.create_task(supervise(
+                    market="SOL_USDT",
+                    state_dir=root,
+                    connector=connector,
+                    stop=stop,
+                    install_signals=False,
+                    heartbeat_seconds=0.1,
+                    minimum_persist_interval_ms=60_000,
+                ))
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    path = root / "diagnostics" / "whitebit-public-sampling.json"
+                    if path.is_file():
+                        try:
+                            sampling = json.loads(path.read_bytes())
+                        except (OSError, json.JSONDecodeError):
+                            sampling = {}
+                        if sampling.get("validated_frame_count") == 3:
+                            break
+                    await asyncio.sleep(0.02)
+                else:
+                    self.fail("sampling diagnostics did not account for every frame")
+                stop.set()
+                outcome = await asyncio.wait_for(task, timeout=5)
+
+            self.assertEqual(admitted, [1, 2])
+            self.assertEqual(outcome["observation_count"], 2)
+            self.assertEqual(
+                len(list((root / "artifacts" / "manifests").glob("*.json"))),
+                2,
+            )
+            state = json.loads((root / "supervisor-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(state), {
+                "schema", "market", "phase", "checkpointed_at",
+                "observation_count", "latest_evidence_ref",
+                "public_data_only", "trading_authority",
+            })
+            self.assertEqual(state["observation_count"], 2)
+            self.assertEqual(
+                json.loads((root / "latest-market.json").read_text(encoding="utf-8"))["update_id"],
+                2,
+            )
+
+            restarted = WhiteBitPublicDiagnosticJournal(
+                root / "diagnostics",
+                market="SOL_USDT",
+                interval_seconds=60,
+                minimum_persist_interval_ms=60_000,
+            )
+            restarted.start()
+            restarted.stop()
+            sampling = json.loads(
+                (root / "diagnostics" / "whitebit-public-sampling.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(sampling["validated_frame_count"], 3)
+            self.assertEqual(sampling["sampled_out_frame_count"], 1)
+            self.assertEqual(sampling["minimum_persist_interval_ms"], 60_000)
+            self.assertIs(sampling["all_validated_frames_persisted"], False)
+
+    async def test_sampling_is_rejected_outside_sol_before_state_creation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            with self.assertRaisesRegex(ValueError, "restricted to SOL_USDT"):
+                await supervise(
+                    market="BTC_USDT",
+                    state_dir=root,
+                    connector=Connector([]),
+                    install_signals=False,
+                    minimum_persist_interval_ms=1000,
+                )
+            self.assertFalse(root.exists())
+
     async def test_retention_recovery_reports_starting_before_connecting(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

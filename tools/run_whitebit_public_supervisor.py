@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from errno import ENOSPC
 from hashlib import sha256
 import json
@@ -45,6 +45,8 @@ from research.autotrade_research.io.strict_json import strict_json_loads
 
 SCHEMA = "autotrade-whitebit-public-supervisor-v1"
 _ACTIVE_LOG = "whitebit-public-diagnostics.jsonl"
+_SAMPLING_STATE = "whitebit-public-sampling.json"
+_SAMPLING_SCHEMA = "autotrade-whitebit-public-sampling-v1"
 _ROTATED_PREFIX = "whitebit-public-diagnostics-"
 _ROTATED_SUFFIX = ".jsonl"
 _ZERO_DIGEST = "0" * 64
@@ -99,6 +101,7 @@ class WhiteBitPublicDiagnosticJournal:
         interval_seconds: float = 1.0,
         max_segment_bytes: int = 512 * 1024,
         max_segments: int = 8,
+        minimum_persist_interval_ms: int = 0,
         monotonic=time.monotonic,
         clock=lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -117,10 +120,17 @@ class WhiteBitPublicDiagnosticJournal:
             raise ValueError("diagnostic segment size must be at least 1024 bytes")
         if type(max_segments) is not int or not 2 <= max_segments <= 128:
             raise ValueError("diagnostic segment count must be between 2 and 128")
+        if (
+            type(minimum_persist_interval_ms) is not int
+            or not 0 <= minimum_persist_interval_ms <= 60_000
+        ):
+            raise ValueError("persistence sampling interval must be 0..60000 ms")
         self.root = root
         self.interval_seconds = float(interval_seconds)
         self.max_segment_bytes = max_segment_bytes
         self.max_segments = max_segments
+        self.minimum_persist_interval_ms = minimum_persist_interval_ms
+        self._sampling_ever_enabled = minimum_persist_interval_ms > 0
         self._monotonic = monotonic
         self._clock = clock
         self._guard = Lock()
@@ -133,6 +143,8 @@ class WhiteBitPublicDiagnosticJournal:
         self._attempt = 0
         self._generation = 0
         self._observation_count = 0
+        self._validated_frame_count = 0
+        self._sampled_out_frame_count = 0
         self._last_observed_at: str | None = None
         self.error_code: str | None = None
 
@@ -205,8 +217,84 @@ class WhiteBitPublicDiagnosticJournal:
             self._sequence = prior_sequence
             self._previous_digest = str(prior_digest)
             self._observation_count = latest_row["observation_count"]
+            self._validated_frame_count = self._observation_count
             self._last_observed_at = latest_row["last_observed_at"]
             self._generation = latest_row["generation"]
+
+    @property
+    def sampling_path(self) -> Path:
+        return self.root / _SAMPLING_STATE
+
+    def _recover_sampling(self) -> None:
+        path = self.sampling_path
+        if not path.exists() and not path.is_symlink():
+            return
+        self._ordinary_file(path)
+        value = strict_json_loads(path.read_text(encoding="utf-8"))
+        fields = {
+            "schema", "recorded_at_utc", "market", "persisted_observation_count",
+            "validated_frame_count", "sampled_out_frame_count",
+            "minimum_persist_interval_ms", "sampling_ever_enabled",
+            "all_validated_frames_persisted", "public_data_only",
+            "trading_authority",
+        }
+        if type(value) is not dict or set(value) != fields:
+            raise ValueError("sampling diagnostics are not canonical")
+        persisted = value["persisted_observation_count"]
+        validated = value["validated_frame_count"]
+        sampled_out = value["sampled_out_frame_count"]
+        prior_interval = value["minimum_persist_interval_ms"]
+        ever_enabled = value["sampling_ever_enabled"]
+        complete = value["all_validated_frames_persisted"]
+        if (
+            value["schema"] != _SAMPLING_SCHEMA
+            or value["market"] != self.market
+            or type(persisted) is not int
+            or type(validated) is not int
+            or type(sampled_out) is not int
+            or type(prior_interval) is not int
+            or type(ever_enabled) is not bool
+            or type(complete) is not bool
+            or persisted < 0
+            or persisted > self._observation_count
+            or validated != persisted + sampled_out
+            or sampled_out < 0
+            or not 0 <= prior_interval <= 60_000
+            or complete != (not ever_enabled and sampled_out == 0)
+            or value["public_data_only"] is not True
+            or value["trading_authority"] is not False
+        ):
+            raise ValueError("sampling diagnostics are invalid")
+        # Admitted observations after the last one-second metrics flush are
+        # present in the fsynced event journal and are therefore exact.
+        self._validated_frame_count = (
+            validated + self._observation_count - persisted
+        )
+        self._sampled_out_frame_count = sampled_out
+        self._sampling_ever_enabled = self._sampling_ever_enabled or ever_enabled
+
+    def _persist_sampling_locked(self) -> None:
+        if not self._sampling_ever_enabled and not self.sampling_path.exists():
+            return
+        _atomic_write_json_with_reader_retry(
+            self.sampling_path,
+            {
+                "schema": _SAMPLING_SCHEMA,
+                "recorded_at_utc": _utc(self._clock).isoformat(),
+                "market": self.market,
+                "persisted_observation_count": self._observation_count,
+                "validated_frame_count": self._validated_frame_count,
+                "sampled_out_frame_count": self._sampled_out_frame_count,
+                "minimum_persist_interval_ms": self.minimum_persist_interval_ms,
+                "sampling_ever_enabled": self._sampling_ever_enabled,
+                "all_validated_frames_persisted": (
+                    not self._sampling_ever_enabled
+                    and self._sampled_out_frame_count == 0
+                ),
+                "public_data_only": True,
+                "trading_authority": False,
+            },
+        )
 
     def _rotate(self, body_size: int) -> None:
         active = self.active_path
@@ -278,8 +366,23 @@ class WhiteBitPublicDiagnosticJournal:
             self._connection_code = "SUBSCRIBED"
             self._generation = generation
             self._observation_count += 1
+            self._validated_frame_count += 1
             self._last_observed_at = observed_at
             self._append_locked("OBSERVATION")
+
+    def sampled_out(self, generation: int) -> None:
+        """Count one validated frame without adding per-frame disk writes."""
+
+        if type(generation) is not int or generation < 1:
+            raise ValueError("canonical sampled frame identity is required")
+        if self.minimum_persist_interval_ms == 0:
+            raise ValueError("sampling is disabled")
+        with self._guard:
+            self._phase = "RUNNING"
+            self._connection_code = "SUBSCRIBED"
+            self._generation = generation
+            self._validated_frame_count += 1
+            self._sampled_out_frame_count += 1
 
     def checkpoint(self, phase: str) -> None:
         if phase not in _SAFE_PHASES:
@@ -287,6 +390,7 @@ class WhiteBitPublicDiagnosticJournal:
         with self._guard:
             self._phase = phase
             self._append_locked("CHECKPOINT")
+            self._persist_sampling_locked()
 
     def _run(self) -> None:
         next_tick = float(self._monotonic()) + self.interval_seconds
@@ -296,6 +400,7 @@ class WhiteBitPublicDiagnosticJournal:
             try:
                 with self._guard:
                     self._append_locked("HEARTBEAT")
+                    self._persist_sampling_locked()
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
                 # Persist only a bounded local error category, never exception text.
                 self.error_code = "DIAGNOSTIC_" + type(error).__name__.upper()
@@ -312,7 +417,9 @@ class WhiteBitPublicDiagnosticJournal:
             if self.root.is_symlink() or not self.root.is_dir():
                 raise ValueError("diagnostic root must be an ordinary directory")
             self._recover()
+            self._recover_sampling()
             self._append_locked("CHECKPOINT")
+            self._persist_sampling_locked()
             self._stop.clear()
             self._thread = Thread(
                 target=self._run,
@@ -328,6 +435,34 @@ class WhiteBitPublicDiagnosticJournal:
             thread.join(timeout=max(2.0, self.interval_seconds + 1.0))
             if thread.is_alive():
                 raise RuntimeError("WhiteBIT diagnostic heartbeat could not stop")
+
+
+class _PersistenceSampler:
+    """Deterministically admit a bounded subset of already-validated frames."""
+
+    def __init__(self, minimum_interval_ms: int) -> None:
+        if (
+            type(minimum_interval_ms) is not int
+            or not 0 <= minimum_interval_ms <= 60_000
+        ):
+            raise ValueError("persistence sampling interval must be 0..60000 ms")
+        self.minimum_interval = timedelta(milliseconds=minimum_interval_ms)
+        self._last_generation: int | None = None
+        self._last_received_at: datetime | None = None
+
+    def admit(self, observation: Any) -> bool:
+        generation = observation.generation
+        received_at = observation.ticker.received_at
+        if (
+            not self.minimum_interval
+            or generation != self._last_generation
+            or self._last_received_at is None
+            or received_at >= self._last_received_at + self.minimum_interval
+        ):
+            self._last_generation = generation
+            self._last_received_at = received_at
+            return True
+        return False
 
 
 def _snapshot(update: Any) -> dict[str, Any]:
@@ -714,6 +849,7 @@ async def supervise(
     max_segments: int = 8,
     checkpoint_seconds: float = 30.0,
     max_artifacts: int = 4096,
+    minimum_persist_interval_ms: int = 0,
     stop_file: Path | None = None,
     clock=_system_clock,
 ) -> dict[str, Any]:
@@ -721,6 +857,13 @@ async def supervise(
     if type(state_dir) is not type(Path()):
         raise TypeError("state_dir must be an exact Path")
     canonical_market = _symbol(market)
+    if (
+        type(minimum_persist_interval_ms) is not int
+        or not 0 <= minimum_persist_interval_ms <= 60_000
+    ):
+        raise ValueError("persistence sampling interval must be 0..60000 ms")
+    if minimum_persist_interval_ms and canonical_market != "SOL_USDT":
+        raise ValueError("persistence sampling is restricted to SOL_USDT")
     if state_dir.exists() and state_dir.is_symlink():
         raise ValueError("state directory must not be redirected")
     state_dir = state_dir.resolve(strict=False)
@@ -766,8 +909,10 @@ async def supervise(
         interval_seconds=heartbeat_seconds,
         max_segment_bytes=max_segment_bytes,
         max_segments=max_segments,
+        minimum_persist_interval_ms=minimum_persist_interval_ms,
         clock=clock,
     )
+    sampler = _PersistenceSampler(minimum_persist_interval_ms)
     try:
         with ResourceLock(state_dir / "whitebit-public-supervisor.lock"):
             observations, latest = _read_restart_state(
@@ -861,6 +1006,9 @@ async def supervise(
                 nonlocal failure_stage
                 failure_stage = "READ_PUBLIC_STREAM"
                 async for observation in transport.observations(stop_event):
+                    if not sampler.admit(observation):
+                        journal.sampled_out(observation.generation)
+                        continue
                     failure_stage = "COMMIT_ARTIFACT"
                     update, authenticated_manifest = (
                         feed._commit_with_authenticated_manifest(observation)
@@ -934,6 +1082,7 @@ def main(argv=None) -> int:
     parser.add_argument("--state-dir", required=True, help="Persistent local collector state directory")
     parser.add_argument("--checkpoint-seconds", type=float, default=30.0)
     parser.add_argument("--max-artifacts", type=int, default=4096)
+    parser.add_argument("--minimum-persist-interval-ms", type=int, default=0)
     parser.add_argument("--stop-file")
     args = parser.parse_args(argv)
     try:
@@ -943,6 +1092,7 @@ def main(argv=None) -> int:
                 state_dir=Path(args.state_dir),
                 checkpoint_seconds=args.checkpoint_seconds,
                 max_artifacts=args.max_artifacts,
+                minimum_persist_interval_ms=args.minimum_persist_interval_ms,
                 stop_file=None if args.stop_file is None else Path(args.stop_file),
             )
         )

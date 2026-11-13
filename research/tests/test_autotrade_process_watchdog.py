@@ -206,6 +206,10 @@ def test_checked_in_manifest_remaps_only_sol_without_changing_manifest_sha(tmp_p
     assert manifest_path.read_bytes() == original
     assert digest == sha256(original).hexdigest()
     processes = {row["id"]: row for row in manifest["processes"]}
+    sol_args = processes["whitebit-public-sol"]["args"]
+    assert sol_args[sol_args.index("--minimum-persist-interval-ms") + 1] == "1000"
+    assert all("--minimum-persist-interval-ms" not in row["args"]
+               for name, row in processes.items() if name != "whitebit-public-sol")
     sol = processes["whitebit-public-sol"]
     assert Path(sol["args"][sol["args"].index("--state-dir") + 1]) == secondary
     assert Path(sol["stop_file"]) == secondary / "managed.stop.json"

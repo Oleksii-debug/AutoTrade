@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
@@ -8,7 +9,7 @@ from research.autotrade_research.integrations.whitebit_public import (
     PublicFundingHistory,
     PublicFundingRecord,
 )
-from tools.run_whitebit_funding_carry_shadow import evaluate_pair, historical_replay_gate
+from tools.run_whitebit_funding_carry_shadow import _vwap, evaluate_pair, historical_replay_gate
 
 
 NOW = datetime(2026, 11, 12, 1, 0, tzinfo=UTC)
@@ -27,6 +28,14 @@ def book(market: str, bid: str, ask: str) -> PublicBook:
 
 
 class FundingCarryShadowTests(unittest.TestCase):
+    def test_multilevel_buy_vwap_from_course_exercise(self):
+        snapshot = replace(book("WBT_USDT", "99.90", "100.00"),
+                           asks=(("100.00", "2"), ("100.10", "3"), ("100.30", "4")))
+        self.assertEqual(_vwap(snapshot, "BUY", Decimal(7)), Decimal("700.90") / 7)
+        self.assertEqual(_vwap(snapshot, "BUY", Decimal(5)), Decimal("100.06"))
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_PUBLIC_BOOK_DEPTH"):
+            _vwap(snapshot, "BUY", Decimal(10))
+
     def fixture(self, rate: str = "0.0002") -> dict:
         future = SimpleNamespace(
             market="WBT_PERP", base_asset="WBT", quote_asset="USDT",

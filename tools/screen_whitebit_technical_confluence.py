@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 
 from research.autotrade_research.strategies.technical_confluence import (
-    CANDIDATES, TechnicalConfiguration, TechnicalCosts, digest, simulate,
+    CANDIDATES, DONCHIAN_FAMILIES, TechnicalConfiguration, TechnicalCosts, digest, simulate,
 )
 from research.autotrade_research.strategies.fast_screen import validate_bars
 from tools.screen_whitebit_trend_regime import authenticated_bars
@@ -48,6 +48,16 @@ def intraday_trend_configuration() -> TechnicalConfiguration:
         stop_atr="1", take_profit_atr="4", cooldown_bars=4,
         minimum_expected_move_fraction="0.006", minimum_hold_bars=2,
         maximum_hold_bars=4, maximum_entries_per_utc_day=1)
+
+
+def donchian_configurations() -> tuple[TechnicalConfiguration, ...]:
+    """Compare the same intraday breakout with and without volume confirmation."""
+    return tuple(TechnicalConfiguration(
+        family=family, fast_ema=8, slow_ema=32, stop_atr="1",
+        take_profit_atr="4", minimum_expected_move_fraction="0.002",
+        cooldown_bars=4, minimum_hold_bars=2, maximum_hold_bars=4,
+        maximum_entries_per_utc_day=1,
+    ) for family in DONCHIAN_FAMILIES)
 
 
 def _reasons(candidate: dict, controls: list[dict], *, stage: str,
@@ -164,6 +174,10 @@ def locked_final_screen(bars: list[dict], *, train_count: int,
             "rules_are_formal_not_discretionary": True},
         "canonical_qualification": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
+    if any(config.family in DONCHIAN_FAMILIES for config in configurations):
+        result["course_translation"]["donchian_source"] = (
+            "IBKR_CAMPUS_PYQUANT_DONCHIAN_CHANNELS"
+        )
     if protective_stop_intrabar:
         result["execution_model"] = screened[0]["train"]["execution_model"]
     result["result_sha256"] = digest(result)
@@ -191,18 +205,27 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gate-policy", choices=GATE_POLICIES,
                         default="BEAT_ALL_CONTROLS")
-    parser.add_argument("--intraday-trend", action="store_true",
-                        help="replay one fixed 30–60 minute EMA/RSI trend control on M15")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--intraday-trend", action="store_true",
+                      help="replay one fixed 30–60 minute EMA/RSI trend control on M15")
+    mode.add_argument("--donchian-course", action="store_true",
+                      help="compare two fixed M15 channel breakouts with a 60-minute cap")
     args = parser.parse_args(argv)
     bars, dataset, manifest = authenticated_bars(args.manifest)
-    if args.intraday_trend and manifest["interval"] != "15m":
-        parser.error("--intraday-trend requires a 15-minute manifest")
-    configurations = (intraday_trend_configuration(),) if args.intraday_trend else default_grid()
+    intraday = args.intraday_trend or args.donchian_course
+    if intraday and manifest["interval"] != "15m":
+        parser.error("intraday research requires a 15-minute manifest")
+    if args.donchian_course:
+        configurations = donchian_configurations()
+    elif args.intraday_trend:
+        configurations = (intraday_trend_configuration(),)
+    else:
+        configurations = default_grid()
     result = locked_final_screen(bars, train_count=args.train_count,
         development_count=args.development_count, dataset_sha256=dataset,
         configurations=configurations, gate_policy=args.gate_policy,
         minimum_cycles=5 if args.intraday_trend else 10,
-        report_hourly_returns=args.intraday_trend)
+        report_hourly_returns=intraday, protective_stop_intrabar=args.donchian_course)
     target = args.output_dir / f"{result['result_sha256']}.json"
     _atomic(target, {"source": {"venue": "WHITEBIT_PUBLIC", "market": manifest["market"],
         "dataset_identity_sha256": dataset, "manifest": str(args.manifest)}, "result": result})

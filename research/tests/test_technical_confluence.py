@@ -4,10 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from research.autotrade_research.strategies.technical_confluence import (
-    TechnicalConfiguration, TechnicalCosts, simulate, summarize_hour_windows,
+    TechnicalConfiguration, TechnicalCosts, simulate, summarize_hour_windows, technical_signal,
 )
 from tools.screen_whitebit_technical_confluence import (
-    default_grid, intraday_trend_configuration, locked_final_screen,
+    default_grid, donchian_configurations, intraday_trend_configuration, locked_final_screen,
 )
 
 
@@ -34,6 +34,37 @@ def flat_bars(count=900):
 
 
 class TechnicalConfluenceTests(unittest.TestCase):
+    def test_donchian_excludes_signal_candle_and_checks_prior_volume(self):
+        values = flat_bars(98)
+        plain, volume = donchian_configurations()
+        for side, extreme in ((1, "103"), (-1, "97")):
+            with self.subTest(side=side):
+                values[-1].update(close="102" if side > 0 else "98",
+                                  high=extreme if side > 0 else "100",
+                                  low=extreme if side < 0 else "100", volume="1499")
+                self.assertEqual(technical_signal(values, plain)["direction"], side)
+                self.assertEqual(technical_signal(values, volume)["direction"], 0)
+                values[-1]["volume"] = "1500"
+                signal = technical_signal(values, volume)
+                self.assertEqual(signal["direction"], side)
+                self.assertEqual(Decimal(signal["features"]["channel_high"]), 100)
+                self.assertEqual(Decimal(signal["features"]["channel_low"]), 100)
+                self.assertEqual(Decimal(signal["features"]["prior_mean_volume"]), 1000)
+                values[-1]["close"] = "100"
+                self.assertEqual(technical_signal(values, plain)["direction"], 0)
+
+    def test_donchian_skips_entry_when_next_open_loses_the_breakout(self):
+        values = flat_bars(102)
+        config = donchian_configurations()[0]
+        values[95].update(high="104", close="103")
+        lost = simulate(values, candidate="TECHNICAL_CONFLUENCE", configuration=config)
+        self.assertEqual(lost["pretrade_hold_reasons"], {"BREAKOUT_LOST_AT_ENTRY": 1})
+        self.assertEqual(lost["fill_count"], 0)
+        for row in values[96:]:
+            row.update(open="103", high="103", low="103", close="103")
+        held = simulate(values, candidate="TECHNICAL_CONFLUENCE", configuration=config)
+        self.assertEqual(held["exit_reasons"], {"MAX_HOLD_EXIT": 1})
+
     def test_owner_hourly_target_counts_after_cost_equity_at_one_percent(self):
         report = summarize_hour_windows(
             [Decimal("-0.01"), Decimal("0"), Decimal("0.0099"),

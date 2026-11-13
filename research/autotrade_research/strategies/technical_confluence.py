@@ -21,6 +21,9 @@ from .pretrade_evidence import PreTradeThesis, evaluate_pretrade
 
 VERSION = "technical-confluence-futures-v1"
 CANDIDATES = ("CASH", "HOLD_LONG", "HOLD_SHORT", "TECHNICAL_CONFLUENCE")
+DONCHIAN_FAMILIES = ("DONCHIAN_BREAKOUT", "DONCHIAN_VOLUME_BREAKOUT")
+DONCHIAN_LOOKBACK = 20
+DONCHIAN_VOLUME_MULTIPLIER = Decimal("1.5")
 DAILY_RETURN_TARGETS = (Decimal("0.05"), Decimal("0.10"), Decimal("0.20"))
 # Owner target, 2026-11-12: net account-equity gain per complete UTC hour.
 HOURLY_TARGET = Decimal("0.01")
@@ -148,7 +151,7 @@ class TechnicalConfiguration:
     maximum_entries_per_utc_day: int = 4
 
     def validate(self) -> None:
-        if self.family not in {"EMA_RSI_TREND", "BOLLINGER_RSI_REVERSION"}:
+        if self.family not in ("EMA_RSI_TREND", "BOLLINGER_RSI_REVERSION", *DONCHIAN_FAMILIES):
             raise ValueError("unsupported technical family")
         if not 2 <= self.fast_ema < self.slow_ema <= 1000:
             raise ValueError("EMA periods are invalid")
@@ -217,6 +220,8 @@ def _atr(bars: list[dict], period: int) -> Decimal:
 def _features(history: list[dict], config: TechnicalConfiguration) -> dict | None:
     need = max(config.slow_ema * 3, config.rsi_period + 1,
                config.bollinger_period, config.atr_period + 1)
+    if config.family in DONCHIAN_FAMILIES:
+        need = max(need, DONCHIAN_LOOKBACK + 1)
     if len(history) < need:
         return None
     closes = [decimal(row["close"]) for row in history[-need:]]
@@ -224,7 +229,7 @@ def _features(history: list[dict], config: TechnicalConfiguration) -> dict | Non
     mean = sum(band, Decimal(0)) / Decimal(len(band))
     variance = sum(((value - mean) ** 2 for value in band), Decimal(0)) / Decimal(len(band))
     deviation = variance.sqrt()
-    return {
+    features = {
         "close": closes[-1],
         "fast_ema": _ema(closes[-config.fast_ema * 3:], config.fast_ema),
         "slow_ema": _ema(closes[-config.slow_ema * 3:], config.slow_ema),
@@ -234,10 +239,30 @@ def _features(history: list[dict], config: TechnicalConfiguration) -> dict | Non
         "band_lower": mean - decimal(config.bollinger_width) * deviation,
         "atr": _atr(history, config.atr_period),
     }
+    if config.family in DONCHIAN_FAMILIES:
+        # Keep the signal candle out of both the channel and the volume baseline.
+        prior = history[-DONCHIAN_LOOKBACK - 1:-1]
+        features.update(
+            channel_high=max(decimal(bar["high"]) for bar in prior),
+            channel_low=min(decimal(bar["low"]) for bar in prior),
+            volume=decimal(history[-1]["volume"]),
+            prior_mean_volume=sum(decimal(bar["volume"]) for bar in prior) / len(prior),
+        )
+    return features
 
 
 def _entry(features: dict, config: TechnicalConfiguration) -> int:
     if features["atr"] / features["close"] < decimal(config.minimum_expected_move_fraction):
+        return 0
+    if config.family in DONCHIAN_FAMILIES:
+        if config.family == "DONCHIAN_VOLUME_BREAKOUT":
+            minimum_volume = features["prior_mean_volume"] * DONCHIAN_VOLUME_MULTIPLIER
+            if minimum_volume <= 0 or features["volume"] < minimum_volume:
+                return 0
+        if features["close"] > features["channel_high"]:
+            return 1
+        if features["close"] < features["channel_low"]:
+            return -1
         return 0
     if config.family == "EMA_RSI_TREND":
         gap = abs(features["fast_ema"] - features["slow_ema"]) / features["close"]
@@ -396,8 +421,8 @@ def simulate(bars: list[dict], *, candidate: str,
                     target_distance = decimal(configuration.take_profit_atr) * active_atr
                     gate = evaluate_pretrade(PreTradeThesis(
                         direction="LONG" if direction > 0 else "SHORT",
-                        regime=("TREND" if configuration.family == "EMA_RSI_TREND"
-                                else "RANGE"),
+                        regime=("RANGE" if configuration.family == "BOLLINGER_RSI_REVERSION"
+                                else "TREND"),
                         causal_data_complete=True, regime_confirmed=True,
                         location_confirmed=True, trigger_confirmed=True,
                         entry_price=price,
@@ -459,10 +484,17 @@ def simulate(bars: list[dict], *, candidate: str,
                 "reason": reason, "balance": str(balance)}, sort_keys=True).encode())
 
         active_atr = Decimal(0)
+        pending_channel_level = None
         for bar in bars:
             opened = decimal(bar["open"])
-            execute(pending, opened, pending_reason, bar["opened_at"].isoformat())
+            if pending_channel_level is not None and pending * (opened - pending_channel_level) <= 0:
+                pretrade_holds += 1
+                pretrade_hold_reasons["BREAKOUT_LOST_AT_ENTRY"] = (
+                    pretrade_hold_reasons.get("BREAKOUT_LOST_AT_ENTRY", 0) + 1)
+            else:
+                execute(pending, opened, pending_reason, bar["opened_at"].isoformat())
             pending = None; pending_reason = None
+            pending_channel_level = None
             close = decimal(bar["close"])
             if quantity == 0 and cooldown_remaining > 0:
                 cooldown_remaining -= 1
@@ -503,10 +535,10 @@ def simulate(bars: list[dict], *, candidate: str,
                 if not (utc_close.minute or utc_close.second or utc_close.microsecond):
                     hourly_closes.append(close)
             history.append(bar)
-            if protective_reason:
+            if protective_reason or candidate != "TECHNICAL_CONFLUENCE":
                 continue
             features = _features(history, configuration)
-            if candidate != "TECHNICAL_CONFLUENCE" or features is None:
+            if features is None:
                 continue
             if quantity == 0:
                 if cooldown_remaining:
@@ -527,6 +559,8 @@ def simulate(bars: list[dict], *, candidate: str,
                 if direction:
                     pending = direction; pending_reason = "INDICATOR_CONFLUENCE_ENTRY"
                     active_atr = features["atr"]; signal_count += 1
+                    if configuration.family in DONCHIAN_FAMILIES:
+                        pending_channel_level = features["channel_high" if direction > 0 else "channel_low"]
                 continue
             reason = None
             move = (close - entry_price) * (Decimal(1) if quantity > 0 else Decimal(-1))
@@ -541,8 +575,9 @@ def simulate(bars: list[dict], *, candidate: str,
                     if ((quantity > 0 and features["fast_ema"] < features["slow_ema"])
                             or (quantity < 0 and features["fast_ema"] > features["slow_ema"])):
                         reason = "EMA_REVERSAL_EXIT"
-                elif ((quantity > 0 and close >= features["band_mid"])
-                      or (quantity < 0 and close <= features["band_mid"])):
+                elif configuration.family == "BOLLINGER_RSI_REVERSION" and (
+                        (quantity > 0 and close >= features["band_mid"])
+                        or (quantity < 0 and close <= features["band_mid"])):
                     reason = "BOLLINGER_MEAN_EXIT"
             if reason:
                 pending = 0; pending_reason = reason; signal_count += 1

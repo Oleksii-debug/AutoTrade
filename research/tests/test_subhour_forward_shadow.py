@@ -13,7 +13,7 @@ from research.autotrade_research.learning.observed_quote_learning import (
 )
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
-    PROSPECTIVE_WAVE_CYCLES, _append_decision, _bars, _initial,
+    PROSPECTIVE_WAVE_CYCLES, _bars, _finish_decision, _initial, _publish_decision,
     _midpoint_learning_context, _observe_additional_markets,
     _observe_execution_outcomes, _quote, _record_clock_sample, main,
     process_completed_bar, protect_open_position,
@@ -401,11 +401,42 @@ def test_main_persists_protective_exit_without_candles_or_news(tmp_path, monkeyp
 
 def test_decision_journal_is_append_only_and_secret_free(tmp_path):
     target = tmp_path / "decisions.jsonl"
-    _append_decision(target, {"bar": 1, "trading_authority": False})
-    _append_decision(target, {"bar": 2, "trading_authority": False})
+    checkpoint = tmp_path / "checkpoint.json"
+    pending = tmp_path / "pending.json"
+    scope = {"schema": "autotrade-whitebit-subhour-forward-shadow-v1",
+             "trading_authority": False, "network_orders": False}
+    for bar in (1, 2):
+        _publish_decision(checkpoint, target, pending, {**scope, "state": {"bar": bar}},
+                          {**scope, "bar": bar})
     lines = target.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert '"bar":1' in lines[0] and '"bar":2' in lines[1]
+    assert json.loads(checkpoint.read_bytes())["state"]["bar"] == 2
+    assert not pending.exists()
+
+
+@pytest.mark.parametrize("written", ["none", "partial", "complete"])
+def test_interrupted_decision_restores_original_evidence_and_state(tmp_path, written):
+    checkpoint = tmp_path / "checkpoint.json"
+    journal = tmp_path / "decisions.jsonl"
+    pending = tmp_path / "pending.json"
+    scope = {"schema": "autotrade-whitebit-subhour-forward-shadow-v1",
+             "trading_authority": False, "network_orders": False}
+    event = {**scope, "bar": 2, "quote_sha256": "original-quote"}
+    value = {**scope, "state": {"bar": 2, "balance": "999.81"}}
+    previous = b'{"bar":1}\n'
+    payload = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    suffix = {"none": b"", "partial": payload[:25], "complete": payload}[written]
+    journal.write_bytes(previous + suffix)
+    checkpoint.write_text('{"state":{"bar":1}}', encoding="utf-8")
+    pending.write_text(json.dumps({"checkpoint": value, "event": event, "offset": len(previous)}),
+                       encoding="utf-8")
+
+    _finish_decision(checkpoint, journal, pending)
+
+    assert journal.read_bytes() == previous + payload
+    assert json.loads(checkpoint.read_bytes()) == value
+    assert not pending.exists()
 
 
 def test_main_records_shared_portfolio_in_existing_checkpoint(tmp_path, monkeypatch):
@@ -421,6 +452,10 @@ def test_main_records_shared_portfolio_in_existing_checkpoint(tmp_path, monkeypa
     checkpoint = tmp_path / "checkpoint.json"
     checkpoint.write_text(json.dumps({"state": state}), encoding="utf-8")
     module = "tools.run_whitebit_subhour_forward_shadow"
+    journal = tmp_path / "decisions.jsonl"
+    previous = b'{"bar":1}\n'
+    journal.write_bytes(previous)
+    monkeypatch.setattr(f"{module}.MAX_DECISION_JOURNAL_BYTES", len(previous))
     monkeypatch.setattr(f"{module}.datetime", FixedClock)
     monkeypatch.setattr(f"{module}.WhiteBitPublicClient", lambda: object())
     monkeypatch.setattr(f"{module}._bars", lambda *_: _flat_bars(boundary - timedelta(minutes=15)))
@@ -432,6 +467,8 @@ def test_main_records_shared_portfolio_in_existing_checkpoint(tmp_path, monkeypa
                   "received_at": now.isoformat(), "source_sha256": "near-book"}
 
     def quote(_):
+        assert not journal.exists()
+        assert journal.with_suffix(".jsonl.1").read_bytes() == previous
         calls.append(now)
         return {"bid": Decimal("99.99"), "ask": Decimal("100.01"),
                 "source_sha256": "new-market-quote", "received_at": now.isoformat(),

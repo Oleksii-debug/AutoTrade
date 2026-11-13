@@ -11,6 +11,23 @@ from autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 from autotrade_research.artifacts import _retained_recovery_hardening as recovery
+from autotrade_research.artifacts import _namespace_guard as guard
+
+
+@unittest.skipUnless(os.name == "nt", "Windows namespace binding cache")
+class WindowsNamespaceBindingCacheTests(unittest.TestCase):
+    def test_native_function_bindings_are_reused_without_changing_abi(self):
+        kernel_first = guard._kernel32_bindings()
+        kernel_second = guard._kernel32_bindings()
+        ntdll_first = guard._ntdll_bindings()
+        ntdll_second = guard._ntdll_bindings()
+
+        self.assertIs(kernel_first, kernel_second)
+        self.assertIs(ntdll_first, ntdll_second)
+        self.assertEqual(kernel_first[1].argtypes, (guard.ctypes.c_void_p,))
+        self.assertIs(kernel_first[1].restype, guard.ctypes.c_int)
+        self.assertIs(ntdll_first[1].restype, guard.ctypes.c_long)
+        self.assertIs(ntdll_first[2].restype, guard.ctypes.c_ulong)
 
 
 @unittest.skipIf(

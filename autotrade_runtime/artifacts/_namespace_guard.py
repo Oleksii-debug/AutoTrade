@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from functools import lru_cache
 import importlib
 import os
 from pathlib import Path
@@ -86,6 +87,60 @@ class _IoStatusBlock(ctypes.Structure):
     ]
 
 
+@lru_cache(maxsize=1)
+def _kernel32_bindings() -> tuple[Any, Any, Any, Any]:
+    if sys.platform != "win32":
+        raise RuntimeError("Windows namespace bindings are Windows-only")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (ctypes.c_void_p,)
+    close_handle.restype = ctypes.c_int
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(_WindowsByHandleFileInformation),
+    )
+    get_info.restype = ctypes.c_int
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    create_file.restype = ctypes.c_void_p
+    return kernel32, close_handle, get_info, create_file
+
+
+@lru_cache(maxsize=1)
+def _ntdll_bindings() -> tuple[Any, Any, Any]:
+    if sys.platform != "win32":
+        raise RuntimeError("Windows namespace bindings are Windows-only")
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_ulong,
+        ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock),
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+    )
+    nt_create_file.restype = ctypes.c_long
+    rtl_error = ntdll.RtlNtStatusToDosError
+    rtl_error.argtypes = (ctypes.c_long,)
+    rtl_error.restype = ctypes.c_ulong
+    return ntdll, nt_create_file, rtl_error
+
+
 def _validate_component(name: str, *, subject: str) -> str:
     if (
         not isinstance(name, str)
@@ -111,10 +166,7 @@ def _close_fd(descriptor: int) -> None:
 def _close_windows_handle(handle: int) -> None:
     if not handle or sys.platform != "win32":
         return
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (ctypes.c_void_p,)
-    close_handle.restype = ctypes.c_int
+    _kernel32, close_handle, _get_info, _create_file = _kernel32_bindings()
     close_handle(ctypes.c_void_p(handle))
 
 
@@ -123,13 +175,7 @@ def _windows_handle_information(
     *,
     subject: str,
 ) -> _WindowsByHandleFileInformation:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    get_info = kernel32.GetFileInformationByHandle
-    get_info.argtypes = (
-        ctypes.c_void_p,
-        ctypes.POINTER(_WindowsByHandleFileInformation),
-    )
-    get_info.restype = ctypes.c_int
+    _kernel32, _close_handle, get_info, _create_file = _kernel32_bindings()
     information = _WindowsByHandleFileInformation()
     if not get_info(ctypes.c_void_p(handle), ctypes.byref(information)):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -141,18 +187,7 @@ def _windows_handle_information(
 
 
 def _open_windows_root_directory(path: Path) -> int:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = (
-        ctypes.c_wchar_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-    )
-    create_file.restype = ctypes.c_void_p
+    _kernel32, _close_handle, _get_info, create_file = _kernel32_bindings()
     invalid_handle = ctypes.c_void_p(-1).value
     handle = create_file(
         str(path),
@@ -192,22 +227,7 @@ def _nt_open_relative_handle(
     subject: str,
 ) -> int:
     _validate_component(name, subject=subject)
-    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
-    nt_create_file = ntdll.NtCreateFile
-    nt_create_file.argtypes = (
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.c_ulong,
-        ctypes.POINTER(_ObjectAttributes),
-        ctypes.POINTER(_IoStatusBlock),
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-    )
-    nt_create_file.restype = ctypes.c_long
+    _ntdll, nt_create_file, rtl_error = _ntdll_bindings()
 
     name_buffer = ctypes.create_unicode_buffer(name)
     encoded_length = len(name.encode("utf-16-le"))
@@ -258,9 +278,6 @@ def _nt_open_relative_handle(
         0,
     )
     if status < 0:
-        rtl_error = ntdll.RtlNtStatusToDosError
-        rtl_error.argtypes = (ctypes.c_long,)
-        rtl_error.restype = ctypes.c_ulong
         raise ctypes.WinError(rtl_error(status))
     handle = int(result.value)
     try:

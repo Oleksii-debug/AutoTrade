@@ -236,16 +236,22 @@ class DepthLocalBook:
 
 
 class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
-    def __init__(self, *, market: str, limit: int = 20, **kwargs) -> None:
+    def __init__(self, *, market: str, limit: int = 20,
+                 initial_generation: int = 0, **kwargs) -> None:
+        if type(initial_generation) is not int or initial_generation < 0:
+            raise ValueError("initial_generation must be a non-negative integer")
         super().__init__(market=market, **kwargs)
         self.limit = limit
+        self.initial_generation = initial_generation
         DepthLocalBook(market, limit=limit)
 
     async def observations(self, stop: asyncio.Event) -> AsyncIterator[DepthBookObservation]:
         if type(stop) is not asyncio.Event:
             raise TypeError("stop must be an exact asyncio.Event")
         loop = asyncio.get_running_loop()
-        attempt = generation = 0; backoff = self.initial_backoff_seconds
+        attempt = 0
+        generation = self.initial_generation
+        backoff = self.initial_backoff_seconds
         while not stop.is_set():
             attempt += 1; subscribed = False
             failure_code = "CONNECTION_LOST"

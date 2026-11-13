@@ -32,6 +32,7 @@ class WhiteBitDepthTapeStore:
         self.connection=sqlite3.connect(path, timeout=30)
         self._market_bucket_counts: Counter[str] | None = None
         self._count_data_version: int | None = None
+        self._generation_high_water: dict[str, int] = {}
         self.connection.execute("PRAGMA journal_mode=WAL"); self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.executescript("""
         CREATE TABLE IF NOT EXISTS buckets(
@@ -69,16 +70,54 @@ class WhiteBitDepthTapeStore:
 
     def close(self): self.connection.close()
 
+    def _read_generation_high_water(self, market: str) -> int:
+        row = self.connection.execute(
+            "SELECT value FROM metadata WHERE key=?", (f"depth_generation:{market}",),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+        # Legacy processes could reset to 1, so the latest row alone is insufficient.
+        (generation,) = self.connection.execute("""
+            SELECT MAX(
+                COALESCE((SELECT MAX(generation) FROM buckets WHERE market=?), 0),
+                COALESCE((SELECT MAX(generation) FROM execution_bbo WHERE market=?), 0)
+            )
+        """, (market, market)).fetchone()
+        return generation
+
+    def _write_generation_high_water(self, generations: dict[str, int]) -> None:
+        if generations:
+            self.connection.executemany("""
+                INSERT INTO metadata(key,value) VALUES(?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                WHERE CAST(metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)
+            """, ((f"depth_generation:{market}", str(value))
+                  for market, value in generations.items()))
+
+    def generation_baselines(self, markets: tuple[str, ...]) -> dict[str, int]:
+        """Seed collector connection generations under its exclusive writer lock."""
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            generations = {
+                market: self._read_generation_high_water(_symbol(market)) for market in markets
+            }
+            self._write_generation_high_water(generations)
+        self._generation_high_water.update(generations)
+        return generations
+
     def ingest(self, value: DepthBookObservation) -> None:
         self.ingest_many((value,))
 
     def ingest_many(self, values: Sequence[DepthBookObservation]) -> None:
         """Commit observations in receipt order as one durable transaction."""
         changes: Counter[str] = Counter()
+        generations: dict[str, int] = {}
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             for value in values:
-                self._ingest(value, changes)
+                self._ingest(value, changes, generations)
+            self._write_generation_high_water(generations)
+        self._generation_high_water.update(generations)
         counts = self._market_bucket_counts
         if counts is not None:
             for market, change in changes.items():
@@ -88,9 +127,16 @@ class WhiteBitDepthTapeStore:
                 else:
                     counts.pop(market, None)
 
-    def _ingest(self, value: DepthBookObservation, changes: Counter[str]) -> None:
+    def _ingest(self, value: DepthBookObservation, changes: Counter[str],
+                generations: dict[str, int]) -> None:
         if type(value) is not DepthBookObservation: raise TypeError("canonical depth observation required")
         market=_symbol(value.market); bucket=int(value.received_at.timestamp())
+        generation = generations.get(market, self._generation_high_water.get(market))
+        if generation is None:
+            generation = self._read_generation_high_water(market)
+            generations[market] = generation
+        if value.generation > generation:
+            generations[market] = value.generation
         bucket-=bucket%self.bucket_seconds
         row=self.connection.execute("SELECT * FROM buckets WHERE market=? AND bucket_epoch=?",
             (market,bucket)).fetchone()

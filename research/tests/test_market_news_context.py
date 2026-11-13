@@ -1,9 +1,11 @@
 import json
 from datetime import UTC, datetime, timedelta
+from threading import Barrier, Lock
+from time import sleep
 
 from research.autotrade_research.integrations.market_news_context import (
     FED_MONETARY, SOLANA_INCIDENTS, SOLANA_STATUS, WHITEBIT_STATUS,
-    collect_market_context,
+    MarketContextError, collect_market_context,
 )
 
 
@@ -54,3 +56,28 @@ def test_unavailable_source_fails_closed_without_inventing_sentiment():
     value = collect_market_context(now=NOW, fetch=unavailable)
     assert value["decision"] == "BLOCK"
     assert value["details"] == {}
+
+
+def test_independent_feeds_overlap_but_failures_keep_source_order():
+    all_started = Barrier(4)
+    lock = Lock()
+    arrivals = []
+    delays = {SOLANA_STATUS: .04, SOLANA_INCIDENTS: .03,
+              WHITEBIT_STATUS: .02, FED_MONETARY: .01}
+
+    def overlapping_fetch(url):
+        with lock:
+            arrivals.append(url)
+        all_started.wait(timeout=1)
+        sleep(delays[url])
+        if url in (SOLANA_STATUS, SOLANA_INCIDENTS):
+            raise MarketContextError("temporary failure")
+        return _fetch()(url)
+
+    value = collect_market_context(now=NOW, fetch=overlapping_fetch)
+
+    assert set(arrivals) == {SOLANA_STATUS, SOLANA_INCIDENTS,
+                             WHITEBIT_STATUS, FED_MONETARY}
+    assert value["reasons"] == ["SOLANA_STATUS_MARKETCONTEXTERROR",
+                                "SOLANA_INCIDENTS_MARKETCONTEXTERROR"]
+    assert value["observed_at"] == NOW.isoformat()

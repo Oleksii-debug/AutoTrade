@@ -115,10 +115,7 @@ def _matching_outcome(pending: dict, entries: list, boundary: int, observed: dat
     return None
 
 
-def _resolve(pending: dict, entries: list, boundary: int, observed: datetime) -> dict | None:
-    item = _matching_outcome(pending, entries, boundary, observed)
-    if item is None:
-        return None
+def _resolve(pending: dict, item: dict) -> dict | None:
     action = pending["action"]
     net = Decimal(0) if action == "HOLD" else Decimal(item["outcomes"][action]["net_equity_return"])
     if not net.is_finite() or net <= -1:
@@ -212,6 +209,7 @@ def _report(state: dict) -> dict:
     recent = state["recent"]
     by_entry = {row["entry_boundary_epoch"]: row for row in recent}
     current_hours = {}
+    capacity_hours = {}
     legacy_hours = []
     for epoch, row in sorted(by_entry.items()):
         if (epoch - OBSERVATION_STEP) % HOUR_SECONDS:
@@ -223,16 +221,25 @@ def _report(state: dict) -> dict:
         value = (1 + Decimal(row["net_equity_return"])) * (1 + Decimal(second["net_equity_return"])) - 1
         if policy == LABEL_POLICY:
             current_hours[epoch] = value
+            if all(
+                leg["action"] == "HOLD" or leg.get("observed_capacity_basis") == "SAME_BASE_QUANTITY_V1"
+                and leg.get("observed_capacity_check") is True
+                for leg in (row, second)
+            ):
+                capacity_hours[epoch] = value
         elif policy == LEGACY_POLICY:
             legacy_hours.append(value)
 
     values = list(current_hours.values())
-    compound = Decimal(1)
-    for value in values:
-        compound *= 1 + value
+    def compounded(hours: dict) -> Decimal:
+        equity = Decimal(1)
+        for change in hours.values():
+            equity *= 1 + change
+        return equity - 1
+
     report = {
         "hourly": summarize_hour_windows(values, 1),
-        "compound_complete_hour_return": str(compound - 1),
+        "compound_complete_hour_return": str(compounded(current_hours)),
         "hour_start_minute_utc": OBSERVATION_STEP // 60,
         "label_policy": LABEL_POLICY,
         "legacy_hourly": summarize_hour_windows(legacy_hours, 1),
@@ -241,12 +248,21 @@ def _report(state: dict) -> dict:
     }
     if "first_aligned_entry_epoch" in state:
         report["hourly_coverage"] = _hourly_coverage(state, current_hours)
+    if state.get("observes_execution_capacity") is True:
+        report["capacity_qualified"] = {
+            "hourly": summarize_hour_windows(list(capacity_hours.values()), 1),
+            "compound_complete_hour_return": str(compounded(capacity_hours)) if capacity_hours else None,
+            "unqualified_complete_hours": len(current_hours) - len(capacity_hours),
+            "quote_basis": "SAME_BASE_QUANTITY_AT_BOTH_OBSERVED_TOUCHES",
+        }
+        if "first_aligned_entry_epoch" in state:
+            report["capacity_qualified"]["hourly_coverage"] = _hourly_coverage(state, capacity_hours)
     return report
 
 
 def advance(
     state: dict, event: dict, *, now: datetime, markets: tuple[str, ...] = MARKETS,
-    capacity_check: Callable[[dict], bool] | None = None,
+    capacity_check: Callable[[dict, dict], bool] | None = None,
 ) -> bool:
     """Settle a prior frozen selection and record a timely new selection."""
     if event.get("schema") != SOURCE_SCHEMA or "processed_bar_open_epoch" not in event:
@@ -259,6 +275,8 @@ def advance(
     if last is not None and boundary <= last:
         return False
     state["last_boundary_epoch"] = boundary
+    if capacity_check is not None:
+        state["observes_execution_capacity"] = True
     entries = list(_market_entries(event, markets))
     pending = state["pending"]
     if "first_aligned_entry_epoch" not in state:
@@ -268,13 +286,16 @@ def advance(
         if aligned:
             state["first_aligned_entry_epoch"] = min(aligned)
     if pending is not None and boundary >= pending["due_boundary_epoch"]:
-        result = _resolve(pending, entries, boundary, observed) if boundary == pending["due_boundary_epoch"] else None
+        label = (_matching_outcome(pending, entries, boundary, observed)
+                 if boundary == pending["due_boundary_epoch"] else None)
+        result = _resolve(pending, label) if label is not None else None
         state["pending"] = None
         if result is None:
             state["unmatched_count"] += 1
         else:
             if capacity_check is not None and result["action"] in ("LONG", "SHORT"):
-                result["observed_capacity_check"] = capacity_check(result)
+                result["observed_capacity_check"] = capacity_check(result, label["outcomes"][result["action"]])
+                result["observed_capacity_basis"] = "SAME_BASE_QUANTITY_V1"
             state["recent"] = (state["recent"] + [result])[-RECENT_LIMIT:]
             state["settled_count"] += 1
     queued = state.get("queued")

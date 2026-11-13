@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
 
-from tools.run_whitebit_observed_portfolio import LABEL_POLICY, SOURCE_SCHEMA, advance, new_state
+from tools.run_whitebit_observed_portfolio import LABEL_POLICY, SOURCE_SCHEMA, _report, advance, new_state
 
 
 START = datetime(2026, 11, 12, 18, tzinfo=UTC)
@@ -224,8 +224,9 @@ def test_two_market_observer_excludes_sol_and_persists_capacity_result():
     market_pair = ("BTC_PERP", "ETH_PERP")
     checks = []
 
-    def check_capacity(row):
+    def check_capacity(row, modeled_outcome):
         checks.append(row["market"])
+        assert modeled_outcome["net_equity_return"] == ".006"
         return False
 
     def step(minute, btc=None, settled=()):
@@ -247,5 +248,37 @@ def test_two_market_observer_excludes_sol_and_persists_capacity_result():
     step(45, settled=[outcome(entry, 45)])
     assert checks == ["BTC_PERP"]
     assert state["recent"][-1]["observed_capacity_check"] is False
+    assert state["recent"][-1]["observed_capacity_basis"] == "SAME_BASE_QUANTITY_V1"
     assert Decimal(state["recent"][-1]["net_equity_return"]) == Decimal(".006")
     assert not state["delayed_training"]["SOL_PERP"]["decisions"]
+
+
+def test_capacity_hourly_report_separates_unqualified_return_and_preserves_old_totals():
+    entry = int(START.timestamp()) + 900
+    state = new_state(START)
+    state.update(observes_execution_capacity=True, first_aligned_entry_epoch=entry,
+                 last_boundary_epoch=entry + 3 * 3600, settled_count=6)
+    returns = (
+        ("LONG", ".012", {"observed_capacity_check": True}),
+        ("HOLD", "0", {}),
+        ("SHORT", ".015", {"observed_capacity_check": False,
+                           "observed_capacity_basis": "SAME_BASE_QUANTITY_V1"}),
+        ("HOLD", "0", {}),
+        ("SHORT", "-.004", {"observed_capacity_check": True,
+                            "observed_capacity_basis": "SAME_BASE_QUANTITY_V1"}),
+        ("HOLD", "0", {}),
+    )
+    state["recent"] = [
+        {"entry_boundary_epoch": entry + offset * 1800, "label_policy": LABEL_POLICY,
+         "action": action, "net_equity_return": change, **evidence}
+        for offset, (action, change, evidence) in enumerate(returns)
+    ]
+    report = _report(state)
+    assert report["hourly"]["complete_windows"] == 3
+    assert report["hourly"]["target_hits"] == 2
+    qualified = report["capacity_qualified"]
+    assert qualified["hourly"]["complete_windows"] == 1
+    assert qualified["hourly"]["target_hits"] == 0
+    assert qualified["hourly_coverage"]["unobserved_complete_hours"] == 2
+    assert qualified["unqualified_complete_hours"] == 2
+    assert Decimal(qualified["compound_complete_hour_return"]) == Decimal("-.004")

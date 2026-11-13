@@ -14,7 +14,7 @@ from research.autotrade_research.learning.observed_quote_learning import (
 from research.autotrade_research.strategies.technical_confluence import TechnicalCosts, simulate
 from tools.run_whitebit_subhour_forward_shadow import (
     PROSPECTIVE_WAVE_CYCLES, _bars, _finish_decision, _initial, _publish_decision,
-    _midpoint_learning_context, _observe_additional_markets,
+    _midpoint_learning_context, _observe_additional_markets, _observed_capacity,
     _observe_execution_outcomes, _quote, _record_clock_sample, main,
     process_completed_bar, protect_open_position,
 )
@@ -29,6 +29,30 @@ def _flat_bars(last_open: datetime, count=200):
             "open": "100", "high": "100", "low": "100", "close": "100",
             "volume": "1"})
     return result
+
+
+@pytest.mark.parametrize(("action", "exit_size", "passes"), [
+    ("LONG", "2.499", False),
+    ("SHORT", "2.499", False),
+    ("LONG", "2.5", True),
+    ("SHORT", "2.5", True),
+])
+def test_observed_capacity_compares_same_base_quantity_at_both_touches(tmp_path, action,
+                                                                       exit_size, passes):
+    database = tmp_path / "depth.sqlite3"
+    entry = datetime(2026, 11, 13, 12, tzinfo=UTC)
+    exit_at = entry + timedelta(minutes=30)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE execution_bbo (market TEXT, bucket_epoch INTEGER,"
+                           " received_at TEXT, bid_quantity TEXT, ask_quantity TEXT)")
+        for at, bid, ask in ((entry, "2.6", "2.6"),
+                             (exit_at, exit_size, "8") if action == "LONG" else (exit_at, "8", exit_size)):
+            received = at - timedelta(milliseconds=500)
+            connection.execute("INSERT INTO execution_bbo VALUES (?,?,?,?,?)",
+                               ("BTC_PERP", int(received.timestamp()), received.isoformat(), bid, ask))
+    result = {"market": "BTC_PERP", "action": action, "entry_quote_received_at": entry.isoformat(),
+              "exit_quote_received_at": exit_at.isoformat()}
+    assert _observed_capacity(database, result, {"entry_price": "100"}) is passes
 
 
 def test_forward_shadow_abstains_without_a_complete_technical_setup():

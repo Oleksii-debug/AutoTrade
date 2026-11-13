@@ -74,6 +74,7 @@ def _bars(client: WhiteBitPublicClient, now: datetime, limit: int = 250) -> list
 
 def _quote(client: WhiteBitPublicClient) -> dict:
     quotes = {}
+    point_in_time_futures = {}
     for row in client.futures_markets():
         if row.market not in (MARKET, *LEARNING_MARKETS, *COST_EVIDENCE_MARKETS):
             continue
@@ -84,8 +85,18 @@ def _quote(client: WhiteBitPublicClient) -> dict:
             continue
         if row.market in quotes:
             raise PublicDataError("DUPLICATE_LIVE_FUTURES_QUOTE")
-        quotes[row.market] = {"bid": bid, "ask": ask, "mid": (bid + ask) / Decimal(2),
-            "received_at": row.received_at.isoformat(), "source_sha256": row.digest}
+        received_at = row.received_at.isoformat()
+        quotes[row.market] = {"bid": bid, "ask": ask,
+            "mid": (bid + ask) / Decimal(2), "received_at": received_at,
+            "source_sha256": row.digest}
+        if row.market in (MARKET, *LEARNING_MARKETS):
+            point_in_time_futures[row.market] = {
+                "open_interest": row.open_interest,
+                "mark_price": row.mark_price,
+                "index_price": row.index_price,
+                "received_at": received_at,
+                "source_sha256": row.digest,
+            }
     if MARKET not in quotes:
         raise PublicDataError("FUTURES_MARKET_NOT_AVAILABLE")
     cost_quotes = {}
@@ -99,6 +110,7 @@ def _quote(client: WhiteBitPublicClient) -> dict:
             "received_at": quote["received_at"], "source_sha256": quote["source_sha256"],
         }
     return {**quotes[MARKET], "observed_cost_quotes": cost_quotes,
+            "point_in_time_futures": point_in_time_futures,
             "learning_quotes": {market: quotes[market] for market in LEARNING_MARKETS
                                 if market in quotes}}
 
@@ -715,6 +727,7 @@ def main(argv=None) -> int:
                     "execution_outcomes": execution_outcomes,
                     "execution_observation": current_observation,
                     "observed_cost_quotes": quote.get("observed_cost_quotes", {}),
+                    "point_in_time_futures": quote.get("point_in_time_futures", {}),
                     "additional_market_research": additional_observations,
                     "network_orders": False, "trading_authority": False,
                 }

@@ -254,14 +254,29 @@ def test_shared_quote_feeds_independent_market_learning(tmp_path):
     def snapshots(now):
         calls.append(now)
         return [SimpleNamespace(market=market, bid="100", ask="100.01",
-                    received_at=now, digest=market) for market in
-                ("SOL_PERP", "BTC_PERP", "ETH_PERP", "NEAR_PERP", "SUI_PERP")]
+                    open_interest=f"{index}000", mark_price=f"100.{index}",
+                    index_price=f"99.{index}", received_at=now, digest=market)
+                for index, market in enumerate(
+                    ("SOL_PERP", "BTC_PERP", "ETH_PERP", "NEAR_PERP", "SUI_PERP"))]
 
     state = _initial(int(start.timestamp()) - 900, start)
     initial_quote = _quote(SimpleNamespace(futures_markets=lambda: snapshots(start)))
     assert len(calls) == 1
     assert set(initial_quote["learning_quotes"]) == {"BTC_PERP", "ETH_PERP"}
     assert set(initial_quote["observed_cost_quotes"]) == {"NEAR_PERP", "SUI_PERP"}
+    assert set(initial_quote["point_in_time_futures"]) == {
+        "SOL_PERP", "BTC_PERP", "ETH_PERP"}
+    for index, market in enumerate(("SOL_PERP", "BTC_PERP", "ETH_PERP")):
+        assert initial_quote["point_in_time_futures"][market] == {
+            "open_interest": f"{index}000",
+            "mark_price": f"100.{index}",
+            "index_price": f"99.{index}",
+            "received_at": start.isoformat(),
+            "source_sha256": market,
+        }
+    assert "open_interest" not in initial_quote
+    assert "mark_price" not in initial_quote
+    assert "index_price" not in initial_quote
     cost_quote = initial_quote["observed_cost_quotes"]["NEAR_PERP"]
     assert cost_quote["source_sha256"] == "NEAR_PERP"
     assert Decimal("0.99") < Decimal(cost_quote["spread_bps"]) < Decimal("1")

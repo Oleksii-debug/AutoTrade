@@ -42,6 +42,29 @@ _DIAGNOSTIC_CODES = frozenset(
         "STOPPED",
     }
 )
+_SCHEMA_REJECTION_REASONS = frozenset({
+    "CROSSED_BOOK_TICKER",
+    "FUTURE_WEBSOCKET_TIMESTAMP",
+    "INVALID_BOOK_TICKER_PARAMS",
+    "INVALID_BOOK_TICKER_ROW",
+    "INVALID_BOOK_TICKER_TIME_ORDER",
+    "INVALID_BOOK_TICKER_UPDATE_ID",
+    "INVALID_DECIMAL",
+    "INVALID_JSON",
+    "INVALID_WEBSOCKET_CONTROL_ID",
+    "INVALID_WEBSOCKET_CONTROL_RESULT",
+    "INVALID_WEBSOCKET_FRAME",
+    "INVALID_WEBSOCKET_SCHEMA",
+    "INVALID_WEBSOCKET_TIMESTAMP",
+    "NON_POSITIVE_DECIMAL",
+    "UNEXPECTED_WEBSOCKET_METHOD",
+    "UNEXPECTED_WEBSOCKET_SUBSCRIPTION_ACK",
+    "WEBSOCKET_MARKET_MISMATCH",
+    "WEBSOCKET_PROVIDER_ERROR",
+    "WEBSOCKET_SUBSCRIBE_TIMEOUT",
+    "WEBSOCKET_TIMESTAMP_PRECISION",
+    "OTHER_PUBLIC_DATA_ERROR",
+})
 
 
 @dataclass(frozen=True)
@@ -52,6 +75,7 @@ class WhiteBitWebSocketDiagnostic:
     attempt: int
     generation: int
     retry_in_seconds: float | None = None
+    rejection_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.code not in _DIAGNOSTIC_CODES:
@@ -64,6 +88,11 @@ class WhiteBitWebSocketDiagnostic:
             value = self.retry_in_seconds
             if type(value) not in (int, float) or not 0 <= value <= 300:
                 raise ValueError("retry_in_seconds is outside the bounded range")
+        if self.rejection_reason is not None and (
+            self.code != "SCHEMA_REJECTED"
+            or self.rejection_reason not in _SCHEMA_REJECTION_REASONS
+        ):
+            raise ValueError("unsupported WhiteBIT rejection reason")
 
 
 @dataclass(frozen=True)
@@ -581,10 +610,11 @@ class WhiteBitPublicWebSocketTransport:
         attempt: int,
         generation: int,
         retry: float | None = None,
+        rejection_reason: str | None = None,
     ) -> None:
         if self._diagnostic is not None:
             self._diagnostic(
-                WhiteBitWebSocketDiagnostic(code, attempt, generation, retry)
+                WhiteBitWebSocketDiagnostic(code, attempt, generation, retry, rejection_reason)
             )
 
     def _next_request_id(self) -> int:
@@ -653,7 +683,7 @@ class WhiteBitPublicWebSocketTransport:
         while not stop.is_set():
             attempt += 1
             self._emit("CONNECTING", attempt=attempt, generation=generation)
-            schema_failure = False
+            rejection_reason = None
             subscribed = False
             socket = None
             heartbeat: asyncio.Task | None = None
@@ -739,12 +769,15 @@ class WhiteBitPublicWebSocketTransport:
                             pass
             except asyncio.CancelledError:
                 raise
-            except PublicDataError:
-                schema_failure = True
+            except PublicDataError as error:
+                reason = str(error)
+                rejection_reason = (
+                    reason if reason in _SCHEMA_REJECTION_REASONS else "OTHER_PUBLIC_DATA_ERROR"
+                )
             except Exception:
                 # Provider/library exception text can contain proxy URLs or other
                 # local details.  Only the bounded code leaves this boundary.
-                schema_failure = False
+                rejection_reason = None
             finally:
                 if heartbeat is not None:
                     heartbeat.cancel()
@@ -753,9 +786,10 @@ class WhiteBitPublicWebSocketTransport:
             if stop.is_set():
                 break
             self._emit(
-                "SCHEMA_REJECTED" if schema_failure else "CONNECTION_LOST",
+                "SCHEMA_REJECTED" if rejection_reason is not None else "CONNECTION_LOST",
                 attempt=attempt,
                 generation=generation,
+                rejection_reason=rejection_reason,
             )
             self._emit(
                 "RECONNECT_WAIT",

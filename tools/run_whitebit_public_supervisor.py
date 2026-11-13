@@ -224,7 +224,7 @@ class WhiteBitPublicDiagnosticJournal:
             self._ordinary_file(oldest)
             oldest.unlink()
 
-    def _record(self, event: str) -> dict[str, Any]:
+    def _record(self, event: str, rejection_reason: str | None = None) -> dict[str, Any]:
         if event not in {"HEARTBEAT", "TRANSPORT", "OBSERVATION", "CHECKPOINT"}:
             raise ValueError("unsupported diagnostic event")
         return {
@@ -236,6 +236,7 @@ class WhiteBitPublicDiagnosticJournal:
             "market": self.market,
             "phase": self._phase,
             "connection_code": self._connection_code,
+            **({"rejection_reason": rejection_reason} if rejection_reason is not None else {}),
             "attempt": self._attempt,
             "generation": self._generation,
             "observation_count": self._observation_count,
@@ -244,8 +245,8 @@ class WhiteBitPublicDiagnosticJournal:
             "trading_authority": False,
         }
 
-    def _append_locked(self, event: str) -> None:
-        body = _json_line(self._record(event))
+    def _append_locked(self, event: str, rejection_reason: str | None = None) -> None:
+        body = _json_line(self._record(event, rejection_reason))
         if len(body) > self.max_segment_bytes:
             raise ValueError("one diagnostic record exceeds the segment bound")
         self._rotate(len(body))
@@ -266,7 +267,7 @@ class WhiteBitPublicDiagnosticJournal:
             self._connection_code = diagnostic.code
             self._attempt = diagnostic.attempt
             self._generation = diagnostic.generation
-            self._append_locked("TRANSPORT")
+            self._append_locked("TRANSPORT", diagnostic.rejection_reason)
 
     def observation(self, observed_at: str, generation: int) -> None:
         if type(observed_at) is not str or type(generation) is not int or generation < 1:

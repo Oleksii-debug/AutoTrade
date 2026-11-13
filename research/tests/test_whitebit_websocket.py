@@ -331,6 +331,10 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         async for _ in transport.observations(stop):
             stop.set()
         self.assertIn("SCHEMA_REJECTED", [item.code for item in diagnostics])
+        self.assertEqual(
+            [item.rejection_reason for item in diagnostics if item.code == "SCHEMA_REJECTED"],
+            ["WEBSOCKET_PROVIDER_ERROR"],
+        )
         self.assertNotIn("API key abc", repr(diagnostics))
 
 

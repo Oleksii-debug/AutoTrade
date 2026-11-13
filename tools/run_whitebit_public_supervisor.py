@@ -20,6 +20,7 @@ import signal
 import stat
 from threading import Event, Lock, Thread
 import time
+from traceback import walk_tb
 from typing import Any, Callable
 
 from research.autotrade_research.artifacts.durable_publish import (
@@ -954,9 +955,23 @@ def main(argv=None) -> int:
         # proxy details or other sensitive material.
         result = {"phase": "FAILED", "error_code": type(error).__name__.upper(),
                   "failure_stage": getattr(error, "autotrade_failure_stage", "STARTUP")}
-        if isinstance(error, OSError):
+        if isinstance(error, ArtifactIntegrityError):
+            # Report an exact source location without including provider text,
+            # object names, local paths or exception arguments.
+            for frame, line in walk_tb(error.__traceback__):
+                module = frame.f_globals.get("__name__", "")
+                if module.startswith(("autotrade_runtime.artifacts.",
+                                      "research.autotrade_research.artifacts.")):
+                    result["integrity_module"] = module.rsplit(".", 1)[1]
+                    result["integrity_line"] = line
+        numeric_error = error
+        if isinstance(error, ArtifactIntegrityError):
+            numeric_error = error.__cause__
+            while isinstance(numeric_error, ArtifactIntegrityError):
+                numeric_error = numeric_error.__cause__
+        if isinstance(numeric_error, OSError):
             for field in ("errno", "winerror"):
-                code = getattr(error, field, None)
+                code = getattr(numeric_error, field, None)
                 if type(code) is int:
                     result[field] = code
         print(json.dumps(result, sort_keys=True), flush=True)

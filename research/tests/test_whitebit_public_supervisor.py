@@ -18,6 +18,7 @@ from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
     _manifest_integrity_hash,
+    _verify_manifest_integrity,
 )
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.integrations.whitebit_websocket import (
@@ -621,6 +622,23 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FailureOutputTests(unittest.TestCase):
+    def test_cli_locates_artifact_integrity_failure_without_exception_text(self):
+        async def fail(**_):
+            _verify_manifest_integrity(
+                {"artifact_id": "never-log-artifact-id"}, required=True
+            )
+
+        output = io.StringIO()
+        with patch("tools.run_whitebit_public_supervisor.supervise", new=fail):
+            with redirect_stdout(output):
+                self.assertEqual(main(["--market", "SOL_USDT", "--state-dir", "unused"]), 2)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["error_code"], "ARTIFACTINTEGRITYERROR")
+        self.assertEqual(result["integrity_module"], "store")
+        self.assertGreater(result["integrity_line"], 0)
+        self.assertNotIn("never-log-artifact-id", output.getvalue())
+        self.assertNotIn("lacks integrity binding", output.getvalue())
+
     def test_cli_exposes_safe_numeric_error_without_exception_text(self):
         error = OSError(13, "never-log-proxy-secret")
         error.autotrade_failure_stage = "APPLY_ARTIFACT_QUOTA"

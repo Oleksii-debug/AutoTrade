@@ -233,7 +233,8 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
                 "RECONNECT_WAIT", "SUBSCRIBED",
             ):
                 self.diagnostic(SimpleNamespace(code=code))
-            yield SimpleNamespace(generation=7)
+            yield SimpleNamespace(generation=7, received_at=NOW,
+                                  message_time=NOW - timedelta(milliseconds=2400))
             await stop.wait()
 
     class Store:
@@ -242,7 +243,7 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
             clock += 0.05
             return {"bucket_count": 1}
 
-        def ingest(self, observation):
+        def ingest_many(self, observations):
             nonlocal clock
             clock += 0.025
 
@@ -281,10 +282,11 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     timing = running["timing"]
     assert timing["recent_max_ms"] == {
         "wakeup_delay": 400.0, "sqlite_ingest": 25.0, "sqlite_archive": 120.0,
-        "sqlite_status": 50.0, "previous_checkpoint_write": 85.0,
+        "sqlite_status": 50.0, "previous_checkpoint_write": 60.0,
     }
     assert timing["markets"]["BTC_USDT"] == {
         "observation_age_ms": 1535.0, "recent_max_observation_gap_ms": None, "generation": 7,
+        "recent_max_raw_message_lag_ms": 2400.0,
     }
     assert len(heartbeats) == 3
     assert heartbeats[-1]["phase"] == "STOPPED"
@@ -295,6 +297,67 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     assert timing[event_field] == heartbeats[-1]["timing"][event_field] == {
         "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 1, "CONNECTION_LOST": 1},
     }
+
+
+def test_depth_batch_rollback_preserves_rows_and_cached_counts(tmp_path):
+    store = WhiteBitDepthTapeStore(tmp_path / "depth.sqlite", retention_days=1)
+    try:
+        update = parse_depth_message(
+            frame(), market="BTC_USDT", received_at=NOW,
+        )
+        initial = DepthLocalBook("BTC_USDT", limit=5).apply(update, generation=1)
+        later = replace(initial, market="ETH_USDT", received_at=NOW + timedelta(days=2))
+        store.ingest(initial)
+        before = store.status()
+
+        with pytest.raises(TypeError, match="canonical depth observation"):
+            store.ingest_many((later, None))
+
+        assert store.status() == before
+        assert store.connection.execute("SELECT market FROM execution_bbo").fetchall() == [
+            ("BTC_USDT",),
+        ]
+        store.ingest_many((later, replace(later, update_id=11)))
+        assert store.status()["market_bucket_counts"] == {"ETH_USDT": 1}
+        assert store.connection.execute(
+            "SELECT update_count,last_update_id FROM buckets"
+        ).fetchone() == (2, 11)
+    finally:
+        store.close()
+
+
+def test_depth_collector_flushes_sparse_batch_and_surfaces_failed_write(tmp_path, monkeypatch):
+    args = SimpleNamespace(depth_limit=20, poll_seconds=1, stop_file=tmp_path / "stop")
+    attempts = []
+
+    class Transport:
+        def __init__(self, *, market, limit, diagnostic):
+            pass
+
+        async def observations(self, stop):
+            yield SimpleNamespace(generation=1, message_time=None)
+            await stop.wait()
+
+    class Store:
+        def status(self):
+            return {"bucket_count": 0}
+
+        def ingest_many(self, observations):
+            attempts.append(len(observations))
+            raise OSError("depth disk write failed")
+
+        def archive_completed_windows(self, markets, *, now_epoch):
+            pass
+
+    async def exercise():
+        with pytest.raises(OSError, match="depth disk write failed"):
+            await asyncio.wait_for(run_whitebit_depth_tape._collect(
+                args, Event(), Store(), tmp_path / "checkpoint.json", ("BTC_USDT",),
+            ), timeout=2)
+
+    monkeypatch.setattr(run_whitebit_depth_tape, "WhiteBitDepthWebSocketTransport", Transport)
+    asyncio.run(exercise())
+    assert attempts == [1]
 
 
 @pytest.mark.parametrize(("cancel", "write_fails"), [(False, False), (True, False), (False, True)])
@@ -320,8 +383,8 @@ def test_depth_collection_continues_during_checkpoint_write_and_flushes_counts(
                 await writer_started.wait()
                 self.diagnostic(SimpleNamespace(code="SUBSCRIBED"))
                 self.diagnostic(SimpleNamespace(code="CONNECTION_LOST"))
-                yield SimpleNamespace(generation=7)
-                yield SimpleNamespace(generation=8)
+                yield SimpleNamespace(generation=7, message_time=None)
+                yield SimpleNamespace(generation=8, message_time=None)
                 stopped.set()
                 if cancel:
                     collector.cancel()
@@ -336,10 +399,10 @@ def test_depth_collection_continues_during_checkpoint_write_and_flushes_counts(
                 assert get_ident() == loop_thread
                 return {"bucket_count": len(ingested)}
 
-            def ingest(self, observation):
+            def ingest_many(self, observations):
                 assert get_ident() == loop_thread
                 assert not writer_release.is_set()
-                ingested.append(observation.generation)
+                ingested.extend(observation.generation for observation in observations)
 
             def archive_completed_windows(self, markets, *, now_epoch):
                 assert get_ident() == loop_thread
@@ -354,6 +417,7 @@ def test_depth_collection_continues_during_checkpoint_write_and_flushes_counts(
                 raise OSError("injected checkpoint write failure")
 
         monkeypatch.setattr(run_whitebit_depth_tape, "WhiteBitDepthWebSocketTransport", Transport)
+        monkeypatch.setattr(run_whitebit_depth_tape, "INGEST_BATCH_SIZE", 2)
         monkeypatch.setattr(run_whitebit_depth_tape, "atomic_write_json", write)
         collector = asyncio.create_task(run_whitebit_depth_tape._collect(
             args, stopped, Store(), tmp_path / "checkpoint.json", ("BTC_USDT",),

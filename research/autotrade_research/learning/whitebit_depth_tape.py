@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -69,6 +70,25 @@ class WhiteBitDepthTapeStore:
     def close(self): self.connection.close()
 
     def ingest(self, value: DepthBookObservation) -> None:
+        self.ingest_many((value,))
+
+    def ingest_many(self, values: Sequence[DepthBookObservation]) -> None:
+        """Commit observations in receipt order as one durable transaction."""
+        changes: Counter[str] = Counter()
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            for value in values:
+                self._ingest(value, changes)
+        counts = self._market_bucket_counts
+        if counts is not None:
+            for market, change in changes.items():
+                remaining = counts[market] + change
+                if remaining > 0:
+                    counts[market] = remaining
+                else:
+                    counts.pop(market, None)
+
+    def _ingest(self, value: DepthBookObservation, changes: Counter[str]) -> None:
         if type(value) is not DepthBookObservation: raise TypeError("canonical depth observation required")
         market=_symbol(value.market); bucket=int(value.received_at.timestamp())
         bucket-=bucket%self.bucket_seconds
@@ -91,40 +111,30 @@ class WhiteBitDepthTapeStore:
             r[15]=value.generation; r[16]=value.received_at.isoformat(); r[17]=value.source_sha256
             r[20]=format(Decimal(r[20])+Decimal(value.order_flow_imbalance),"f")
             values=tuple(r)
-        with self.connection:
-            self.connection.execute("INSERT OR REPLACE INTO buckets VALUES("+",".join("?" for _ in values)+")",values)
-            if value.bid_quantity is not None and value.ask_quantity is not None:
-                received_at = value.received_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
-                self.connection.execute("""
-                    INSERT INTO execution_bbo VALUES(?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(market,bucket_epoch) DO UPDATE SET
-                        received_at=excluded.received_at,
-                        bid_price=excluded.bid_price,ask_price=excluded.ask_price,
-                        bid_quantity=excluded.bid_quantity,ask_quantity=excluded.ask_quantity,
-                        generation=excluded.generation,update_id=excluded.update_id,
-                        source_sha256=excluded.source_sha256
-                    WHERE excluded.received_at >= execution_bbo.received_at
-                """, (market, bucket, received_at,
-                      value.bid_price, value.ask_price, value.bid_quantity, value.ask_quantity,
-                      value.generation, value.update_id, value.source_sha256))
-                self.connection.execute("DELETE FROM execution_bbo WHERE bucket_epoch<?",
-                                        (bucket - EXECUTION_BBO_RETENTION_SECONDS,))
-            cutoff=bucket-self.retention_days*86400
-            expired = Counter(
-                expired_market for (expired_market,) in self.connection.execute(
-                    "DELETE FROM buckets WHERE bucket_epoch<? RETURNING market", (cutoff,),
-                )
-            )
-        counts = self._market_bucket_counts
-        if counts is not None:
-            if row is None:
-                counts[market] += 1
-            for expired_market, removed in expired.items():
-                remaining = counts[expired_market] - removed
-                if remaining > 0:
-                    counts[expired_market] = remaining
-                else:
-                    counts.pop(expired_market, None)
+        self.connection.execute("INSERT OR REPLACE INTO buckets VALUES("+",".join("?" for _ in values)+")",values)
+        if row is None:
+            changes[market] += 1
+        if value.bid_quantity is not None and value.ask_quantity is not None:
+            received_at = value.received_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+            self.connection.execute("""
+                INSERT INTO execution_bbo VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(market,bucket_epoch) DO UPDATE SET
+                    received_at=excluded.received_at,
+                    bid_price=excluded.bid_price,ask_price=excluded.ask_price,
+                    bid_quantity=excluded.bid_quantity,ask_quantity=excluded.ask_quantity,
+                    generation=excluded.generation,update_id=excluded.update_id,
+                    source_sha256=excluded.source_sha256
+                WHERE excluded.received_at >= execution_bbo.received_at
+            """, (market, bucket, received_at,
+                  value.bid_price, value.ask_price, value.bid_quantity, value.ask_quantity,
+                  value.generation, value.update_id, value.source_sha256))
+            self.connection.execute("DELETE FROM execution_bbo WHERE bucket_epoch<?",
+                                    (bucket - EXECUTION_BBO_RETENTION_SECONDS,))
+        cutoff = bucket - self.retention_days * 86400
+        for (expired_market,) in self.connection.execute(
+            "DELETE FROM buckets WHERE bucket_epoch<? RETURNING market", (cutoff,),
+        ):
+            changes[expired_market] -= 1
 
     def archive_completed_windows(self, markets: tuple[str, ...], *, now_epoch: int) -> int:
         """Keep compact features after the raw one-second tape expires.

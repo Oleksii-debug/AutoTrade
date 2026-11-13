@@ -64,7 +64,7 @@ Simplified Section Closure Protocol v3 remains binding inside every new plan.
 A DONE Section is terminally skipped unless there is a demonstrated regression, invalid evidence, materially changed acceptance contract, or breaking integration.
 Manual owner/NVDA testing remains final-product work and does not block intermediate engineering Sections.
 
-# AGENTS.md
+# Repository development policy
 
 ## Simplified Section Closure Protocol v3 — owner directive 2026-10-07
 
@@ -232,7 +232,7 @@ Hard rules:
 
 ## Sequential closure authority — owner directive 2026-10-07
 
-This section is the controlling coordination rule if any older repository text, worker prompt, issue, roadmap note, swarm rule, claim/ownership rule, or “parallel lane” instruction conflicts with it.
+This section is the controlling coordination rule if any older repository text, implementation guidance, issue, roadmap note, coordination rule, ownership rule, or parallel work assignment conflicts with it.
 
 - Read the current canonical ordered Section plan and the live repository state before choosing work.
 - The numerically earliest Section that is not honestly closed is the primary closure front. The next unfinished Section may be prepared only when this is dependency-safe, directly removes a dependency, or the primary front is genuinely non-actionable after all safe internal residual work is exhausted.

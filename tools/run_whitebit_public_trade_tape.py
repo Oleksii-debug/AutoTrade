@@ -15,6 +15,7 @@ for dependency_root in (ROOT, ROOT / "research"):
     if str(dependency_root) not in sys.path:
         sys.path.insert(0, str(dependency_root))
 
+from research.autotrade_research.artifacts.checkpoint_retry import publish_checkpoint
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.integrations.whitebit_public import _symbol
@@ -27,21 +28,24 @@ from research.autotrade_research.learning.whitebit_trade_tape import (
 )
 
 
-def _checkpoint(path: Path, store: WhiteBitTradeTapeStore, *, phase: str,
-                markets: tuple[str, ...], new_trades: int,
-                errors: dict[str, str], exact_print_coverage: dict[str, dict]) -> None:
-    atomic_write_json(path, {
+async def _checkpoint(path: Path, store: WhiteBitTradeTapeStore, *, phase: str,
+                      markets: tuple[str, ...], new_trades: int,
+                      errors: dict[str, str], exact_print_coverage: dict[str, dict],
+                      checkpoint_retries: int) -> int:
+    payload = {
         **store.status(),
         "phase": phase,
         "transport": "WHITEBIT_PUBLIC_WEBSOCKET_TRADES_V1",
         "markets": list(markets),
         "new_trades_last_checkpoint": new_trades,
-        "errors": errors,
-        "exact_print_coverage": exact_print_coverage,
+        "errors": errors.copy(),
+        "exact_print_coverage": {market: row.copy() for market, row in exact_print_coverage.items()},
+        "checkpoint_retries_since_start": checkpoint_retries,
         "checkpointed_at": datetime.now(timezone.utc).isoformat(),
         "secrets_in_state": False,
         "paid_model_calls": 0,
-    })
+    }
+    return await publish_checkpoint(path, payload, atomic_write_json)
 
 
 async def _collect(args, stopped: Event, store: WhiteBitTradeTapeStore,
@@ -50,6 +54,7 @@ async def _collect(args, stopped: Event, store: WhiteBitTradeTapeStore,
     phase = "STARTING"
     errors: dict[str, str] = {}
     added = 0
+    checkpoint_retries = 0
     exact_markets = store.execution_print_markets.intersection(markets)
     pending_snapshot: set[str] = set()
     coverage = {
@@ -98,9 +103,12 @@ async def _collect(args, stopped: Event, store: WhiteBitTradeTapeStore,
         while not stopped.is_set() and not args.stop_file.exists():
             if consumer.done():
                 break
-            _checkpoint(checkpoint, store, phase=phase, markets=markets,
-                        new_trades=added, errors=errors, exact_print_coverage=coverage)
+            new_trades = added
             added = 0
+            checkpoint_retries += await _checkpoint(
+                checkpoint, store, phase=phase, markets=markets, new_trades=new_trades,
+                errors=errors, exact_print_coverage=coverage, checkpoint_retries=checkpoint_retries,
+            )
             await asyncio.sleep(args.poll_seconds)
     finally:
         stop.set()
@@ -111,8 +119,11 @@ async def _collect(args, stopped: Event, store: WhiteBitTradeTapeStore,
         failed = not consumer.cancelled() and consumer.exception() is not None
         if failed:
             errors["collector"] = "TRADE_CONSUMER_FAILED"
-        _checkpoint(checkpoint, store, phase="FAILED" if failed else "STOPPED", markets=markets,
-                    new_trades=added, errors=errors, exact_print_coverage=coverage)
+        await _checkpoint(
+            checkpoint, store, phase="FAILED" if failed else "STOPPED", markets=markets,
+            new_trades=added, errors=errors, exact_print_coverage=coverage,
+            checkpoint_retries=checkpoint_retries,
+        )
         if failed:
             await consumer
 
@@ -170,8 +181,6 @@ def main(argv=None) -> int:
                 retention_days=args.retention_days,
                 extra_execution_print_markets=extra_execution_print_markets,
             )
-            _checkpoint(checkpoint, store, phase="STARTING", markets=markets,
-                        new_trades=0, errors={}, exact_print_coverage={})
             try:
                 asyncio.run(_collect(args, stopped, store, checkpoint, markets))
             finally:

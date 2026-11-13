@@ -339,3 +339,60 @@ def test_trade_tape_consumer_failure_exits_instead_of_publishing_healthy_heartbe
     assert "injected ingest failure" not in json.dumps(snapshots[-1])
 
 
+def test_trade_checkpoint_retries_while_new_trades_arrive(tmp_path, monkeypatch):
+    stopped = Event()
+    market = "BTC_PERP"
+    args = SimpleNamespace(poll_seconds=1, stop_file=tmp_path / "stop.json")
+    snapshots = []
+    delays = []
+    sleep = asyncio.sleep
+    blocked = PermissionError("temporary checkpoint reader")
+    blocked.winerror = 5
+
+    class Transport:
+        def __init__(self, *, markets, diagnostic):
+            self.diagnostic = diagnostic
+
+        async def batches(self, stop):
+            self.diagnostic("SUBSCRIBED")
+            yield SimpleNamespace(market=market)
+            stopped.set()
+            await stop.wait()
+
+    class Store:
+        execution_print_markets = frozenset({market})
+
+        def status(self):
+            return {}
+
+        def execution_snapshot_coverage(self, batch):
+            return "CURSOR_OVERLAP", None
+
+        def ingest(self, batch):
+            return 3
+
+    def write(_, payload):
+        snapshots.append(payload)
+        if len(snapshots) == 1:
+            raise blocked
+
+    async def tick(delay):
+        delays.append(delay)
+        await sleep(0)
+
+    monkeypatch.setattr(run_whitebit_public_trade_tape, "WhiteBitPublicTradeWebSocketTransport", Transport)
+    monkeypatch.setattr(run_whitebit_public_trade_tape, "atomic_write_json", write)
+    monkeypatch.setattr(run_whitebit_public_trade_tape.asyncio, "sleep", tick)
+    asyncio.run(run_whitebit_public_trade_tape._collect(
+        args, stopped, Store(), tmp_path / "checkpoint.json", (market,),
+    ))
+
+    assert delays == [0.01, 1]
+    assert snapshots[0] is snapshots[1]
+    assert snapshots[0]["exact_print_coverage"][market]["state"] == "AWAITING_FIRST_BATCH"
+    assert snapshots[-1]["phase"] == "STOPPED"
+    assert snapshots[-1]["new_trades_last_checkpoint"] == 3
+    assert snapshots[-1]["checkpoint_retries_since_start"] == 1
+    assert snapshots[-1]["exact_print_coverage"][market]["state"] == "CURSOR_OVERLAP"
+
+

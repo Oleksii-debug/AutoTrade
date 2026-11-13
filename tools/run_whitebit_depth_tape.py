@@ -17,6 +17,7 @@ for dependency_root in (ROOT, ROOT / "research"):
     if str(dependency_root) not in sys.path:
         sys.path.insert(0, str(dependency_root))
 
+from research.autotrade_research.artifacts.checkpoint_retry import publish_checkpoint
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.integrations.whitebit_depth import (
@@ -29,8 +30,6 @@ from research.autotrade_research.learning.whitebit_depth_tape import (
 
 
 TIMING_WINDOW_SECONDS = 300
-WINDOWS_CHECKPOINT_RETRY_DELAYS = (0.01, 0.03, 0.06)
-WINDOWS_SHARING_ERRORS = frozenset({5, 32, 33})
 
 
 async def _checkpoint(path: Path, status: dict, *, phase: str,
@@ -44,17 +43,7 @@ async def _checkpoint(path: Path, status: dict, *, phase: str,
         "checkpointed_at": datetime.now(timezone.utc).isoformat(),
         "secrets_in_state": False, "paid_model_calls": 0,
     }
-    # An ordinary Windows reader may briefly prevent replacement of the
-    # current file. Retry only the checkpoint publication, with the same payload.
-    for retries in range(len(WINDOWS_CHECKPOINT_RETRY_DELAYS) + 1):
-        try:
-            atomic_write_json(path, payload)
-            return retries
-        except PermissionError as error:
-            if (getattr(error, "winerror", None) not in WINDOWS_SHARING_ERRORS
-                    or retries == len(WINDOWS_CHECKPOINT_RETRY_DELAYS)):
-                raise
-        await asyncio.sleep(WINDOWS_CHECKPOINT_RETRY_DELAYS[retries])
+    return await publish_checkpoint(path, payload, atomic_write_json)
 
 
 async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,

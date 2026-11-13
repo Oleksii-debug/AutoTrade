@@ -67,7 +67,8 @@ def screen_universe(datasets: list[dict], *, train_count: int, development_count
                     configuration: RangeDeviationConfiguration,
                     minimum_train_cycles: int = 20,
                     minimum_development_cycles: int = 5,
-                    minimum_final_cycles: int = 5) -> dict:
+                    minimum_final_cycles: int = 5,
+                    train_episodes: dict[str, list[dict]] | None = None) -> dict:
     if not datasets:
         raise ValueError("at least one authenticated market is required")
     markets = [row["market"] for row in datasets]
@@ -78,6 +79,8 @@ def screen_universe(datasets: list[dict], *, train_count: int, development_count
     configuration.validate()
     train_native = {row["market"]: simulate(row["bars"][:train_count], configuration=configuration)
                     for row in datasets}
+    if train_episodes is not None:
+        train_episodes.update({market: value["episodes"] for market, value in train_native.items()})
     train = _aggregate(train_native)
     train_process_review = review_course_episodes([
         {"market": market, "episodes": value["episodes"]}

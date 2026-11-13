@@ -1,6 +1,10 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import json
 import unittest
 
+import pytest
+
+from tools import run_whitebit_course_supervisor as course
 from tools.run_whitebit_course_supervisor import (
     ACTIVE_FAMILIES, completed_window, partition_counts, _compact,
 )
@@ -74,4 +78,68 @@ class CourseSupervisorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_supervisor_resumes_saved_screen_and_finishes_analysis_before_cooldown(tmp_path, monkeypatch):
+    path = tmp_path / "checkpoint.json"
+    events = tmp_path / "course-session-events.jsonl"
+    screen_calls = []
+    family = {
+        "train": {"pretrade_hold_reasons": {"REWARD_RISK": 2}},
+        "train_rejection_reasons": ["TRAIN_NO_POSITIVE_AFTER_COST_PNL"],
+        "train_process_review": {"phase": "PAUSED_ANALYZING",
+                                 "pause_reasons": ["CONSECUTIVE_LOSS_PAUSE_REQUIRED"],
+                                 "review_sha256": "review"},
+    }
+    episode = {"exit_reason": "STOP", "profitable": False,
+               "pnl_after_costs": "-0.10", "fees": "0.11", "funding": "0.00"}
+
+    def screen(*, state_dir, bars, now):
+        assert json.loads(path.read_bytes())["status"] == "RUNNING"
+        screen_calls.append(now)
+        return {"schema": course.SCHEMA, "window": {"bars": bars}, "manifests": {},
+                "observed_at": now.isoformat(), "families": {"RANGE_DEVIATION": family},
+                "train_episodes": {"RANGE_DEVIATION": {"BTC_PERP": [episode]}}}
+
+    review = course._review_training
+
+    def interrupt(full):
+        assert json.loads(path.read_bytes())["status"] == "ANALYZING"
+        assert (tmp_path / "pending-course-screen-1.json").exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(course, "_screen_cycle", screen)
+    monkeypatch.setattr(course, "_review_training", interrupt)
+    args = ["--state-dir", str(tmp_path), "--once", "--interval-seconds", "3600"]
+    with pytest.raises(KeyboardInterrupt):
+        course.main(args)
+    saved = json.loads(path.read_bytes())
+    assert saved["pending_cycle"]["phase"] == "ANALYZING"
+    assert "last_result" not in saved
+
+    def resume(full):
+        assert json.loads(path.read_bytes())["status"] == "ANALYZING"
+        return review(full)
+
+    monkeypatch.setattr(course, "_review_training", resume)
+    assert course.main(args) == 0
+    assert len(screen_calls) == 1
+    final = json.loads(path.read_bytes())
+    assert final["status"] == "STOPPED"
+    assert final["cycle_count"] == 1
+    result = final["last_result"]
+    reviewed = result["training_review"]["families"]["RANGE_DEVIATION"]
+    assert reviewed["loss_and_cost_by_exit"]["STOP"]["fees_or_funding_turned_win_to_loss"] == 1
+    assert reviewed["pretrade_hold_reasons"] == {"REWARD_RISK": 2}
+    assert result["session_lifecycle"]["review_sha256"] == result["training_review"]["review_sha256"]
+    receipt = json.loads((tmp_path / "runs" / f"{result['cycle_sha256']}.json").read_bytes())
+    assert receipt["train_episodes"]["RANGE_DEVIATION"]["BTC_PERP"] == [episode]
+    rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    assert [row["phase"] for row in rows] == ["RUNNING", "PAUSED", "ANALYZING", "COOLDOWN"]
+    assert datetime.fromisoformat(final["next_run_at"]) == (
+        datetime.fromisoformat(rows[-1]["observed_at"]) + timedelta(hours=1)
+    )
+    assert not (tmp_path / "pending-course-screen-1.json").exists()
+    assert course.main(args) == 0
+    assert len(screen_calls) == 1
 

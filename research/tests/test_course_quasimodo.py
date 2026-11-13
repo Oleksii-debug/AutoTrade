@@ -9,7 +9,7 @@ from research.autotrade_research.strategies.course_quasimodo import (
 )
 from tools.index_trading_course_transcripts import build_index
 from tools.screen_whitebit_course_quasimodo import screen
-from tools.screen_whitebit_course_quasimodo_universe import screen_universe
+from tools.screen_whitebit_course_quasimodo_universe import _aggregate, screen_universe
 
 
 def bars(count=1200):
@@ -27,6 +27,20 @@ def bars(count=1200):
 
 
 class CourseQuasimodoTests(unittest.TestCase):
+    def test_universe_preserves_market_and_total_diagnostic_counters(self):
+        base = {"closed_cycles": 0, "wins": 0, "losses": 0, "net_pnl": "0",
+            "fees": "0", "funding": "0", "exit_reasons": {},
+            "evidence_sha256": "a" * 64, "signal_count": 0,
+            "pretrade_holds": 0, "pretrade_hold_reasons": {}}
+        btc = {**base, "signal_count": 3, "pretrade_holds": 2,
+            "pretrade_hold_reasons": {"GROSS_REWARD_RISK": 2}}
+        eth = {**base, "signal_count": 1, "pretrade_holds": 3,
+            "pretrade_hold_reasons": {"GROSS_REWARD_RISK": 1, "NET_REWARD": 2}}
+        result = _aggregate({"ETH_PERP": eth, "BTC_PERP": btc})
+        self.assertEqual(result["pretrade_hold_reasons"],
+                         {"GROSS_REWARD_RISK": 3, "NET_REWARD": 2})
+        self.assertEqual(result["markets"]["BTC_PERP"]["signal_count"], 3)
+
     def test_private_index_has_hashes_and_no_transcript_text(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

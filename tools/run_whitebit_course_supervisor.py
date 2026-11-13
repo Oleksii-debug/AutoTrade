@@ -65,7 +65,9 @@ def _compact(result: dict) -> dict:
             return None
         return {key: value.get(key) for key in (
             "market_count", "closed_cycles", "wins", "losses", "win_rate",
-            "net_pnl", "fees", "funding")}
+            "net_pnl", "fees", "funding", "signal_count", "detected_setups",
+            "expired_setups", "detection_rejections", "confirmation_rejections",
+            "pretrade_holds", "pretrade_hold_reasons")}
     review = result.get("train_process_review")
     review_projection = None
     if type(review) is dict:

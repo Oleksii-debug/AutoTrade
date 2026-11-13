@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 import os
+import subprocess
 from pathlib import Path
 from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
@@ -14,6 +15,7 @@ from tools.run_autotrade_process_watchdog import (
     MANIFEST_SCHEMA,
     ProcessWatchdog,
     _atomic,
+    _child_launch,
     load_manifest,
     main,
 )
@@ -150,6 +152,74 @@ def test_watchdog_restarts_then_opens_bounded_crash_circuit(tmp_path):
     assert status["processes"][0]["status"] == "BLOCKED"
     assert status["secrets_in_state"] is False
     assert status["network_orders"] is False
+
+
+@unittest.skipUnless(os.name == "nt", "Windows process creation contract")
+def test_windows_children_are_console_isolated_and_pythonw_uses_python(tmp_path):
+    pythonw = tmp_path / "pythonw.exe"
+    python = tmp_path / "python.exe"
+    pythonw.write_bytes(b"")
+    python.write_bytes(b"")
+
+    _runtime, state, manifest, digest = _load(tmp_path, _row())
+    factory = FakeFactory()
+    watchdog = ProcessWatchdog(
+        manifest, manifest_digest=digest, state_dir=state, popen=factory
+    )
+    with patch("tools.run_autotrade_process_watchdog.sys.executable", str(pythonw)):
+        watchdog.start_all()
+    assert factory.calls[0][0][0] == str(python)
+    assert factory.calls[0][1]["creationflags"] == (
+        subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    )
+    watchdog.stop_all(grace_seconds=0)
+
+    failure_root = tmp_path / "launch-failure"
+    failure_root.mkdir()
+    _runtime, failure_state, manifest, digest = _load(failure_root, _row())
+
+    def launch_failure(*_args, **_kwargs):
+        raise FileNotFoundError("original launch failure")
+
+    watchdog = ProcessWatchdog(
+        manifest, manifest_digest=digest, state_dir=failure_state,
+        popen=launch_failure,
+    )
+    with patch.object(
+        watchdog.log, "write", side_effect=PermissionError("diagnostic failure")
+    ):
+        with unittest.TestCase().assertRaisesRegex(
+            FileNotFoundError, "original launch failure"
+        ):
+            watchdog.start_all()
+
+
+@unittest.skipUnless(os.name == "nt", "Windows process creation contract")
+def test_windows_no_window_child_preserves_redirected_stdout_and_stderr(tmp_path):
+    stdout_path = tmp_path / "child.stdout.log"
+    stderr_path = tmp_path / "child.stderr.log"
+    with stdout_path.open("wb", buffering=0) as stdout, \
+            stderr_path.open("wb", buffering=0) as stderr:
+        executable, flags = _child_launch()
+        process = subprocess.Popen(
+            [
+                executable,
+                "-c",
+                (
+                    "import sys; "
+                    "print('watchdog-child-stdout', flush=True); "
+                    "print('watchdog-child-stderr', file=sys.stderr, flush=True)"
+                ),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            close_fds=True,
+            creationflags=flags,
+        )
+        assert process.wait(timeout=15) == 0
+    assert stdout_path.read_text(encoding="utf-8").strip() == "watchdog-child-stdout"
+    assert stderr_path.read_text(encoding="utf-8").strip() == "watchdog-child-stderr"
 
 
 def test_watchdog_stop_marker_precedes_forced_termination(tmp_path):
@@ -297,6 +367,17 @@ class ProcessWatchdogUnittestTests(unittest.TestCase):
 
     def test_bounded_crash_circuit(self):
         self._run_with_temp(test_watchdog_restarts_then_opens_bounded_crash_circuit)
+
+    def test_windows_creation_contract(self):
+        self._run_with_temp(
+            test_windows_children_are_console_isolated_and_pythonw_uses_python
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows process creation contract")
+    def test_real_windows_redirected_child(self):
+        self._run_with_temp(
+            test_windows_no_window_child_preserves_redirected_stdout_and_stderr
+        )
 
     def test_stop_marker_order(self):
         self._run_with_temp(test_watchdog_stop_marker_precedes_forced_termination)

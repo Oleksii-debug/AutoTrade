@@ -70,6 +70,28 @@ def _utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _child_launch() -> tuple[str, int]:
+    """Return a detached child interpreter and process creation flags.
+
+    ``pythonw.exe`` deliberately has no Python-level standard streams.  The
+    watchdog is installed with pythonw to stay hidden, but its managed workers
+    must use the sibling console interpreter because their stdout/stderr are
+    durable diagnostic files.
+    """
+    executable = sys.executable
+    if os.name != "nt":
+        return executable, 0
+    path = Path(executable)
+    if path.name.casefold() == "pythonw.exe":
+        console = path.with_name("python.exe")
+        if not console.is_file():
+            raise RuntimeError("watchdog console Python interpreter is unavailable")
+        executable = str(console)
+    return executable, (
+        subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    )
+
+
 def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"),
                        ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
@@ -305,10 +327,10 @@ class ProcessWatchdog:
         logs.mkdir(parents=True, exist_ok=True)
         stdout = (logs / f"{identifier}.stdout.log").open("ab", buffering=0)
         stderr = (logs / f"{identifier}.stderr.log").open("ab", buffering=0)
-        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         try:
+            executable, flags = _child_launch()
             process = self.popen(
-                [sys.executable, "-u", spec["script"], *spec["args"]],
+                [executable, "-u", spec["script"], *spec["args"]],
                 cwd=str(repo_root),
                 env=child_environment,
                 stdin=subprocess.DEVNULL,
@@ -317,9 +339,17 @@ class ProcessWatchdog:
                 close_fds=True,
                 creationflags=flags,
             )
-        except BaseException:
+        except BaseException as error:
             stdout.close()
             stderr.close()
+            try:
+                self.log.write(
+                    "PROCESS_START_FAILED",
+                    process_id=identifier,
+                    error_type=type(error).__name__,
+                )
+            except OSError:
+                pass
             raise
         self.children[identifier] = process
         self.streams[identifier] = (stdout, stderr)

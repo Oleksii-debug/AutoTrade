@@ -20,6 +20,7 @@ from .whitebit_websocket import (
     MAX_WEBSOCKET_MESSAGE_BYTES,
     WhiteBitPublicWebSocketTransport,
     WhiteBitWebSocketControl,
+    _DEPTH_SCHEMA_REJECTION_REASONS,
     _epoch_time,
     _raw_bytes,
 )
@@ -248,6 +249,7 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
         while not stop.is_set():
             attempt += 1; subscribed = False
             failure_code = "CONNECTION_LOST"
+            rejection_reason = None
             heartbeat = None
             self._emit("CONNECTING", attempt=attempt, generation=generation)
             try:
@@ -288,10 +290,7 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
                             continue
                         if not subscribed:
                             raise PublicDataError("DEPTH_BEFORE_SUBSCRIPTION_ACK")
-                        try:
-                            observation = book.apply(parsed, generation=generation)
-                        except DepthSequenceGap:
-                            raise PublicDataError("DEPTH_SEQUENCE_GAP") from None
+                        observation = book.apply(parsed, generation=generation)
                         backoff = self.initial_backoff_seconds
                         deadline = loop.time() + DEPTH_UPDATE_TIMEOUT_SECONDS
                         yield observation
@@ -307,15 +306,20 @@ class WhiteBitDepthWebSocketTransport(WhiteBitPublicWebSocketTransport):
                             pass
             except asyncio.CancelledError:
                 raise
-            except PublicDataError:
+            except PublicDataError as error:
                 failure_code = "SCHEMA_REJECTED"
+                reason = str(error)
+                rejection_reason = (
+                    reason if reason in _DEPTH_SCHEMA_REJECTION_REASONS else "OTHER_PUBLIC_DATA_ERROR"
+                )
             except Exception:
                 pass
             finally:
                 if heartbeat is not None:
                     heartbeat.cancel(); await asyncio.gather(heartbeat, return_exceptions=True)
             if stop.is_set(): break
-            self._emit(failure_code, attempt=attempt, generation=generation)
+            self._emit(failure_code, attempt=attempt, generation=generation,
+                       rejection_reason=rejection_reason)
             self._emit("RECONNECT_WAIT", attempt=attempt, generation=generation, retry=backoff)
             try: await asyncio.wait_for(stop.wait(), timeout=backoff)
             except TimeoutError: pass

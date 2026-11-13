@@ -66,6 +66,19 @@ _SCHEMA_REJECTION_REASONS = frozenset({
     "WEBSOCKET_TIMESTAMP_PRECISION",
     "OTHER_PUBLIC_DATA_ERROR",
 })
+_DEPTH_SCHEMA_REJECTION_REASONS = _SCHEMA_REJECTION_REASONS | frozenset({
+    "DEPTH_BEFORE_SUBSCRIPTION_ACK",
+    "DEPTH_SEQUENCE_GAP",
+    "DEPTH_SNAPSHOT_FLAG_CONFLICT",
+    "INVALID_DEPTH_LEVEL",
+    "INVALID_DEPTH_LEVELS",
+    "INVALID_DEPTH_OBJECT",
+    "INVALID_DEPTH_PARAMS",
+    "INVALID_DEPTH_PAST_UPDATE_ID",
+    "INVALID_DEPTH_UPDATE_ID",
+    "INVALID_LOCAL_DEPTH_BOOK",
+    "UNSORTED_DEPTH_LEVELS",
+})
 
 
 @dataclass(frozen=True)
@@ -91,7 +104,7 @@ class WhiteBitWebSocketDiagnostic:
                 raise ValueError("retry_in_seconds is outside the bounded range")
         if self.rejection_reason is not None and (
             self.code != "SCHEMA_REJECTED"
-            or self.rejection_reason not in _SCHEMA_REJECTION_REASONS
+            or self.rejection_reason not in _DEPTH_SCHEMA_REJECTION_REASONS
         ):
             raise ValueError("unsupported WhiteBIT rejection reason")
 

@@ -8,6 +8,7 @@ later replay cannot leak future information into an earlier decision.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
@@ -25,6 +26,10 @@ SOLANA_INCIDENTS = "https://status.solana.com/api/v2/incidents/unresolved.json"
 WHITEBIT_STATUS = "https://whitebit.com/api/v4/public/platform/status"
 FED_MONETARY = "https://www.federalreserve.gov/feeds/press_monetary.xml"
 ALLOWED_URLS = frozenset((SOLANA_STATUS, SOLANA_INCIDENTS, WHITEBIT_STATUS, FED_MONETARY))
+OFFICIAL_SOURCES = (("solana_status", SOLANA_STATUS),
+                    ("solana_incidents", SOLANA_INCIDENTS),
+                    ("whitebit_status", WHITEBIT_STATUS),
+                    ("fed_monetary", FED_MONETARY))
 MAX_BYTES = 262_144
 
 
@@ -104,14 +109,19 @@ def collect_market_context(*, now: datetime | None = None,
         raise MarketContextError("INVALID_MACRO_BLACKOUT")
     payloads = {}
     failures = []
-    for name, url in (("solana_status", SOLANA_STATUS),
-                      ("solana_incidents", SOLANA_INCIDENTS),
-                      ("whitebit_status", WHITEBIT_STATUS),
-                      ("fed_monetary", FED_MONETARY)):
-        try:
-            payloads[name] = fetch(url)
-        except (MarketContextError, OSError, TimeoutError, ValueError, TypeError) as exc:
-            failures.append(f"{name.upper()}_{type(exc).__name__.upper()}")
+    # These feeds are independent snapshots.  Start them together so one slow
+    # authority cannot consume the timeout budget of every source that follows.
+    # Results are still read in the declared order, preserving deterministic
+    # failure ordering and an observation time after every fetch has completed.
+    with ThreadPoolExecutor(max_workers=len(OFFICIAL_SOURCES),
+                            thread_name_prefix="official-context") as executor:
+        pending = [(name, executor.submit(fetch, url))
+                   for name, url in OFFICIAL_SOURCES]
+        for name, future in pending:
+            try:
+                payloads[name] = future.result()
+            except (MarketContextError, OSError, TimeoutError, ValueError, TypeError) as exc:
+                failures.append(f"{name.upper()}_{type(exc).__name__.upper()}")
     observed = now or datetime.now(timezone.utc)
     reasons = list(failures)
     details: dict[str, object] = {}

@@ -819,7 +819,9 @@ class ExecutionOracleTests(unittest.TestCase):
             fee=Decimal("0.101"),
             trade_time=q.market_time,
         )
-        with self.assertRaisesRegex(ExecutionOracleError, "same or earlier"):
+        with self.assertRaisesRegex(
+            ExecutionOracleError, "pre-arrival result must remain WAITING_FOR_LATENCY"
+        ):
             assert_conservative_execution(order=o, observation=q, model=m, result=forged)
 
     def test_oracle_rejects_bar_interval_underway_at_arrival(self):
@@ -843,7 +845,7 @@ class ExecutionOracleTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             ExecutionOracleError,
-            "before venue arrival",
+            "BAR causal ambiguity must remain AMBIGUOUS_NO_FILL",
         ):
             assert_conservative_execution(
                 order=o,
@@ -871,7 +873,9 @@ class ExecutionOracleTests(unittest.TestCase):
             fee=Decimal("0.110"),
             trade_time=q.market_time,
         )
-        with self.assertRaisesRegex(ExecutionOracleError, "before venue arrival"):
+        with self.assertRaisesRegex(
+            ExecutionOracleError, "BAR causal ambiguity must remain AMBIGUOUS_NO_FILL"
+        ):
             assert_conservative_execution(
                 order=o,
                 observation=q,

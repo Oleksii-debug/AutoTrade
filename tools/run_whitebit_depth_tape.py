@@ -43,7 +43,7 @@ async def _checkpoint(path: Path, status: dict, *, phase: str,
         "checkpointed_at": datetime.now(timezone.utc).isoformat(),
         "secrets_in_state": False, "paid_model_calls": 0,
     }
-    return await publish_checkpoint(path, payload, atomic_write_json)
+    return await publish_checkpoint(path, payload, atomic_write_json, offload_write=True)
 
 
 async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
@@ -109,12 +109,30 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
         }
         write_start = monotonic()
         observations = added
-        added = 0
-        checkpoint_retries += await _checkpoint(
-            checkpoint, status, phase=phase, markets=markets,
-            observations=observations, errors=errors, timing=timing,
-        )
-        checkpoint_write = monotonic() - write_start
+        observed_errors = errors.copy()
+
+        async def write() -> None:
+            nonlocal added, checkpoint_write, checkpoint_retries
+            checkpoint_retries += await _checkpoint(
+                checkpoint, status, phase=phase, markets=markets,
+                observations=observations, errors=observed_errors, timing=timing,
+            )
+            added -= observations
+            checkpoint_write = monotonic() - write_start
+
+        publication = asyncio.create_task(write())
+        try:
+            await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            # A started thread cannot be cancelled. Join this publication
+            # before any final checkpoint, including on repeated cancellation.
+            completion = asyncio.gather(publication, return_exceptions=True)
+            while not completion.done():
+                try:
+                    await asyncio.shield(completion)
+                except asyncio.CancelledError:
+                    pass
+            raise
 
     def diagnostic(market: str, value) -> None:
         counts = transport_events[market]
@@ -164,11 +182,13 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                 archive_time = monotonic() - archive_start
                 last_archive_boundary = archive_boundary
             await publish(phase, wakeup_delay=wakeup_delay, archive_time=archive_time)
+            if stopped.is_set() or args.stop_file.exists():
+                break
             expected_wakeup = monotonic() + args.poll_seconds
             await asyncio.sleep(args.poll_seconds)
     finally:
         stop.set()
-        done, pending = await asyncio.wait(consumers, timeout=10)
+        _, pending = await asyncio.wait(consumers, timeout=10)
         for task in pending:
             task.cancel()
         await asyncio.gather(*consumers, return_exceptions=True)

@@ -3,7 +3,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
-from threading import Event
+from threading import Event, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -262,10 +262,14 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
         heartbeats.append(data)
         clock += 0.06
 
+    async def inline_write(write, *args):
+        write(*args)
+
     monkeypatch.setattr(run_whitebit_depth_tape, "WhiteBitDepthWebSocketTransport", Transport)
     monkeypatch.setattr(run_whitebit_depth_tape, "monotonic", lambda: clock)
     monkeypatch.setattr(run_whitebit_depth_tape, "atomic_write_json", capture)
     monkeypatch.setattr(run_whitebit_depth_tape.asyncio, "sleep", tick)
+    monkeypatch.setattr(run_whitebit_depth_tape.asyncio, "to_thread", inline_write)
     asyncio.run(run_whitebit_depth_tape._collect(
         args, stopped, Store(), tmp_path / "checkpoint.json", ("BTC_USDT",),
     ))
@@ -276,11 +280,11 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     assert running["errors"] == {}
     timing = running["timing"]
     assert timing["recent_max_ms"] == {
-        "wakeup_delay": 425.0, "sqlite_ingest": 25.0, "sqlite_archive": 120.0,
-        "sqlite_status": 50.0, "previous_checkpoint_write": 60.0,
+        "wakeup_delay": 400.0, "sqlite_ingest": 25.0, "sqlite_archive": 120.0,
+        "sqlite_status": 50.0, "previous_checkpoint_write": 85.0,
     }
     assert timing["markets"]["BTC_USDT"] == {
-        "observation_age_ms": 1475.0, "recent_max_observation_gap_ms": None, "generation": 7,
+        "observation_age_ms": 1535.0, "recent_max_observation_gap_ms": None, "generation": 7,
     }
     assert len(heartbeats) == 3
     assert heartbeats[-1]["phase"] == "STOPPED"
@@ -291,6 +295,89 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     assert timing[event_field] == heartbeats[-1]["timing"][event_field] == {
         "BTC_USDT": {"DEPTH_UPDATE_TIMEOUT": 1, "CONNECTION_LOST": 1},
     }
+
+
+@pytest.mark.parametrize(("cancel", "write_fails"), [(False, False), (True, False), (False, True)])
+def test_depth_collection_continues_during_checkpoint_write_and_flushes_counts(
+    tmp_path, monkeypatch, cancel, write_fails,
+):
+    stopped = Event()
+    writer_release = Event()
+    args = SimpleNamespace(depth_limit=20, poll_seconds=1, stop_file=tmp_path / "stop")
+    heartbeats = []
+    ingested = []
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        loop_thread = get_ident()
+        writer_started = asyncio.Event()
+
+        class Transport:
+            def __init__(self, *, market, limit, diagnostic):
+                self.diagnostic = diagnostic
+
+            async def observations(self, stop):
+                await writer_started.wait()
+                self.diagnostic(SimpleNamespace(code="SUBSCRIBED"))
+                self.diagnostic(SimpleNamespace(code="CONNECTION_LOST"))
+                yield SimpleNamespace(generation=7)
+                yield SimpleNamespace(generation=8)
+                stopped.set()
+                if cancel:
+                    collector.cancel()
+                    await asyncio.sleep(0)
+                    collector.cancel()
+                    await asyncio.sleep(0)
+                writer_release.set()
+                await stop.wait()
+
+        class Store:
+            def status(self):
+                assert get_ident() == loop_thread
+                return {"bucket_count": len(ingested)}
+
+            def ingest(self, observation):
+                assert get_ident() == loop_thread
+                assert not writer_release.is_set()
+                ingested.append(observation.generation)
+
+            def archive_completed_windows(self, markets, *, now_epoch):
+                assert get_ident() == loop_thread
+
+        def write(path, payload):
+            assert get_ident() != loop_thread
+            if not heartbeats:
+                loop.call_soon_threadsafe(writer_started.set)
+                assert writer_release.wait(3)
+            heartbeats.append(payload)
+            if write_fails and len(heartbeats) == 1:
+                raise OSError("injected checkpoint write failure")
+
+        monkeypatch.setattr(run_whitebit_depth_tape, "WhiteBitDepthWebSocketTransport", Transport)
+        monkeypatch.setattr(run_whitebit_depth_tape, "atomic_write_json", write)
+        collector = asyncio.create_task(run_whitebit_depth_tape._collect(
+            args, stopped, Store(), tmp_path / "checkpoint.json", ("BTC_USDT",),
+        ))
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await collector
+        elif write_fails:
+            with pytest.raises(OSError, match="injected checkpoint write failure"):
+                await collector
+        else:
+            await collector
+
+    asyncio.run(exercise())
+    assert ingested == [7, 8]
+    assert [row["phase"] for row in heartbeats] == ["STARTING", "STOPPED"]
+    assert [row["new_observations_last_checkpoint"] for row in heartbeats] == [0, 2]
+    assert [row["bucket_count"] for row in heartbeats] == [0, 2]
+    assert heartbeats[0]["errors"] == {}
+    assert heartbeats[0]["timing"]["markets"] == {}
+    assert heartbeats[0]["timing"]["transport_events_since_start"]["BTC_USDT"]["CONNECTION_LOST"] == 0
+    assert heartbeats[1]["errors"] == {"BTC_USDT": "CONNECTION_LOST"}
+    assert heartbeats[1]["timing"]["markets"]["BTC_USDT"]["generation"] == 8
+    assert heartbeats[1]["timing"]["transport_events_since_start"]["BTC_USDT"]["CONNECTION_LOST"] == 1
 
 
 @pytest.mark.parametrize(("winerror", "recovered"), [(5, True), (32, True), (33, True), (None, False)])

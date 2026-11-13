@@ -107,7 +107,7 @@ Confirmation binds a specific action and expiry. Autonomous mode binds a version
 | 07_DESKTOP_WEB_ACCESSIBILITY_AND_RUNTIME | UX, host/security/operations/recovery/release |
 | 08_DELIVERY_DEPENDENCY_AND_WORK_PACKAGE_PLAN | Dependency stages and complete work-package bank |
 | 09_REPOSITORY_INITIALIZATION_BLUEPRINT | Initial imports, structure, contracts, CI and ownership |
-| 10_SWARM_DEVELOPMENT_OPERATING_MODEL | Optional semantic ownership, self-dispatch and independent audit |
+| [Parallel development](10_SWARM_DEVELOPMENT_OPERATING_MODEL.md) | Ownership, work selection and independent review |
 | 11_GITHUB_CONTROL_PLANE_AND_PARALLEL_DELIVERY | Optional atomic registry, PR/integration and renewable task state |
 | [Implementation guidelines](12_UNIVERSAL_WORKER_PROMPT.md) | Implementation scope, validation and integration |
 | [Independent review guidelines](13_UNIVERSAL_AUDITOR_PROMPT.md) | Review scope and evidence requirements |

@@ -150,7 +150,7 @@ Already materialized:
 - canonical JSON Schema/OpenAPI surface;
 - .NET 10 contract foundation;
 - dependency/provenance inventory;
-- adapted fail-closed swarm lease/collision invariants.
+- adapted lease and conflict detection rules that fail closed.
 
 Concurrent source mutation remains disabled until the registry/CAS path has exact-head CI and integration qualification.
 

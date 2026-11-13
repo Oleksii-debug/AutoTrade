@@ -33,7 +33,7 @@ For WP-50, evaluate [Velopack](https://docs.velopack.io/integrating/overview) as
 ## 3. Reduce coordination work
 
 1. Select one bounded package responsibility and accepted input revision. Reuse its existing files and evidence. Avoid a second implementation branch for the same scope.
-2. In the current single-writer bootstrap, implement the next concrete artifact without waiting for a fully automated swarm. Read-only research remains independent. Later concurrent mutation requires the trusted registry service and protected branch path.
+2. In the current single-writer bootstrap, implement the next concrete artifact while the registry service is being qualified. Read-only research remains independent. Later concurrent mutation requires the trusted registry service and protected branch path.
 3. Keep DTO generation, SDK qualification, independent financial oracles and UI semantics as separate responsibilities. A contract migration names affected consumers and updates the common corpus once.
 4. Integrate the simulator slice early. Continue provider research and UI fixtures without waiting for all six external connections. Never claim a simulator pass as broker or profitability evidence.
 5. Prefer dependency updates with a measured failing fixture and a narrow change. New frameworks require a concrete missing capability and total adoption/maintenance cost comparison.

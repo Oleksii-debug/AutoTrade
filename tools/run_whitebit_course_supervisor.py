@@ -9,7 +9,9 @@ through locked chronological partitions, and persists failures and survivors.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 import json
 import os
@@ -37,6 +39,11 @@ MARKETS = ("BTC_PERP", "ETH_PERP", "SOL_PERP")
 INTERVAL = "15m"
 INTERVAL_SECONDS = 900
 ACTIVE_FAMILIES = ("TREND_QUASIMODO_TOP_DOWN", "RANGE_DEVIATION")
+ACTIVE_PHASES = (None, "RUNNING", "PAUSED", "ANALYZING")
+
+
+class CourseStopped(Exception):
+    """Stop at a durable course phase boundary."""
 
 
 def completed_window(now: datetime, bars: int) -> tuple[int, int]:
@@ -109,7 +116,12 @@ def _append_session_event(path: Path, *, phase: str, cycle_count: int,
         stream.flush(); os.fsync(stream.fileno())
 
 
-def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
+def _digest(value: dict) -> str:
+    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode()).hexdigest()
+
+
+def _screen_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
     start, end = completed_window(now, bars)
     train_count, development_count, final_count = partition_counts(bars)
     history_root = state_dir / "history"
@@ -126,46 +138,118 @@ def run_cycle(*, state_dir: Path, bars: int, now: datetime) -> dict:
             "dataset_identity_sha256": manifest["dataset_identity_sha256"],
             "row_count": parsed["row_count"]}
     minimum_train = max(3, len(MARKETS))
+    trend_episodes: dict[str, list[dict]] = {}
+    range_episodes: dict[str, list[dict]] = {}
     trend_top_down = screen_trend(datasets, train_count=train_count,
         development_count=development_count,
         configuration=CourseConfiguration(minimum_shift_confirmation_bars=5,
             shift_expiry_bars=8, require_true_top_down=True),
         minimum_train_cycles=minimum_train,
-        minimum_development_cycles=2, minimum_final_cycles=2)
+        minimum_development_cycles=2, minimum_final_cycles=2,
+        train_episodes=trend_episodes)
     ranges = screen_range(datasets, train_count=train_count,
         development_count=development_count,
         configuration=RangeDeviationConfiguration(),
         minimum_train_cycles=minimum_train,
-        minimum_development_cycles=2, minimum_final_cycles=2)
-    full = {"schema": SCHEMA, "observed_at": now.astimezone(UTC).isoformat(),
+        minimum_development_cycles=2, minimum_final_cycles=2,
+        train_episodes=range_episodes)
+    return {"schema": SCHEMA, "observed_at": now.astimezone(UTC).isoformat(),
         "window": {"start_open_epoch": start, "end_open_epoch": end, "bars": bars,
             "train_count": train_count, "development_count": development_count,
             "final_count": final_count}, "manifests": manifests,
         "families": {"TREND_QUASIMODO_TOP_DOWN": trend_top_down,
             "RANGE_DEVIATION": ranges},
+        "train_episodes": {"TREND_QUASIMODO_TOP_DOWN": trend_episodes,
+            "RANGE_DEVIATION": range_episodes},
         "entry_policy": {"mode": "STRICT_ANALYSIS_BEFORE_ENTRY",
             "active_families": list(ACTIVE_FAMILIES),
             "legacy_loose_trend_disabled": True,
             "no_complete_thesis_action": "HOLD"},
-        "session_lifecycle": {"phase": "ANALYSIS_COMPLETE",
-            "phase_transitions": ["RUNNING", "PAUSED", "ANALYZING", "COOLDOWN"],
-            "analysis_partition": "TRAIN_ONLY",
-            "same_frozen_strategies_required": True,
-            "resume_condition": "NEXT_SCHEDULED_COMPLETED_WINDOW_AFTER_COOLDOWN",
-            "family_process_phases": {
-                "TREND_QUASIMODO_TOP_DOWN": trend_top_down["train_process_review"]["phase"],
-                "RANGE_DEVIATION": ranges["train_process_review"]["phase"]},
-            "strategy_changed": False},
         "automatic_promotion": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
-    identity = sha256(json.dumps(full, sort_keys=True, separators=(",", ":"),
-        allow_nan=False).encode()).hexdigest()
+
+
+def _review_training(full: dict) -> dict:
+    families = {}
+    for name, result in full["families"].items():
+        rows = [episode for episodes in full["train_episodes"][name].values() for episode in episodes]
+        exits: dict[str, dict] = defaultdict(
+            lambda: {"cycles": 0, "wins": 0, "fees_or_funding_turned_win_to_loss": 0,
+                     "net": Decimal(0),
+                     "fees": Decimal(0), "funding": Decimal(0)}
+        )
+        for episode in rows:
+            exit_group = exits[episode["exit_reason"]]
+            net = Decimal(episode["pnl_after_costs"])
+            fees = Decimal(episode["fees"])
+            funding = Decimal(episode["funding"])
+            exit_group["cycles"] += 1
+            exit_group["wins"] += int(episode["profitable"])
+            exit_group["fees_or_funding_turned_win_to_loss"] += int(net <= 0 < net + fees + funding)
+            exit_group["net"] += net
+            exit_group["fees"] += fees
+            exit_group["funding"] += funding
+        families[name] = {
+            "recorded_cycles": len(rows),
+            "train_gate_reasons": result["train_rejection_reasons"],
+            "pretrade_hold_reasons": result["train"]["pretrade_hold_reasons"],
+            "process_pause_reasons": result["train_process_review"]["pause_reasons"],
+            "loss_and_cost_by_exit": {
+                reason: {**group, "net": str(group["net"]), "fees": str(group["fees"]),
+                         "funding": str(group["funding"])}
+                for reason, group in sorted(exits.items())
+            },
+            "process_review_sha256": result["train_process_review"]["review_sha256"],
+        }
+    review = {"source_partition": "TRAIN_ONLY", "families": families,
+        "strategy_changed": False, "automatic_promotion": False}
+    review["review_sha256"] = _digest(review)
+    return review
+
+
+def run_cycle(*, state_dir: Path, bars: int, now: datetime, advance,
+              staged_path: Path, staged_required: bool) -> dict:
+    if staged_path.is_symlink():
+        raise ValueError("staged course screen is redirected")
+    if staged_path.exists():
+        if staged_path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("staged course screen is redirected or unbounded")
+        staged = json.loads(staged_path.read_bytes())
+        full = staged["screen"]
+        if (staged["screen_sha256"] != _digest(full) or full["schema"] != SCHEMA
+                or full["window"]["bars"] != bars
+                or full["observed_at"] != now.astimezone(UTC).isoformat()):
+            raise ValueError("staged course screen does not match the interrupted cycle")
+    else:
+        if staged_required:
+            raise ValueError("staged course screen is missing after pause")
+        full = _screen_cycle(state_dir=state_dir, bars=bars, now=now)
+        atomic_write_json(staged_path, {"screen": full, "screen_sha256": _digest(full)})
+    advance("PAUSED")
+    advance("ANALYZING")
+    review = _review_training(full)
+    full["training_review"] = review
+    full["session_lifecycle"] = {
+        "phase": "ANALYSIS_COMPLETE",
+        "phase_transitions": ["RUNNING", "PAUSED", "ANALYZING", "COOLDOWN"],
+        "analysis_partition": "TRAIN_ONLY",
+        "review_sha256": review["review_sha256"],
+        "same_frozen_strategies_required": True,
+        "resume_condition": "NEXT_SCHEDULED_COMPLETED_WINDOW_AFTER_COOLDOWN",
+        "family_process_phases": {
+            name: result["train_process_review"]["phase"]
+            for name, result in full["families"].items()
+        },
+        "strategy_changed": False,
+    }
+    identity = _digest(full)
     full["cycle_sha256"] = identity
     run_path = state_dir / "runs" / f"{identity}.json"
     atomic_write_json(run_path, full)
     return {"cycle_sha256": identity, "run_path": str(run_path),
-        "window": full["window"], "manifests": manifests,
+        "window": full["window"], "manifests": full["manifests"],
         "families": {name: _compact(value) for name, value in full["families"].items()},
+        "training_review": review,
         "session_lifecycle": full["session_lifecycle"],
         "automatic_promotion": False, "network_orders": False,
         "trading_authority": False, "paid_model_calls": 0}
@@ -196,9 +280,8 @@ def main(argv=None) -> int:
         checkpoint = json.loads(checkpoint_path.read_bytes())
         if checkpoint.get("schema") != SCHEMA:
             raise ValueError("course supervisor checkpoint schema differs")
+    checkpoint.setdefault("status", "COOLDOWN")
     checkpoint.update(schema=SCHEMA,
-        status=("WAITING_FOR_AC_POWER" if args.defer_on_battery and running_on_battery()
-                else "RUNNING"),
         updated_at=datetime.now(UTC).isoformat(), automatic_promotion=False,
         network_orders=False, trading_authority=False, paid_model_calls=0)
     atomic_write_json(checkpoint_path, checkpoint)
@@ -221,41 +304,74 @@ def main(argv=None) -> int:
         if cycles_today >= args.max_cycles_per_utc_day:
             due = max(due, datetime.combine(now.date() + timedelta(days=1),
                 datetime.min.time(), UTC))
-        if now < due and checkpoint["status"] == "WAITING_FOR_AC_POWER":
-            checkpoint.update(status="COOLDOWN", updated_at=now.isoformat())
+        pending = checkpoint.get("pending_cycle")
+        if now < due and checkpoint["status"] in ("WAITING_FOR_AC_POWER", "RUNNING", "STOPPED"):
+            checkpoint.update(status="RECOVERING" if pending else "COOLDOWN", updated_at=now.isoformat())
             atomic_write_json(checkpoint_path, checkpoint)
+        if args.once and now < due:
+            return 0
         if now >= due:
             started = monotonic()
             next_cycle_count = int(checkpoint.get("cycle_count", 0)) + 1
-            checkpoint.update(status="RUNNING", updated_at=now.isoformat())
-            atomic_write_json(checkpoint_path, checkpoint)
-            _append_session_event(session_events_path, phase="RUNNING",
-                cycle_count=next_cycle_count, observed_at=now)
+            if pending is None:
+                pending = {"observed_at": now.isoformat(), "bars": args.bars,
+                           "cycle_count": next_cycle_count, "phase": None}
+                checkpoint["pending_cycle"] = pending
+
+            def advance(phase: str) -> None:
+                if args.stop_file and args.stop_file.exists():
+                    raise CourseStopped
+                previous = pending["phase"]
+                if ACTIVE_PHASES.index(phase) <= ACTIVE_PHASES.index(previous):
+                    if checkpoint["status"] != previous:
+                        checkpoint.update(status=previous, updated_at=datetime.now(UTC).isoformat())
+                        atomic_write_json(checkpoint_path, checkpoint)
+                    return
+                clock = datetime.now(UTC)
+                pending["phase"] = phase
+                checkpoint.update(status=phase, updated_at=clock.isoformat())
+                atomic_write_json(checkpoint_path, checkpoint)
+                _append_session_event(session_events_path, phase=phase,
+                    cycle_count=next_cycle_count, observed_at=clock)
+
             try:
-                result = run_cycle(state_dir=args.state_dir, bars=args.bars, now=now)
+                if pending["cycle_count"] != next_cycle_count:
+                    raise ValueError("staged course cycle count differs")
+                cycle_now = datetime.fromisoformat(pending["observed_at"])
+                staged_path = args.state_dir / f"pending-course-screen-{next_cycle_count}.json"
+                advance("RUNNING")
+                result = run_cycle(state_dir=args.state_dir, bars=pending["bars"], now=cycle_now,
+                    advance=advance, staged_path=staged_path,
+                    staged_required=pending["phase"] in ("PAUSED", "ANALYZING"))
                 status, error = "COOLDOWN", None
+            except CourseStopped:
+                checkpoint.update(status="STOPPED", updated_at=datetime.now(UTC).isoformat())
+                atomic_write_json(checkpoint_path, checkpoint)
+                return 0
             except (HistoricalArchiveError, OSError, ValueError, TypeError,
                     KeyError, RuntimeError) as exc:
                 result = checkpoint.get("last_result")
                 status, error = "RECOVERING", type(exc).__name__
-            cycles_today += 1
+            completed_at = datetime.now(UTC)
             checkpoint = {"schema": SCHEMA, "status": status, "utc_day": day,
-                "cycles_today": cycles_today,
-                "cycle_count": next_cycle_count,
+                "cycles_today": cycles_today + 1,
+                "cycle_count": next_cycle_count - int(error is not None),
                 "last_result": result, "last_error_class": error,
                 "last_cycle_seconds": monotonic() - started,
-                "updated_at": datetime.now(UTC).isoformat(),
-                "next_run_at": (now + timedelta(seconds=args.interval_seconds)).isoformat(),
+                "updated_at": completed_at.isoformat(),
+                "next_run_at": (completed_at + timedelta(seconds=args.interval_seconds)).isoformat(),
                 "automatic_promotion": False, "network_orders": False,
                 "trading_authority": False, "paid_model_calls": 0}
+            if error is not None:
+                checkpoint["pending_cycle"] = pending
             atomic_write_json(checkpoint_path, checkpoint)
             if error is None:
-                for phase in ("PAUSED", "ANALYZING", "COOLDOWN"):
-                    _append_session_event(session_events_path, phase=phase,
-                        cycle_count=next_cycle_count, observed_at=datetime.now(UTC),
-                        cycle_sha256=result["cycle_sha256"])
+                _append_session_event(session_events_path, phase="COOLDOWN",
+                    cycle_count=next_cycle_count, observed_at=completed_at,
+                    cycle_sha256=result["cycle_sha256"])
+                staged_path.unlink(missing_ok=True)
             if args.once:
-                checkpoint["status"] = "STOPPED"
+                checkpoint.update(status="STOPPED", updated_at=datetime.now(UTC).isoformat())
                 atomic_write_json(checkpoint_path, checkpoint)
                 return 0 if error is None else 2
         sleep(min(15, max(1, (due - now).total_seconds())))

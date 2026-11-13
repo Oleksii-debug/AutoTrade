@@ -7,11 +7,14 @@ _RETRY_DELAYS = (0.01, 0.03, 0.06)
 _WINDOWS_SHARING_ERRORS = frozenset({5, 32, 33})
 
 
-async def publish_checkpoint(path, payload, write) -> int:
+async def publish_checkpoint(path, payload, write, *, offload_write: bool = False) -> int:
     """Retry the same checkpoint payload while an ordinary reader releases it."""
     for retries in range(len(_RETRY_DELAYS) + 1):
         try:
-            write(path, payload)
+            if offload_write:
+                await asyncio.to_thread(write, path, payload)
+            else:
+                write(path, payload)
             return retries
         except PermissionError as error:
             if (getattr(error, "winerror", None) not in _WINDOWS_SHARING_ERRORS

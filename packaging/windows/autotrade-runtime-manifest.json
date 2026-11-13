@@ -27,6 +27,8 @@
         "--market", "SOL_PERP",
         "--market", "NEAR_PERP",
         "--market", "SUI_PERP",
+        "--exact-print-market", "BTC_PERP",
+        "--exact-print-market", "ETH_PERP",
         "--poll-seconds", "1",
         "--bucket-seconds", "5",
         "--retention-days", "14",

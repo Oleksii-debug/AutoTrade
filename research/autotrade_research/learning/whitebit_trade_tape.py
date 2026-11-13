@@ -14,7 +14,25 @@ from ..integrations.whitebit_public import (
 
 SCHEMA = "autotrade-whitebit-public-trade-tape-v1"
 EXECUTION_PRINT_MARKETS = frozenset({"NEAR_PERP", "SUI_PERP"})
+OPT_IN_EXECUTION_PRINT_MARKETS = frozenset({"BTC_PERP", "ETH_PERP"})
 EXECUTION_PRINT_RETENTION_SECONDS = 86400
+_ORIGINAL_PRINT_MARKET_CONSTRAINT = "CHECK(market IN ('NEAR_PERP','SUI_PERP'))"
+_EXPANDED_PRINT_MARKET_CONSTRAINT = "CHECK(market IN ('NEAR_PERP','SUI_PERP','BTC_PERP','ETH_PERP'))"
+_PRINT_TABLE = """
+    CREATE TABLE IF NOT EXISTS execution_prints(
+        market TEXT NOT NULL {market_constraint},
+        trade_id TEXT NOT NULL,
+        trade_at TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        price TEXT NOT NULL,
+        side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        base_quantity TEXT NOT NULL,
+        rpi INTEGER NOT NULL CHECK(rpi IN (0,1)),
+        source_sha256 TEXT NOT NULL,
+        PRIMARY KEY(market, trade_id)
+    ) WITHOUT ROWID
+"""
+_PRINT_INDEX = "CREATE INDEX IF NOT EXISTS execution_prints_trade_at ON execution_prints(trade_at)"
 
 
 def _sum(left: str, right: str) -> str:
@@ -34,13 +52,14 @@ def _utc_microseconds(value: datetime) -> str:
 class WhiteBitTradeTapeStore:
     """Five-second trade-flow buckets with exact restart cursors.
 
-    The REST endpoint repeats its latest 100 trades.  A per-market monotonically
-    increasing trade-id cursor prevents duplicate volume after a restart.  The
-    store contains public observations only and cannot place an order.
+    The WebSocket starts with up to 100 recent trades per market. A per-market
+    cursor prevents duplicate volume after a restart. The store contains
+    public observations only and cannot place an order.
     """
 
     def __init__(
         self, path: Path, *, bucket_seconds: int = 5, retention_days: int = 14,
+        extra_execution_print_markets: tuple[str, ...] = (),
     ) -> None:
         if type(path) is not type(Path()) or path.exists() and path.is_symlink():
             raise ValueError("trade tape path must be an ordinary Path")
@@ -48,12 +67,20 @@ class WhiteBitTradeTapeStore:
             raise ValueError("bucket_seconds must be 1..60")
         if type(retention_days) is not int or not 1 <= retention_days <= 365:
             raise ValueError("retention_days must be 1..365")
+        if (
+            type(extra_execution_print_markets) is not tuple
+            or any(type(market) is not str or market not in OPT_IN_EXECUTION_PRINT_MARKETS
+                   for market in extra_execution_print_markets)
+            or len(set(extra_execution_print_markets)) != len(extra_execution_print_markets)
+        ):
+            raise ValueError("extra execution print markets must be distinct BTC_PERP or ETH_PERP")
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.parent.is_symlink() or not path.parent.is_dir():
             raise ValueError("trade tape parent must be an ordinary directory")
         self.path = path
         self.bucket_seconds = bucket_seconds
         self.retention_days = retention_days
+        self.execution_print_markets = EXECUTION_PRINT_MARKETS.union(extra_execution_print_markets)
         self.connection = sqlite3.connect(path, timeout=30)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -88,20 +115,6 @@ class WhiteBitTradeTapeStore:
                 PRIMARY KEY(market, bucket_epoch)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS buckets_epoch ON buckets(bucket_epoch);
-            CREATE TABLE IF NOT EXISTS execution_prints(
-                market TEXT NOT NULL CHECK(market IN ('NEAR_PERP','SUI_PERP')),
-                trade_id TEXT NOT NULL,
-                trade_at TEXT NOT NULL,
-                received_at TEXT NOT NULL,
-                price TEXT NOT NULL,
-                side TEXT NOT NULL CHECK(side IN ('buy','sell')),
-                base_quantity TEXT NOT NULL,
-                rpi INTEGER NOT NULL CHECK(rpi IN (0,1)),
-                source_sha256 TEXT NOT NULL,
-                PRIMARY KEY(market, trade_id)
-            ) WITHOUT ROWID;
-            CREATE INDEX IF NOT EXISTS execution_prints_trade_at
-                ON execution_prints(trade_at);
             CREATE TABLE IF NOT EXISTS metadata(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -109,6 +122,15 @@ class WhiteBitTradeTapeStore:
             """
         )
         with self.connection:
+            if extra_execution_print_markets:
+                self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute(_PRINT_TABLE.format(market_constraint=(
+                _EXPANDED_PRINT_MARKET_CONSTRAINT if extra_execution_print_markets
+                else _ORIGINAL_PRINT_MARKET_CONSTRAINT
+            )))
+            if extra_execution_print_markets:
+                self._expand_print_markets()
+            self.connection.execute(_PRINT_INDEX)
             self.connection.execute(
                 "INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)",
                 ("collection_started_at", datetime.now(timezone.utc).isoformat()),
@@ -116,6 +138,19 @@ class WhiteBitTradeTapeStore:
         check = self.connection.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
             raise ValueError("trade tape integrity check failed")
+
+    def _expand_print_markets(self) -> None:
+        (definition,) = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_prints'"
+        ).fetchone()
+        if _EXPANDED_PRINT_MARKET_CONSTRAINT in definition:
+            return
+        if _ORIGINAL_PRINT_MARKET_CONSTRAINT not in definition:
+            raise ValueError("unsupported execution prints market constraint")
+        self.connection.execute("ALTER TABLE execution_prints RENAME TO execution_prints_legacy")
+        self.connection.execute(_PRINT_TABLE.format(market_constraint=_EXPANDED_PRINT_MARKET_CONSTRAINT))
+        self.connection.execute("INSERT INTO execution_prints SELECT * FROM execution_prints_legacy")
+        self.connection.execute("DROP TABLE execution_prints_legacy")
 
     def close(self) -> None:
         self.connection.close()
@@ -126,8 +161,21 @@ class WhiteBitTradeTapeStore:
         ).fetchone()
         return 0 if row is None else int(row[0])
 
+    def execution_snapshot_coverage(self, batch: PublicTradeBatch) -> tuple[str, str | None]:
+        """Check overlap with the retained exact cursor before ingesting a new subscription snapshot."""
+        cursor = self._cursor(batch.market)
+        prior_print = self.connection.execute(
+            "SELECT received_at FROM execution_prints WHERE market=? AND trade_id=?",
+            (batch.market, str(cursor)),
+        ).fetchone()
+        if prior_print is None:
+            return "NO_RETAINED_EXACT_CURSOR", None
+        if any(trade.trade_id == cursor for trade in batch.trades):
+            return "CURSOR_OVERLAP", prior_print[0]
+        return "CURSOR_NOT_IN_FIRST_BATCH", prior_print[0]
+
     @staticmethod
-    def _new_row(trade, bucket: int, seconds: int, batch: PublicTradeBatch) -> dict:
+    def _new_row(trade, bucket: int, seconds: int, batch: PublicTradeBatch, digest: str) -> dict:
         buy = trade.side == "buy"
         return {
             "market": trade.market, "bucket_epoch": bucket,
@@ -143,12 +191,12 @@ class WhiteBitTradeTapeStore:
             "aggressive_sell_quote_quantity": trade.quote_quantity if not buy else "0",
             "rpi_count": int(trade.rpi),
             "received_at": batch.received_at.isoformat(),
-            "response_sha256": batch.digest,
+            "response_sha256": digest,
             "public_data_only": 1, "trading_authority": 0,
         }
 
     @staticmethod
-    def _merge(row: dict, trade, batch: PublicTradeBatch) -> dict:
+    def _merge(row: dict, trade, batch: PublicTradeBatch, digest: str) -> dict:
         buy = trade.side == "buy"
         row["last_trade_id"] = trade.trade_id
         row["last_price"] = trade.price
@@ -162,7 +210,7 @@ class WhiteBitTradeTapeStore:
         row[quote] = _sum(row[quote], trade.quote_quantity)
         row["rpi_count"] += int(trade.rpi)
         row["received_at"] = batch.received_at.isoformat()
-        row["response_sha256"] = batch.digest
+        row["response_sha256"] = digest
         return row
 
     def ingest(self, batch: PublicTradeBatch) -> int:
@@ -173,6 +221,7 @@ class WhiteBitTradeTapeStore:
         new = [trade for trade in reversed(batch.trades) if trade.trade_id > cursor]
         if not new:
             return 0
+        digest = batch.digest
         with self.connection:
             for trade in new:
                 bucket = int(trade.trade_at.timestamp())
@@ -181,15 +230,15 @@ class WhiteBitTradeTapeStore:
                     "SELECT * FROM buckets WHERE market=? AND bucket_epoch=?",
                     (market, bucket),
                 ).fetchone()
-                row = (self._new_row(trade, bucket, self.bucket_seconds, batch)
-                       if existing is None else self._merge(dict(existing), trade, batch))
+                row = (self._new_row(trade, bucket, self.bucket_seconds, batch, digest)
+                       if existing is None else self._merge(dict(existing), trade, batch, digest))
                 columns = tuple(row)
                 values = tuple(row[name] for name in columns)
                 self.connection.execute(
                     f"INSERT OR REPLACE INTO buckets ({','.join(columns)}) "
                     f"VALUES ({','.join('?' for _ in columns)})", values,
                 )
-                if market in EXECUTION_PRINT_MARKETS:
+                if market in self.execution_print_markets:
                     self.connection.execute(
                         "INSERT INTO execution_prints("
                         "market,trade_id,trade_at,received_at,price,side,"
@@ -204,7 +253,7 @@ class WhiteBitTradeTapeStore:
                             trade.side,
                             trade.base_quantity,
                             int(trade.rpi),
-                            batch.digest,
+                            digest,
                         ),
                     )
             latest = max(trade.trade_id for trade in new)

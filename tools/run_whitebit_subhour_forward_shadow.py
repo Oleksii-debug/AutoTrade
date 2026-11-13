@@ -602,32 +602,36 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
     return state
 
 
-def _observed_capacity(depth_database: Path, result: dict) -> bool:
-    """Check displayed notional on the latest observed side at each modeled fill."""
+def _observed_capacity(depth_database: Path, result: dict, modeled_outcome: dict) -> bool:
+    """Check both observed touches against the same modeled base quantity."""
     costs = TechnicalCosts()
     notional = Decimal(costs.initial_equity) * Decimal(costs.capital_fraction)
     is_long = result["action"] == "LONG"
     try:
+        entry_price = Decimal(modeled_outcome["entry_price"])
+        if not entry_price.is_finite() or entry_price <= 0:
+            return False
+        required_quantity = notional / entry_price
         with closing(sqlite3.connect(depth_database.resolve().as_uri() + "?mode=ro",
                                     uri=True, timeout=1)) as connection:
             for leg, ask in (("entry", is_long), ("exit", not is_long)):
                 at = datetime.fromisoformat(result[f"{leg}_quote_received_at"])
                 epoch = int(at.timestamp())
                 rows = connection.execute(
-                    "SELECT received_at,bid_price,ask_price,bid_quantity,ask_quantity"
+                    "SELECT received_at,bid_quantity,ask_quantity"
                     " FROM execution_bbo WHERE market=? AND bucket_epoch BETWEEN ? AND ?"
                     " ORDER BY bucket_epoch DESC",
                     (result["market"], epoch - 2, epoch),
                 )
-                for received, bid, offer, bid_size, offer_size in rows:
+                for received, bid_size, offer_size in rows:
                     if timedelta(0) <= at - datetime.fromisoformat(received) <= timedelta(seconds=2):
-                        price, size = (offer, offer_size) if ask else (bid, bid_size)
-                        if Decimal(price) * Decimal(size) < notional:
+                        size = Decimal(offer_size if ask else bid_size)
+                        if not size.is_finite() or size < required_quantity:
                             return False
                         break
                 else:
                     return False
-    except (sqlite3.Error, ValueError, ArithmeticError):
+    except (sqlite3.Error, KeyError, TypeError, ValueError, ArithmeticError):
         return False
     return True
 
@@ -649,7 +653,7 @@ def _record_portfolio_observation(
         if btc_eth_only:
             changed = advance_portfolio(
                 portfolio, event, now=now, markets=BTC_ETH_MARKETS,
-                capacity_check=lambda result: _observed_capacity(depth_database, result),
+                capacity_check=lambda result, outcome: _observed_capacity(depth_database, result, outcome),
             )
         else:
             changed = advance_portfolio(portfolio, event, now=now)

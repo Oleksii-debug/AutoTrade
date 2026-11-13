@@ -21,11 +21,13 @@ SCHEMA = "autotrade-observed-portfolio-shadow-v1"
 SOURCE_SCHEMA = "autotrade-whitebit-subhour-forward-shadow-v1"
 HORIZON = 1800
 OBSERVATION_STEP = 900
+HOUR_SECONDS = 3600
 TAIL_BYTES = 256 * 1024
 MARKETS = ("BTC_PERP", "ETH_PERP", "SOL_PERP")
 LABEL_POLICY = "m15-delayed-entry-m30-hold-v1"
 LEGACY_POLICY = "decision-quote-training-v1"
 RECENT_LIMIT = 336
+COVERAGE_HOURS = RECENT_LIMIT // 2
 
 
 def new_state(now: datetime) -> dict:
@@ -175,30 +177,71 @@ def _advance_training(state: dict, entries: list, boundary: int,
     return proposals
 
 
-def _report(recent: list[dict]) -> dict:
+def _hour_start_at_or_after(epoch: int) -> int:
+    return epoch + (OBSERVATION_STEP - epoch) % HOUR_SECONDS
+
+
+def _hourly_coverage(state: dict, current_hours: dict[int, Decimal]) -> dict:
+    """Count matured policy hours within the time and retained-row bounds."""
+    first = _hour_start_at_or_after(state["first_aligned_entry_epoch"])
+    boundary = state["last_boundary_epoch"]
+    last_end = boundary - (boundary - OBSERVATION_STEP) % HOUR_SECONDS
+    first = max(first, last_end - COVERAGE_HOURS * HOUR_SECONDS)
+    recent = state["recent"]
+    if recent and state["settled_count"] > len(recent):
+        first = max(first, _hour_start_at_or_after(recent[0]["entry_boundary_epoch"]))
+    expected = max(0, (last_end - first) // HOUR_SECONDS)
+    observed = [
+        value for epoch, value in current_hours.items() if first <= epoch < last_end
+    ]
+    summary = summarize_hour_windows(observed, 1)
+    complete, hits = summary["complete_windows"], summary["target_hits"]
+    return {
+        "first_hour_start_epoch": first if expected else None,
+        "last_hour_end_epoch": last_end if expected else None,
+        "expected_complete_hours": expected,
+        "observed_complete_hours": complete,
+        "unobserved_complete_hours": expected - complete,
+        "target_hits": hits,
+        "target_hit_fraction": str(Decimal(hits) / complete) if complete else None,
+        "coverage_fraction": str(Decimal(complete) / expected) if expected else None,
+    }
+
+
+def _report(state: dict) -> dict:
+    recent = state["recent"]
     by_entry = {row["entry_boundary_epoch"]: row for row in recent}
-    hours = []
+    current_hours = {}
+    legacy_hours = []
     for epoch, row in sorted(by_entry.items()):
-        if (epoch - OBSERVATION_STEP) % 3600:
+        if (epoch - OBSERVATION_STEP) % HOUR_SECONDS:
             continue
         second = by_entry.get(epoch + HORIZON)
-        if second is None or row.get("label_policy", LEGACY_POLICY) != second.get("label_policy", LEGACY_POLICY):
+        policy = row.get("label_policy", LEGACY_POLICY)
+        if second is None or policy != second.get("label_policy", LEGACY_POLICY):
             continue
-        hours.append((row.get("label_policy", LEGACY_POLICY),
-                      (1 + Decimal(row["net_equity_return"])) * (1 + Decimal(second["net_equity_return"])) - 1))
+        value = (1 + Decimal(row["net_equity_return"])) * (1 + Decimal(second["net_equity_return"])) - 1
+        if policy == LABEL_POLICY:
+            current_hours[epoch] = value
+        elif policy == LEGACY_POLICY:
+            legacy_hours.append(value)
 
-    values = [value for policy, value in hours if policy == LABEL_POLICY]
+    values = list(current_hours.values())
     compound = Decimal(1)
     for value in values:
         compound *= 1 + value
-    return {"hourly": summarize_hour_windows(values, 1),
-            "compound_complete_hour_return": str(compound - 1),
-            "hour_start_minute_utc": OBSERVATION_STEP // 60,
-            "label_policy": LABEL_POLICY,
-            "legacy_hourly": summarize_hour_windows([value for policy, value in hours
-                                                      if policy == LEGACY_POLICY], 1),
-            "recent_action_counts": dict(Counter(row["action"] for row in recent
-                                                 if row.get("label_policy") == LABEL_POLICY))}
+    report = {
+        "hourly": summarize_hour_windows(values, 1),
+        "compound_complete_hour_return": str(compound - 1),
+        "hour_start_minute_utc": OBSERVATION_STEP // 60,
+        "label_policy": LABEL_POLICY,
+        "legacy_hourly": summarize_hour_windows(legacy_hours, 1),
+        "recent_action_counts": dict(Counter(row["action"] for row in recent
+                                             if row.get("label_policy") == LABEL_POLICY)),
+    }
+    if "first_aligned_entry_epoch" in state:
+        report["hourly_coverage"] = _hourly_coverage(state, current_hours)
+    return report
 
 
 def advance(
@@ -218,6 +261,12 @@ def advance(
     state["last_boundary_epoch"] = boundary
     entries = list(_market_entries(event, markets))
     pending = state["pending"]
+    if "first_aligned_entry_epoch" not in state:
+        # Older checkpoints can be anchored from retained entry evidence.
+        aligned = [row["entry_boundary_epoch"] for row in [*state["recent"], pending]
+                   if row is not None and row.get("label_policy") == LABEL_POLICY]
+        if aligned:
+            state["first_aligned_entry_epoch"] = min(aligned)
     if pending is not None and boundary >= pending["due_boundary_epoch"]:
         result = _resolve(pending, entries, boundary, observed) if boundary == pending["due_boundary_epoch"] else None
         state["pending"] = None
@@ -228,7 +277,6 @@ def advance(
                 result["observed_capacity_check"] = capacity_check(result)
             state["recent"] = (state["recent"] + [result])[-RECENT_LIMIT:]
             state["settled_count"] += 1
-            state["evaluation"] = _report(state["recent"])
     queued = state.get("queued")
     if queued is not None and boundary >= queued["planned_entry_epoch"]:
         state["queued"] = None
@@ -236,9 +284,16 @@ def advance(
             state["pending"] = _enter(queued, entries, boundary)
         if state["pending"] is None:
             state["unmatched_count"] += 1
+        elif queued.get("label_policy") == LABEL_POLICY:
+            state.setdefault("first_aligned_entry_epoch", state["pending"]["entry_boundary_epoch"])
     proposals = _advance_training(state, entries, boundary, observed, now)
     if proposals:
         state["queued"] = _choose(proposals)
+    anchor = state.get("first_aligned_entry_epoch")
+    if state["recent"] or (
+        anchor is not None and boundary >= _hour_start_at_or_after(anchor) + HOUR_SECONDS
+    ):
+        state["evaluation"] = _report(state)
     return True
 
 

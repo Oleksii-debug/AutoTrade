@@ -95,6 +95,7 @@ def test_depth_reconnects_after_silence_or_schema_failure(monkeypatch, bad_frame
         transport = WhiteBitDepthWebSocketTransport(
             market="BTC_USDT", connector=lambda *_, **__: next(sockets),
             diagnostic=diagnostics.append, initial_backoff_seconds=1,
+            initial_generation=1,
         )
         observations = transport.observations(stop)
         pending = None
@@ -105,7 +106,7 @@ def test_depth_reconnects_after_silence_or_schema_failure(monkeypatch, bad_frame
                 await spin_until(lambda: first.receives == 2)
                 first.messages.put_nowait(frame(update=10))
                 await spin_until(pending.done)
-                assert pending.result().generation == 1
+                assert pending.result().generation == 2
 
                 # Documented quiet keepalive can replace the book at the same generation.
                 pending = asyncio.create_task(anext(observations))
@@ -114,7 +115,7 @@ def test_depth_reconnects_after_silence_or_schema_failure(monkeypatch, bad_frame
                 first.messages.put_nowait(frame(update=30))
                 await spin_until(pending.done)
                 quiet = pending.result()
-                assert (quiet.snapshot, quiet.update_id, quiet.generation) == (True, 30, 1)
+                assert (quiet.snapshot, quiet.update_id, quiet.generation) == (True, 30, 2)
 
                 pending = asyncio.create_task(anext(observations))
                 await spin_until(lambda: first.receives == 4)
@@ -144,7 +145,7 @@ def test_depth_reconnects_after_silence_or_schema_failure(monkeypatch, bad_frame
                 second.messages.put_nowait(frame(update=40))
                 await spin_until(pending.done)
                 recovered = pending.result()
-                assert (recovered.snapshot, recovered.update_id, recovered.generation) == (True, 40, 2)
+                assert (recovered.snapshot, recovered.update_id, recovered.generation) == (True, 40, 3)
             finally:
                 if pending is not None and not pending.done():
                     pending.cancel()
@@ -237,7 +238,8 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     sleep = asyncio.sleep
 
     class Transport:
-        def __init__(self, *, market, limit, diagnostic):
+        def __init__(self, *, market, limit, initial_generation, diagnostic):
+            assert initial_generation == 6
             self.diagnostic = diagnostic
 
         async def observations(self, stop):
@@ -255,6 +257,9 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
             await stop.wait()
 
     class Store:
+        def generation_baselines(self, markets):
+            return {"BTC_USDT": 6}
+
         def status(self):
             nonlocal clock
             clock += 0.05
@@ -348,12 +353,54 @@ def test_depth_batch_rollback_preserves_rows_and_cached_counts(tmp_path):
         store.close()
 
 
+def test_depth_generation_resumes_from_legacy_max_and_survives_expiry(tmp_path):
+    path = tmp_path / "depth.sqlite"
+    markets = ("BTC_USDT", "ETH_USDT")
+    observation = DepthLocalBook("BTC_USDT", limit=5).apply(
+        parse_depth_message(frame(), market="BTC_USDT", received_at=NOW), generation=1,
+    )
+    store = WhiteBitDepthTapeStore(path, retention_days=1)
+    try:
+        store.ingest_many((
+            replace(observation, generation=9),
+            replace(observation, generation=1, received_at=NOW + timedelta(seconds=1)),
+            replace(observation, market="ETH_USDT", generation=2),
+        ))
+        # Simulate the old schema, whose newest observations could already be reset to 1.
+        with store.connection:
+            store.connection.execute("DELETE FROM metadata WHERE key LIKE 'depth_generation:%'")
+    finally:
+        store.close()
+
+    store = WhiteBitDepthTapeStore(path, retention_days=1)
+    try:
+        assert store.generation_baselines(markets) == {"BTC_USDT": 9, "ETH_USDT": 2}
+        with pytest.raises(TypeError, match="canonical depth observation"):
+            store.ingest_many((replace(observation, generation=99), None))
+        store.ingest(replace(observation, received_at=NOW + timedelta(seconds=2), generation=10))
+        store.ingest(replace(observation, market="SOL_USDT", received_at=NOW + timedelta(days=2)))
+        assert store.connection.execute("SELECT market FROM execution_bbo").fetchall() == [
+            ("SOL_USDT",),
+        ]
+        assert store.connection.execute("SELECT market FROM buckets").fetchall() == [("SOL_USDT",)]
+    finally:
+        store.close()
+
+    store = WhiteBitDepthTapeStore(path, retention_days=1)
+    try:
+        assert store.generation_baselines(markets + ("SOL_USDT", "SUI_USDT")) == {
+            "BTC_USDT": 10, "ETH_USDT": 2, "SOL_USDT": 1, "SUI_USDT": 0,
+        }
+    finally:
+        store.close()
+
+
 def test_depth_collector_flushes_sparse_batch_and_surfaces_failed_write(tmp_path, monkeypatch):
     args = SimpleNamespace(depth_limit=20, poll_seconds=1, stop_file=tmp_path / "stop")
     attempts = []
 
     class Transport:
-        def __init__(self, *, market, limit, diagnostic):
+        def __init__(self, *, market, limit, initial_generation, diagnostic):
             pass
 
         async def observations(self, stop):
@@ -361,6 +408,9 @@ def test_depth_collector_flushes_sparse_batch_and_surfaces_failed_write(tmp_path
             await stop.wait()
 
     class Store:
+        def generation_baselines(self, markets):
+            return {"BTC_USDT": 0}
+
         def status(self):
             return {"bucket_count": 0}
 
@@ -398,7 +448,7 @@ def test_depth_collection_continues_during_checkpoint_write_and_flushes_counts(
         writer_started = asyncio.Event()
 
         class Transport:
-            def __init__(self, *, market, limit, diagnostic):
+            def __init__(self, *, market, limit, initial_generation, diagnostic):
                 self.diagnostic = diagnostic
 
             async def observations(self, stop):
@@ -417,6 +467,10 @@ def test_depth_collection_continues_during_checkpoint_write_and_flushes_counts(
                 await stop.wait()
 
         class Store:
+            def generation_baselines(self, markets):
+                assert get_ident() == loop_thread
+                return {"BTC_USDT": 0}
+
             def status(self):
                 assert get_ident() == loop_thread
                 return {"bucket_count": len(ingested)}

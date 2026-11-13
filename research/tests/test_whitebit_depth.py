@@ -252,6 +252,68 @@ def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp
     }
 
 
+@pytest.mark.parametrize(("winerror", "recovered"), [(5, True), (32, True), (33, True), (None, False)])
+def test_depth_checkpoint_retries_only_transient_windows_replace_errors(
+    tmp_path, monkeypatch, winerror, recovered,
+):
+    payloads = []
+    delays = []
+    write_error = PermissionError(13, "destination is in use")
+    write_error.winerror = winerror
+    errors = {"BTC_USDT": "INITIAL"}
+
+    def write(path, payload):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise write_error
+
+    async def sleep(delay):
+        delays.append(delay)
+        errors["BTC_USDT"] = "CHANGED"
+
+    monkeypatch.setattr(run_whitebit_depth_tape, "atomic_write_json", write)
+    monkeypatch.setattr(run_whitebit_depth_tape.asyncio, "sleep", sleep)
+    operation = run_whitebit_depth_tape._checkpoint(
+        tmp_path / "checkpoint.json", {"bucket_count": 1}, phase="RUNNING",
+        markets=("BTC_USDT",), observations=1, errors=errors, timing={},
+    )
+    if recovered:
+        assert asyncio.run(operation) == 1
+        assert len(payloads) == 2 and payloads[0] is payloads[1]
+        assert payloads[1]["errors"] == {"BTC_USDT": "INITIAL"}
+        assert delays == [0.01]
+    else:
+        with pytest.raises(PermissionError) as caught:
+            asyncio.run(operation)
+        assert caught.value is write_error
+        assert len(payloads) == 1 and delays == []
+
+
+def test_depth_checkpoint_raises_after_bounded_windows_retry(tmp_path, monkeypatch):
+    attempts = []
+    delays = []
+    locked = PermissionError(13, "destination is still in use")
+    locked.winerror = 5
+
+    def write(path, payload):
+        attempts.append(payload)
+        raise locked
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(run_whitebit_depth_tape, "atomic_write_json", write)
+    monkeypatch.setattr(run_whitebit_depth_tape.asyncio, "sleep", sleep)
+    with pytest.raises(PermissionError) as caught:
+        asyncio.run(run_whitebit_depth_tape._checkpoint(
+            tmp_path / "checkpoint.json", {}, phase="RUNNING",
+            markets=("BTC_USDT",), observations=0, errors={}, timing={},
+        ))
+    assert caught.value is locked
+    assert len(attempts) == 4
+    assert delays == [0.01, 0.03, 0.06]
+
+
 def test_execution_bbo_retains_exact_latest_prices_and_sizes(tmp_path):
     path = tmp_path / "exact.sqlite3"
     book = DepthLocalBook("BTC_USDT", limit=5)

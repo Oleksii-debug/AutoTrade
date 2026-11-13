@@ -29,19 +29,32 @@ from research.autotrade_research.learning.whitebit_depth_tape import (
 
 
 TIMING_WINDOW_SECONDS = 300
+WINDOWS_CHECKPOINT_RETRY_DELAYS = (0.01, 0.03, 0.06)
+WINDOWS_SHARING_ERRORS = frozenset({5, 32, 33})
 
 
-def _checkpoint(path: Path, status: dict, *, phase: str,
-                markets: tuple[str, ...], observations: int,
-                errors: dict[str, str], timing: dict) -> None:
-    atomic_write_json(path, {
+async def _checkpoint(path: Path, status: dict, *, phase: str,
+                      markets: tuple[str, ...], observations: int,
+                      errors: dict[str, str], timing: dict) -> int:
+    payload = {
         **status, "phase": phase,
         "transport": "WHITEBIT_PUBLIC_DEPTH_V1", "markets": list(markets),
-        "new_observations_last_checkpoint": observations, "errors": errors,
+        "new_observations_last_checkpoint": observations, "errors": errors.copy(),
         "timing": timing,
         "checkpointed_at": datetime.now(timezone.utc).isoformat(),
         "secrets_in_state": False, "paid_model_calls": 0,
-    })
+    }
+    # An ordinary Windows reader may briefly prevent replacement of the
+    # current file. Retry only the checkpoint publication, with the same payload.
+    for retries in range(len(WINDOWS_CHECKPOINT_RETRY_DELAYS) + 1):
+        try:
+            atomic_write_json(path, payload)
+            return retries
+        except PermissionError as error:
+            if (getattr(error, "winerror", None) not in WINDOWS_SHARING_ERRORS
+                    or retries == len(WINDOWS_CHECKPOINT_RETRY_DELAYS)):
+                raise
+        await asyncio.sleep(WINDOWS_CHECKPOINT_RETRY_DELAYS[retries])
 
 
 async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
@@ -60,10 +73,11 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     observation_gaps: dict[str, float] = {}
     max_ingest = 0.0
     checkpoint_write = 0.0
+    checkpoint_retries = 0
     expected_wakeup = monotonic()
 
-    def publish(phase: str, *, wakeup_delay: float, archive_time: float) -> None:
-        nonlocal max_ingest, checkpoint_write
+    async def publish(phase: str, *, wakeup_delay: float, archive_time: float) -> None:
+        nonlocal added, max_ingest, checkpoint_write, checkpoint_retries
         status_start = monotonic()
         status = store.status()
         measured_at = monotonic()
@@ -89,6 +103,7 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             "recent_window_seconds": TIMING_WINDOW_SECONDS,
             "last_wakeup_delay_ms": round(wakeup_delay * 1000, 3),
             "recent_max_ms": {name: round(value * 1000, 3) for name, value in maxima.items()},
+            "checkpoint_retries_since_start": checkpoint_retries,
             "transport_events_since_start": {
                 market: counts.copy() for market, counts in transport_events.items()
             },
@@ -104,8 +119,12 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             },
         }
         write_start = monotonic()
-        _checkpoint(checkpoint, status, phase=phase, markets=markets,
-                    observations=added, errors=errors, timing=timing)
+        observations = added
+        added = 0
+        checkpoint_retries += await _checkpoint(
+            checkpoint, status, phase=phase, markets=markets,
+            observations=observations, errors=errors, timing=timing,
+        )
         checkpoint_write = monotonic() - write_start
 
     def diagnostic(market: str, value) -> None:
@@ -155,8 +174,7 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                 store.archive_completed_windows(markets, now_epoch=now_epoch)
                 archive_time = monotonic() - archive_start
                 last_archive_boundary = archive_boundary
-            publish(phase, wakeup_delay=wakeup_delay, archive_time=archive_time)
-            added = 0
+            await publish(phase, wakeup_delay=wakeup_delay, archive_time=archive_time)
             expected_wakeup = monotonic() + args.poll_seconds
             await asyncio.sleep(args.poll_seconds)
     finally:
@@ -165,7 +183,7 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
         for task in pending:
             task.cancel()
         await asyncio.gather(*consumers, return_exceptions=True)
-        publish("STOPPED", wakeup_delay=0, archive_time=0)
+        await publish("STOPPED", wakeup_delay=0, archive_time=0)
 
 
 def main(argv=None) -> int:

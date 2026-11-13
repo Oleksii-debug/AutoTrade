@@ -747,6 +747,7 @@ async def supervise(
     observations = 0
     latest: dict[str, Any] | None = None
     phase = "FAILED"
+    failure_stage = "STARTUP"
     journal = WhiteBitPublicDiagnosticJournal(
         state_dir / "diagnostics",
         market=canonical_market,
@@ -789,14 +790,17 @@ async def supervise(
             )
 
             def publish(update: Any, authenticated_manifest: dict[str, Any]) -> None:
-                nonlocal latest, observations
+                nonlocal latest, observations, failure_stage
+                failure_stage = "PUBLISH_LATEST"
                 candidate = _snapshot(update)
                 _atomic_write_json_with_reader_retry(
                     state_dir / "latest-market.json", candidate
                 )
                 latest = candidate
                 observations += 1
+                failure_stage = "WRITE_OBSERVATION_JOURNAL"
                 journal.observation(latest["available_at"], latest["stream_generation"])
+                failure_stage = "WRITE_CHECKPOINT"
                 _checkpoint(
                     state_dir / "supervisor-state.json",
                     market=canonical_market,
@@ -805,6 +809,7 @@ async def supervise(
                     latest=latest,
                     clock=clock,
                 )
+                failure_stage = "APPLY_ARTIFACT_QUOTA"
                 if (
                     authenticated_manifest.get("artifact_id")
                     != latest["raw_evidence_ref"]["artifact_id"]
@@ -839,11 +844,15 @@ async def supervise(
                         )
 
             async def collect_sequentially() -> None:
+                nonlocal failure_stage
+                failure_stage = "READ_PUBLIC_STREAM"
                 async for observation in transport.observations(stop_event):
+                    failure_stage = "COMMIT_ARTIFACT"
                     update, authenticated_manifest = (
                         feed._commit_with_authenticated_manifest(observation)
                     )
                     publish(update, authenticated_manifest)
+                    failure_stage = "READ_PUBLIC_STREAM"
 
             async def watch_stop_file() -> None:
                 if stop_file is None:
@@ -865,6 +874,7 @@ async def supervise(
                     checkpoint_task, stop_file_task, return_exceptions=True
                 )
             phase = "STOPPED"
+            failure_stage = "WRITE_STOP_CHECKPOINT"
             journal.checkpoint("STOPPING")
             _checkpoint(
                 state_dir / "supervisor-state.json",
@@ -875,7 +885,9 @@ async def supervise(
                 clock=clock,
             )
             journal.checkpoint(phase)
-    except BaseException:
+    except BaseException as error:
+        if isinstance(error, (OSError, RuntimeError, TypeError, ValueError)):
+            error.autotrade_failure_stage = failure_stage
         if journal._thread is not None:
             try:
                 journal.checkpoint("FAILED")
@@ -927,13 +939,14 @@ def main(argv=None) -> int:
     except (OSError, RuntimeError, TypeError, ValueError) as error:
         # Never print provider/library exception text: it can contain local
         # proxy details or other sensitive material.
-        print(
-            json.dumps(
-                {"phase": "FAILED", "error_code": type(error).__name__.upper()},
-                sort_keys=True,
-            ),
-            flush=True,
-        )
+        result = {"phase": "FAILED", "error_code": type(error).__name__.upper(),
+                  "failure_stage": getattr(error, "autotrade_failure_stage", "STARTUP")}
+        if isinstance(error, OSError):
+            for field in ("errno", "winerror"):
+                code = getattr(error, field, None)
+                if type(code) is int:
+                    result[field] = code
+        print(json.dumps(result, sort_keys=True), flush=True)
         return 2
 
 

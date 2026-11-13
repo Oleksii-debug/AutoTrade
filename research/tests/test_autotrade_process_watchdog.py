@@ -267,6 +267,10 @@ def test_checked_in_manifest_is_secret_free_and_admitted(tmp_path):
     tape_markets = [tape_args[index + 1]
         for index, value in enumerate(tape_args[:-1]) if value == "--market"]
     assert tape_markets == ["BTC_PERP", "ETH_PERP", "SOL_PERP", "NEAR_PERP", "SUI_PERP"]
+    assert [
+        tape_args[index + 1] for index, value in enumerate(tape_args[:-1])
+        if value == "--exact-print-market"
+    ] == ["BTC_PERP", "ETH_PERP"]
     depth = processes["whitebit-depth-tape"]
     depth_markets = [
         depth["args"][index + 1]

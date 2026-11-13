@@ -1,11 +1,16 @@
+import asyncio
 from datetime import datetime, timezone
 import json
 import sqlite3
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
 from autotrade_research.integrations.whitebit_public import parse_recent_trades
 from autotrade_research.learning.whitebit_trade_tape import WhiteBitTradeTapeStore
+from research.autotrade_research.integrations.whitebit_public import parse_recent_trades as parse_runner_batch
+from tools import run_whitebit_public_trade_tape
 
 
 NOW = datetime(2026, 11, 12, 3, 0, 10, tzinfo=timezone.utc)
@@ -196,5 +201,141 @@ def test_execution_print_failure_rolls_back_bucket_and_cursor_together(tmp_path)
         "SELECT COUNT(*) FROM execution_prints"
     ).fetchone()[0] == 0
     store.close()
+
+
+def test_opt_in_migrates_existing_prints_preserving_rows_cursors_and_retention(tmp_path):
+    path = tmp_path / "trade-tape.sqlite3"
+    epoch = int(NOW.timestamp())
+    near = _batch([_row(12, epoch, "sell", "100")], market="NEAR_PERP")
+    btc = _batch([_row(23, epoch, "buy", "100")], market="BTC_PERP")
+    eth = _batch([_row(34, epoch, "sell", "100")], market="ETH_PERP")
+    sol = _batch([_row(45, epoch, "buy", "100")], market="SOL_PERP")
+
+    original = WhiteBitTradeTapeStore(path)
+    for batch in (near, btc, eth):
+        assert original.ingest(batch) == 1
+    original_print = tuple(original.connection.execute("SELECT * FROM execution_prints").fetchone())
+    original.close()
+
+    store = WhiteBitTradeTapeStore(path, extra_execution_print_markets=("BTC_PERP", "ETH_PERP"))
+    assert tuple(store.connection.execute("SELECT * FROM execution_prints").fetchone()) == original_print
+    assert store.status()["last_trade_ids"] == {"BTC_PERP": 23, "ETH_PERP": 34, "NEAR_PERP": 12}
+    assert store.execution_snapshot_coverage(btc) == ("NO_RETAINED_EXACT_CURSOR", None)
+    assert store.ingest(btc) == 0
+    for batch, trade_id in ((btc, 24), (eth, 35), (sol, 46)):
+        assert store.ingest(_batch([_row(trade_id, epoch, "buy", "100")], market=batch.market)) == 1
+    assert [tuple(row) for row in store.connection.execute(
+        "SELECT market,trade_id FROM execution_prints ORDER BY market"
+    )] == [("BTC_PERP", "24"), ("ETH_PERP", "35"), ("NEAR_PERP", "12")]
+    assert store.connection.execute(
+        "SELECT name FROM pragma_index_list('execution_prints') WHERE name='execution_prints_trade_at'"
+    ).fetchone() is not None
+    store.close()
+
+    default = WhiteBitTradeTapeStore(path)
+    later = datetime.fromtimestamp(epoch + 86401, timezone.utc)
+    assert default.ingest(_batch([_row(25, int(later.timestamp()), "buy", "100")],
+                                 received=later, market="BTC_PERP")) == 1
+    assert default.connection.execute("SELECT COUNT(*) FROM execution_prints").fetchone()[0] == 0
+    default.close()
+
+
+def test_exact_print_coverage_exposes_unverified_reconnect_boundaries(tmp_path, monkeypatch):
+    market = "BTC_PERP"
+    epoch = int(NOW.timestamp())
+    store = run_whitebit_public_trade_tape.WhiteBitTradeTapeStore(
+        tmp_path / "trade-tape.sqlite3", extra_execution_print_markets=(market,),
+    )
+    # The runner imports the canonical package under the research namespace.
+    def batch(rows, *, received=NOW):
+        return parse_runner_batch(json.dumps(rows).encode(), market, received)
+
+    snapshots = []
+    stopped = Event()
+    received = datetime.fromtimestamp(epoch + 10, timezone.utc)
+    args = SimpleNamespace(poll_seconds=1, stop_file=tmp_path / "stop.json")
+
+    class Transport:
+        def __init__(self, *, markets, diagnostic):
+            assert markets == (market,)
+            self.diagnostic = diagnostic
+
+        async def batches(self, stop):
+            self.diagnostic("SUBSCRIBED")
+            yield batch([_row(23, epoch, "buy", "100")])
+            self.diagnostic("CONNECTION_LOST")
+            self.diagnostic("SUBSCRIBED")
+            yield batch([_row(999, epoch + 5, "sell", "100")], received=received)
+            stopped.set()
+            await stop.wait()
+
+    async def tick(_seconds):
+        await asyncio_sleep(0)
+
+    def checkpoint(_path, document):
+        snapshots.append(json.loads(json.dumps(document)))
+
+    asyncio_sleep = asyncio.sleep
+    monkeypatch.setattr(run_whitebit_public_trade_tape, "WhiteBitPublicTradeWebSocketTransport", Transport)
+    monkeypatch.setattr(run_whitebit_public_trade_tape, "atomic_write_json", checkpoint)
+    monkeypatch.setattr(run_whitebit_public_trade_tape.asyncio, "sleep", tick)
+    try:
+        store.ingest(batch([_row(23, epoch, "buy", "100")]))
+        asyncio.run(run_whitebit_public_trade_tape._collect(
+            args, stopped, store, tmp_path / "checkpoint.json", (market,),
+        ))
+    finally:
+        store.close()
+
+    assert snapshots[-1]["exact_print_coverage"][market] == {
+        "state": "CURSOR_NOT_IN_FIRST_BATCH",
+        "unverified_boundaries_since_start": 1,
+        "last_unverified_boundary": {
+            "prior_receipt_utc": "2026-11-12T03:00:10.000000Z",
+            "first_batch_receipt_utc": received.isoformat(),
+        },
+    }
+    assert snapshots[-1]["last_trade_ids"] == {market: 999}
+
+
+def test_trade_tape_consumer_failure_exits_instead_of_publishing_healthy_heartbeats(tmp_path, monkeypatch):
+    stopped = Event()
+    args = SimpleNamespace(poll_seconds=1, stop_file=tmp_path / "stop.json")
+    snapshots = []
+    sleep = asyncio.sleep
+
+    class Transport:
+        def __init__(self, *, markets, diagnostic):
+            self.diagnostic = diagnostic
+
+        async def batches(self, stop):
+            self.diagnostic("SUBSCRIBED")
+            yield SimpleNamespace(market="BTC_PERP")
+
+    class Store:
+        execution_print_markets = frozenset()
+
+        def status(self):
+            return {"bucket_count": 0}
+
+        def ingest(self, batch):
+            raise sqlite3.OperationalError("injected ingest failure")
+
+    async def tick(_seconds):
+        await sleep(0)
+        if len(snapshots) > 2:
+            stopped.set()
+
+    monkeypatch.setattr(run_whitebit_public_trade_tape, "WhiteBitPublicTradeWebSocketTransport", Transport)
+    monkeypatch.setattr(run_whitebit_public_trade_tape, "atomic_write_json", lambda _, data: snapshots.append(data))
+    monkeypatch.setattr(run_whitebit_public_trade_tape.asyncio, "sleep", tick)
+    with pytest.raises(sqlite3.OperationalError, match="injected ingest failure"):
+        asyncio.run(run_whitebit_public_trade_tape._collect(
+            args, stopped, Store(), tmp_path / "checkpoint.json", ("BTC_PERP",),
+        ))
+
+    assert [row["phase"] for row in snapshots] == ["STARTING", "FAILED"]
+    assert snapshots[-1]["errors"] == {"collector": "TRADE_CONSUMER_FAILED"}
+    assert "injected ingest failure" not in json.dumps(snapshots[-1])
 
 

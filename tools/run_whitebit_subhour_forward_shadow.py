@@ -40,6 +40,8 @@ from tools.run_whitebit_observed_portfolio import (
 )
 from tools.run_whitebit_subhour_supervisor import FROZEN_STRATEGY_ID, configurations
 
+BTC_ETH_MARKETS = ("BTC_PERP", "ETH_PERP")
+
 
 SCHEMA = "autotrade-whitebit-subhour-forward-shadow-v1"
 MARKET = "SOL_PERP"
@@ -542,21 +544,63 @@ def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
     return state
 
 
-def _record_portfolio_observation(state: dict, event: dict, *, now: datetime) -> dict:
-    """Advance the shared research account without interrupting the market worker."""
-    existing = state.get("portfolio_observer")
+def _observed_capacity(depth_database: Path, result: dict) -> bool:
+    """Check displayed notional on the latest observed side at each modeled fill."""
+    costs = TechnicalCosts()
+    notional = Decimal(costs.initial_equity) * Decimal(costs.capital_fraction)
+    is_long = result["action"] == "LONG"
+    try:
+        with closing(sqlite3.connect(depth_database.resolve().as_uri() + "?mode=ro",
+                                    uri=True, timeout=1)) as connection:
+            for leg, ask in (("entry", is_long), ("exit", not is_long)):
+                at = datetime.fromisoformat(result[f"{leg}_quote_received_at"])
+                epoch = int(at.timestamp())
+                rows = connection.execute(
+                    "SELECT received_at,bid_price,ask_price,bid_quantity,ask_quantity"
+                    " FROM execution_bbo WHERE market=? AND bucket_epoch BETWEEN ? AND ?"
+                    " ORDER BY bucket_epoch DESC",
+                    (result["market"], epoch - 2, epoch),
+                )
+                for received, bid, offer, bid_size, offer_size in rows:
+                    if timedelta(0) <= at - datetime.fromisoformat(received) <= timedelta(seconds=2):
+                        price, size = (offer, offer_size) if ask else (bid, bid_size)
+                        if Decimal(price) * Decimal(size) < notional:
+                            return False
+                        break
+                else:
+                    return False
+    except (sqlite3.Error, ValueError, ArithmeticError):
+        return False
+    return True
+
+
+def _record_portfolio_observation(
+    state: dict, event: dict, *, now: datetime, depth_database: Path | None = None,
+) -> dict:
+    """Advance either research account without interrupting the market worker."""
+    btc_eth_only = depth_database is not None
+    key = "btc_eth_portfolio_observer" if btc_eth_only else "portfolio_observer"
+    existing = state.get(key)
+    if btc_eth_only and existing is None:
+        return {"status": "WAITING_FOR_EXPERIMENT_CHECKPOINT"}
     if existing is not None and (type(existing) is not dict or existing.get("schema") != PORTFOLIO_SCHEMA):
         return {"error_class": "PORTFOLIO_CHECKPOINT_SCHEMA_MISMATCH"}
     try:
         portfolio = deepcopy(existing) if existing is not None else new_portfolio_state(
             datetime.fromisoformat(event["observed_at"]))
-        changed = advance_portfolio(portfolio, event, now=now)
+        if btc_eth_only:
+            changed = advance_portfolio(
+                portfolio, event, now=now, markets=BTC_ETH_MARKETS,
+                capacity_check=lambda result: _observed_capacity(depth_database, result),
+            )
+        else:
+            changed = advance_portfolio(portfolio, event, now=now)
         report = {"queued": portfolio.get("queued"), "pending": portfolio.get("pending"),
                   "settled_count": portfolio["settled_count"], "unmatched_count": portfolio["unmatched_count"],
                   "evaluation": portfolio.get("evaluation")}
         if changed:
             portfolio["updated_at"] = now.isoformat()
-            state["portfolio_observer"] = portfolio
+            state[key] = portfolio
         return report
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         return {"error_class": type(exc).__name__}
@@ -676,6 +720,9 @@ def main(argv=None) -> int:
                 }
                 event["portfolio_observer"] = _record_portfolio_observation(
                     next_state, event, now=datetime.now(UTC))
+                if "btc_eth_portfolio_observer" in next_state:
+                    event["btc_eth_portfolio_observer"] = _record_portfolio_observation(
+                        next_state, event, now=datetime.now(UTC), depth_database=args.depth_database)
                 _append_decision(state_dir / "decisions.jsonl", event)
                 state = next_state
                 status = "RUNNING"

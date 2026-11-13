@@ -103,6 +103,25 @@ class Connector:
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retention_recovery_reports_starting_before_connecting(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "supervisor-state.json"
+            connector = Connector([])
+
+            def reject_recovery(*, protected_artifact_id):
+                self.assertIsNone(protected_artifact_id)
+                self.assertEqual(json.loads(checkpoint.read_bytes())["phase"], "STARTING")
+                self.assertEqual(connector.calls, [])
+                raise ArtifactIntegrityError("retained artifact is corrupt")
+
+            with patch.object(WhiteBitArtifactQuota, "recover", side_effect=reject_recovery):
+                with self.assertRaises(ArtifactIntegrityError) as failure:
+                    await supervise(market="BTC_USDT", state_dir=root, connector=connector)
+            self.assertEqual(failure.exception.autotrade_failure_stage, "RECOVER_RETENTION")
+            self.assertEqual(json.loads(checkpoint.read_bytes())["phase"], "FAILED")
+            self.assertEqual(connector.calls, [])
+
     async def test_recovery_removes_authenticated_prepared_crash_orphan(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

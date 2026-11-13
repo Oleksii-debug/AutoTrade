@@ -75,7 +75,50 @@ def test_portfolio_waits_for_later_quote_and_compounds_complete_hour_across_rest
     assert state["settled_count"] == 2
     assert state["evaluation"]["hourly"]["target_hits"] == 1
     assert Decimal(state["evaluation"]["compound_complete_hour_return"]) == Decimal(".012036")
+    coverage = state["evaluation"]["hourly_coverage"]
+    assert coverage["expected_complete_hours"] == coverage["observed_complete_hours"] == 1
+    assert coverage["target_hits"] == 1
+    assert coverage["target_hit_fraction"] == coverage["coverage_fraction"] == "1"
     assert not apply(state, 75, btc_labels=[outcome(entry_btc, 75)])
+
+
+def test_portfolio_coverage_advances_when_half_hour_outcome_is_missing():
+    state = new_state(START - timedelta(minutes=1))
+    apply(state, 0, btc=observation(0, "BTC"))
+    first = observation(15, "BTC")
+    apply(state, 15, btc=first)
+    apply(state, 30, btc=observation(30, "BTC"))
+    apply(state, 45, btc=observation(45, "BTC"), btc_labels=[outcome(first, 45)])
+    assert state["evaluation"]["hourly_coverage"]["expected_complete_hours"] == 0
+
+    # A restart preserves the earliest valid entry while the missing exit
+    # advances the denominator without creating a second HOLD.
+    state = json.loads(json.dumps(state))
+    apply(state, 75)
+    coverage = state["evaluation"]["hourly_coverage"]
+    assert state["settled_count"] == state["unmatched_count"] == 1
+    assert coverage["expected_complete_hours"] == coverage["unobserved_complete_hours"] == 1
+    assert coverage["observed_complete_hours"] == coverage["target_hits"] == 0
+    assert coverage["coverage_fraction"] == "0"
+    assert coverage["target_hit_fraction"] is None
+    assert state["evaluation"]["hourly"]["flat_windows"] == 0
+
+
+def test_portfolio_coverage_tracks_matured_hours_without_any_settled_outcome():
+    state = new_state(START - timedelta(minutes=1))
+    apply(state, 0, btc=observation(0, "BTC"))
+    apply(state, 15, btc=observation(15, "BTC"))
+    apply(state, 45)
+    assert state["settled_count"] == 0
+    assert state["unmatched_count"] == 1
+    assert "evaluation" not in state
+
+    apply(state, 75)
+    coverage = state["evaluation"]["hourly_coverage"]
+    assert state["settled_count"] == 0
+    assert coverage["expected_complete_hours"] == coverage["unobserved_complete_hours"] == 1
+    assert coverage["observed_complete_hours"] == coverage["target_hits"] == 0
+    assert coverage["target_hit_fraction"] is None
 
 
 def test_portfolio_excludes_late_decisions_same_quotes_and_missing_outcomes():
@@ -144,6 +187,33 @@ def test_portfolio_finishes_legacy_hold_without_combining_it_with_new_policy():
     assert state["settled_count"] == 2
     assert state["evaluation"]["hourly"]["complete_windows"] == 0
     assert state["evaluation"]["legacy_hourly"]["complete_windows"] == 0
+    assert state["evaluation"]["hourly_coverage"]["expected_complete_hours"] == 0
+    apply(state, 135)
+    coverage = state["evaluation"]["hourly_coverage"]
+    assert coverage["first_hour_start_epoch"] == int((START + timedelta(minutes=75)).timestamp())
+    assert coverage["expected_complete_hours"] == coverage["unobserved_complete_hours"] == 1
+
+
+def test_migrated_coverage_uses_retained_entry_and_bounded_clock_window():
+    state = new_state(START - timedelta(days=20))
+    entry = observation(15, "BTC")["entry_boundary_epoch"]
+    state["recent"] = [
+        {"entry_boundary_epoch": entry, "action": "HOLD",
+         "net_equity_return": "0", "label_policy": LABEL_POLICY},
+        {"entry_boundary_epoch": entry + 1800, "action": "HOLD",
+         "net_equity_return": "0", "label_policy": LABEL_POLICY},
+    ]
+    state["settled_count"] = 338  # earlier settled intervals no longer retained
+    apply(state, 75)
+    coverage = state["evaluation"]["hourly_coverage"]
+    assert coverage["first_hour_start_epoch"] == entry
+    assert coverage["expected_complete_hours"] == coverage["observed_complete_hours"] == 1
+    assert coverage["target_hit_fraction"] == "0"
+
+    apply(state, 75 + 169 * 60)
+    coverage = state["evaluation"]["hourly_coverage"]
+    assert coverage["expected_complete_hours"] == coverage["unobserved_complete_hours"] == 168
+    assert coverage["observed_complete_hours"] == 0
 
 
 

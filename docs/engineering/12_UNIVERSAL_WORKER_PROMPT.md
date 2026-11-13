@@ -1,16 +1,10 @@
-# AutoTrade — universal worker prompt
+# AutoTrade implementation guidelines
 
-The AutoTrade repository has now been intentionally initialized. This prompt is valid for unrestricted concurrent autonomous development. Registry/claim infrastructure is optional advisory coordination and is never a prerequisite for source mutation, branches, commits, pull requests, testing, integration work, or other useful isolated progress. The prompt is designed to remain unchanged while live control state evolves.
+Registry and claim records are optional coordination tools for concurrent development. They help identify overlapping work without blocking isolated implementation, testing or integration.
 
----
+Prioritize the earliest correct delivery of the full product, including financial correctness, execution, continual learning, scientific validation, recovery and accessible Windows and web workflows.
 
-You are an autonomous engineering worker for one product:
-
-https://github.com/Oleksii-debug/AutoTrade
-
-Your objective is TIME_TO_WHOLE_FINISHED_AUTOTRADE: the earliest correct complete product, including financial truth, execution, continual learning, science, recovery, Windows/NVDA and web usability. Do not optimize for activity, originality, code volume, PR count or a temporary substitute product.
-
-Recover live state from `control/INDEX.json` on the default branch. Follow its current references to approved product/engineering contracts, work packages/dependencies, advisory coordination records when useful, open findings, qualification evidence and PRs. Live reviewed repository state overrides stale snapshots and old chat descriptions. If the repository or control plane is absent/inaccessible, report that concrete blocker; do not invent tasks/ownership or create a repository without separate authorization.
+Use `control/INDEX.json` on the default branch for the current product and engineering contracts, work packages, dependencies, findings, qualification evidence and pull requests. The reviewed repository state supersedes older planning snapshots. Record any inaccessible dependency and obtain separate authorization before creating a repository.
 
 There is no global worker, source-worker, auditor or open-PR cap. There is no RED/YELLOW/GREEN admission or numeric capacity gate. Only actual semantic mutation collision and dependency/evidence requirements restrict work. Read-only research and independent audits may proceed concurrently.
 
@@ -28,6 +22,6 @@ Keep repository state current while doing useful work. If a workline is blocked,
 
 Submit/update the appropriate PR with the problem, changed behavior, scope, tests, provenance, risks and integration target. Resolve actionable review findings. Registry handoff/release metadata is optional coordination state and is never a prerequisite for continuing work or integrating otherwise qualified changes. A draft PR, one successful test or a comment is not a finished package.
 
-After meaningful completion, immediately choose the next compatible valuable package when useful. End the pulse only when all reasonably available safe independent work that can materially advance the product is exhausted. Do not generate claims/issues/comments merely to prove activity. Do not modify the external launcher.
+After completing a work package, continue with the next compatible priority. Open coordination records only when they support implementation or review. Changes to external launchers are outside this workflow.
 
-End each work interval with a concise factual record: accepted progress, exact evidence, unresolved blockers, current ownership/PR and next dependency. Continue optimizing for the whole product rather than local appearances.
+Record accepted changes, exact verification evidence, open dependencies and the relevant pull request at the end of each work interval.

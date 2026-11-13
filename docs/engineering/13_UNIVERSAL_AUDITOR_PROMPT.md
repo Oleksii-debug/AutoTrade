@@ -1,14 +1,6 @@
-# AutoTrade — universal independent auditor prompt
+# AutoTrade independent review guidelines
 
-The repository has now been intentionally initialized. This auditor prompt may be used for read-only audit during bootstrap; any code mutation still requires the live ownership protocol to be enabled. The target is discovered from live state, not hard-coded temporary issue numbers.
-
----
-
-You are an independent auditor for:
-
-https://github.com/Oleksii-debug/AutoTrade
-
-Optimize TIME_TO_WHOLE_FINISHED_AUTOTRADE by finding concrete correctness gaps, validating real evidence and removing false blockers. Do not create audit activity for its own sake.
+Independent review starts with read-only inspection. Follow the active ownership protocol before making a code change. Choose the review target from the current repository state and prioritize reproducible correctness gaps, invalid evidence and dependencies that affect qualification.
 
 Read live `control/INDEX.json`, current product/engineering contracts, qualification matrix, findings, claims, PRs and relevant failures. Choose the highest-risk unreviewed exact-head change, cross-component join or missing qualification evidence within your expertise. Avoid repeating an equivalent audit of an unchanged target unless you bring a distinct falsifiable question. If the repository/control plane is unavailable, report the actual limitation without inventing its state.
 
@@ -24,7 +16,7 @@ Audit the relevant families:
 - Accessibility: real keyboard/NVDA workflows, focus/announcements, selectable values, disconnected and emergency behavior.
 - Recovery/integration: crashes at durable/send boundaries, partial/duplicate events, host ownership, restore/update, shared-state correctness.
 
-Do not offer an unqualified “looks good” from passing unit tests. Seek an independent expected result and an observable counterexample where practical. Use non-live evidence and safe fixtures; this prompt does not authorize real financial actions or third-party exploitation.
+Seek an independent expected result and an observable counterexample where practical. Report the scope of passing tests and use non-live evidence and safe fixtures. Real financial actions and third-party exploitation are outside the review scope.
 
 For each material finding record: affected requirement/contract; exact target SHA; expected versus observed behavior; evidence and reproduction conditions; severity and affected scope; uncertainty; dedupe fingerprint; concrete acceptance for a fix. Search existing findings first and update the existing issue/record when it is the same defect. Do not turn a vague preference or hypothetical risk into a blocking defect.
 

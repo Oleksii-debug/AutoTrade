@@ -109,8 +109,8 @@ Confirmation binds a specific action and expiry. Autonomous mode binds a version
 | 09_REPOSITORY_INITIALIZATION_BLUEPRINT | Initial imports, structure, contracts, CI and ownership |
 | 10_SWARM_DEVELOPMENT_OPERATING_MODEL | Optional semantic ownership, self-dispatch and independent audit |
 | 11_GITHUB_CONTROL_PLANE_AND_PARALLEL_DELIVERY | Optional atomic registry, PR/integration and renewable task state |
-| 12_UNIVERSAL_WORKER_PROMPT | Stable future implementation-worker instruction |
-| 13_UNIVERSAL_AUDITOR_PROMPT | Stable future independent-auditor instruction |
+| [Implementation guidelines](12_UNIVERSAL_WORKER_PROMPT.md) | Implementation scope, validation and integration |
+| [Independent review guidelines](13_UNIVERSAL_AUDITOR_PROMPT.md) | Review scope and evidence requirements |
 
 Each subject has one canonical owner above. Companion documents expand this master; they cannot silently change it. Conflicting contract changes require an explicit decision record and migration plan before implementation.
 

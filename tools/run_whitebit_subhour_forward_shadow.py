@@ -20,6 +20,7 @@ for dependency_root in (ROOT, ROOT / "research"):
         sys.path.insert(0, str(dependency_root))
 
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
+from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.integrations.market_news_context import (
     MarketContextError, collect_market_context,
 )
@@ -454,20 +455,65 @@ def protect_open_position(state: dict, quote: dict, now: datetime) -> str | None
     return reason
 
 
-def _append_decision(path: Path, value: dict) -> None:
-    """Append one bounded decision record and retain one rotated predecessor."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.is_symlink():
+def _decision_offset(path: Path) -> int:
+    """Locate the end of the last committed record without changing the journal."""
+    rotated = path.with_suffix(path.suffix + ".1")
+    if path.is_symlink() or rotated.is_symlink():
         raise ValueError("decision journal cannot be a symlink")
-    if path.exists() and path.stat().st_size >= MAX_DECISION_JOURNAL_BYTES:
-        rotated = path.with_suffix(path.suffix + ".1")
-        if rotated.exists():
-            rotated.unlink()
-        os.replace(path, rotated)
-    payload = (json.dumps(value, sort_keys=True, separators=(",", ":"),
+    if not path.exists():
+        return 0
+    size = path.stat().st_size
+    if size:
+        with path.open("rb") as stream:
+            stream.seek(-1, os.SEEK_END)
+            if stream.read() != b"\n":
+                raise ValueError("decision journal has an uncommitted legacy suffix")
+    return size
+
+
+def _finish_decision(checkpoint: Path, journal: Path, pending: Path) -> None:
+    """Finish an interrupted publication without replaying a market decision."""
+    if pending.is_symlink() or journal.is_symlink():
+        raise ValueError("decision transaction cannot use symlinks")
+    transaction = json.loads(pending.read_bytes())
+    value = transaction["checkpoint"]
+    event = transaction["event"]
+    offset = transaction["offset"]
+    if (type(offset) is not int or not 0 <= offset < MAX_DECISION_JOURNAL_BYTES
+            or value["schema"] != SCHEMA or event["schema"] != SCHEMA
+            or value["trading_authority"] is not False or event["trading_authority"] is not False
+            or value["network_orders"] is not False or event["network_orders"] is not False):
+        raise ValueError("invalid pending decision transaction")
+    payload = (json.dumps(event, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False) + "\n").encode()
-    with path.open("ab") as stream:
-        stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+    if not journal.exists() and offset != 0:
+        raise ValueError("decision journal is missing before pending append")
+    with journal.open("r+b" if journal.exists() else "x+b") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        if not offset <= size <= offset + len(payload):
+            raise ValueError("unexpected decision journal length")
+        if offset:
+            stream.seek(offset - 1)
+            if stream.read(1) != b"\n":
+                raise ValueError("pending decision has no prior record boundary")
+        stream.seek(offset)
+        existing = stream.read(size - offset)
+        if not payload.startswith(existing):
+            raise ValueError("decision journal conflicts with pending append")
+        stream.write(payload[len(existing):])
+        stream.flush()
+        os.fsync(stream.fileno())
+    atomic_write_json(checkpoint, value)
+    pending.unlink()
+
+
+def _publish_decision(checkpoint: Path, journal: Path, pending: Path,
+                      value: dict, event: dict) -> None:
+    if pending.exists() or pending.is_symlink():
+        raise ValueError("previous decision transaction is still pending")
+    offset = _decision_offset(journal)
+    atomic_write_json(pending, {"checkpoint": value, "event": event, "offset": offset})
+    _finish_decision(checkpoint, journal, pending)
 
 
 def process_completed_bar(state: dict, history: list[dict], *, quote: dict,
@@ -632,7 +678,19 @@ def main(argv=None) -> int:
     checkpoint = state_dir / "checkpoint.json"; stop = args.stop_file.resolve(strict=False)
     try: stop.relative_to(state_dir)
     except ValueError: parser.error("stop-file must remain inside state-dir")
-    stop.unlink(missing_ok=True); client = WhiteBitPublicClient(); state = None
+    with ResourceLock(state_dir / "forward-shadow.lock"):
+        return _run(args, checkpoint, stop)
+
+
+def _run(args, checkpoint: Path, stop: Path) -> int:
+    state_dir = checkpoint.parent
+    journal = state_dir / "decisions.jsonl"
+    pending = state_dir / "pending-decision.json"
+    if pending.exists() or pending.is_symlink():
+        _finish_decision(checkpoint, journal, pending)
+    stop.unlink(missing_ok=True)
+    client = WhiteBitPublicClient()
+    state = None
     if checkpoint.is_file():
         state = json.loads(checkpoint.read_bytes()).get("state")
         if type(state) is dict:
@@ -641,7 +699,10 @@ def main(argv=None) -> int:
             state.setdefault("fees", "0")
             state.setdefault("funding", "0")
     while not stop.exists():
+        if _decision_offset(journal) >= MAX_DECISION_JOURNAL_BYTES:
+            os.replace(journal, journal.with_suffix(journal.suffix + ".1"))
         now = datetime.now(UTC); started = monotonic(); error = None
+        event = None
         try:
             protective_exit = None
             if state is not None and state["position"] is not None:
@@ -652,14 +713,14 @@ def main(argv=None) -> int:
                 if protective_exit is not None:
                     review = next_state.get("wave_analysis")
                     closed = next_state["closed_cycles"]
-                    _append_decision(state_dir / "decisions.jsonl", {
+                    event = {
                         "schema": SCHEMA, "event": "PROTECTIVE_EXIT", "observed_at": now.isoformat(),
                         "position_open": False, "episode": next_state["last_episode"],
                         "wave_analysis": (review if review and review["closed_through_cycle"] == closed
                                           else None),
                         "closed_cycles": closed, "net_pnl": next_state["net_pnl"],
                         "network_orders": False, "trading_authority": False,
-                    })
+                    }
                     state = next_state
             expected_epoch = int(now.timestamp()) // STEP_SECONDS * STEP_SECONDS - STEP_SECONDS
             if protective_exit is not None:
@@ -704,9 +765,9 @@ def main(argv=None) -> int:
                     next_state, depth_database=args.depth_database,
                     boundary=history[-1]["closed_at"], quote=quote, now=now,
                     contiguous=next_state["last_bar_open_epoch"] == previous_epoch + STEP_SECONDS)
-                pending = next_state["execution_outcomes"]["pending"]
-                current_observation = (pending[-1] if pending and
-                    pending[-1]["entry_boundary_epoch"] == int(history[-1]["closed_at"].timestamp())
+                pending_outcomes = next_state["execution_outcomes"]["pending"]
+                current_observation = (pending_outcomes[-1] if pending_outcomes and
+                    pending_outcomes[-1]["entry_boundary_epoch"] == int(history[-1]["closed_at"].timestamp())
                     else None)
                 closed = next_state["closed_cycles"]
                 review = next_state.get("wave_analysis")
@@ -736,7 +797,6 @@ def main(argv=None) -> int:
                 if "btc_eth_portfolio_observer" in next_state:
                     event["btc_eth_portfolio_observer"] = _record_portfolio_observation(
                         next_state, event, now=datetime.now(UTC), depth_database=args.depth_database)
-                _append_decision(state_dir / "decisions.jsonl", event)
                 state = next_state
                 status = "RUNNING"
             else:
@@ -748,7 +808,10 @@ def main(argv=None) -> int:
             "last_cycle_seconds": monotonic() - started, "last_error_class": error,
             "state": state, "network_orders": False, "trading_authority": False,
             "paid_model_calls": 0}
-        atomic_write_json(checkpoint, value)
+        if error is None and event is not None:
+            _publish_decision(checkpoint, journal, pending, value, event)
+        else:
+            atomic_write_json(checkpoint, value)
         if args.once: return 0 if error is None else 2
         delay = args.poll_seconds
         if error is None and state is not None and state["position"] is not None:

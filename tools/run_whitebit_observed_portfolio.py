@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -34,10 +35,11 @@ def new_state(now: datetime) -> dict:
             "network_orders": False, "trading_authority": False, "paid_model_calls": 0}
 
 
-def _market_entries(event: dict):
-    yield "SOL_PERP", event.get("execution_observation"), event.get("execution_outcomes", [])
+def _market_entries(event: dict, markets: tuple[str, ...]):
+    if "SOL_PERP" in markets:
+        yield "SOL_PERP", event.get("execution_observation"), event.get("execution_outcomes", [])
     for market, context in event.get("additional_market_research", {}).items():
-        if market in MARKETS:
+        if market in markets:
             yield market, context.get("observation"), context.get("settled", [])
 
 
@@ -199,7 +201,10 @@ def _report(recent: list[dict]) -> dict:
                                                  if row.get("label_policy") == LABEL_POLICY))}
 
 
-def advance(state: dict, event: dict, *, now: datetime) -> bool:
+def advance(
+    state: dict, event: dict, *, now: datetime, markets: tuple[str, ...] = MARKETS,
+    capacity_check: Callable[[dict], bool] | None = None,
+) -> bool:
     """Settle a prior frozen selection and record a timely new selection."""
     if event.get("schema") != SOURCE_SCHEMA or "processed_bar_open_epoch" not in event:
         return False
@@ -211,7 +216,7 @@ def advance(state: dict, event: dict, *, now: datetime) -> bool:
     if last is not None and boundary <= last:
         return False
     state["last_boundary_epoch"] = boundary
-    entries = list(_market_entries(event))
+    entries = list(_market_entries(event, markets))
     pending = state["pending"]
     if pending is not None and boundary >= pending["due_boundary_epoch"]:
         result = _resolve(pending, entries, boundary, observed) if boundary == pending["due_boundary_epoch"] else None
@@ -219,6 +224,8 @@ def advance(state: dict, event: dict, *, now: datetime) -> bool:
         if result is None:
             state["unmatched_count"] += 1
         else:
+            if capacity_check is not None and result["action"] in ("LONG", "SHORT"):
+                result["observed_capacity_check"] = capacity_check(result)
             state["recent"] = (state["recent"] + [result])[-RECENT_LIMIT:]
             state["settled_count"] += 1
             state["evaluation"] = _report(state["recent"])

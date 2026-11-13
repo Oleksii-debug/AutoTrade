@@ -144,3 +144,38 @@ def test_portfolio_finishes_legacy_hold_without_combining_it_with_new_policy():
     assert state["settled_count"] == 2
     assert state["evaluation"]["hourly"]["complete_windows"] == 0
     assert state["evaluation"]["legacy_hourly"]["complete_windows"] == 0
+
+
+
+def test_two_market_observer_excludes_sol_and_persists_capacity_result():
+    state = new_state(START - timedelta(minutes=1))
+    seed_training(state, "SOL_PERP", 8, long=".02", short="-.01")
+    seed_training(state, "BTC_PERP", 8, long=".01", short="-.01")
+    market_pair = ("BTC_PERP", "ETH_PERP")
+    checks = []
+
+    def check_capacity(row):
+        checks.append(row["market"])
+        return False
+
+    def step(minute, btc=None, settled=()):
+        at = START + timedelta(minutes=minute)
+        event = {
+            "schema": SOURCE_SCHEMA, "processed_bar_open_epoch": int(at.timestamp()) - 900,
+            "observed_at": (at + timedelta(seconds=2)).isoformat(),
+            "execution_observation": observation(minute, "SOL"),
+            "additional_market_research": {"BTC_PERP": {"observation": btc, "settled": settled}},
+        }
+        assert advance(state, event, now=at + timedelta(seconds=3),
+                       markets=market_pair, capacity_check=check_capacity)
+
+    step(0, observation(0, "BTC"))
+    assert state["queued"]["market"] == "BTC_PERP"
+    assert state["queued"]["action"] == "LONG"
+    entry = observation(15, "BTC")
+    step(15, entry)
+    step(45, settled=[outcome(entry, 45)])
+    assert checks == ["BTC_PERP"]
+    assert state["recent"][-1]["observed_capacity_check"] is False
+    assert Decimal(state["recent"][-1]["net_equity_return"]) == Decimal(".006")
+    assert not state["delayed_training"]["SOL_PERP"]["decisions"]

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
@@ -445,3 +446,27 @@ def test_portfolio_checkpoint_schema_error_does_not_mutate_shadow_state():
     assert _record_portfolio_observation(state, {"observed_at": now.isoformat()}, now=now) == {
         "error_class": "PORTFOLIO_CHECKPOINT_SCHEMA_MISMATCH"}
     assert state == before
+
+
+
+def test_btc_eth_portfolio_migration_reuses_its_checkpoint():
+    from tools.run_whitebit_subhour_forward_shadow import _record_portfolio_observation
+    from tools.run_whitebit_observed_portfolio import new_state
+
+    at = datetime(2026, 11, 12, 18, 0, 2, tzinfo=UTC)
+    epoch = int(at.timestamp()) - 2
+    checkpoint = {"portfolio_observer": new_state(at - timedelta(minutes=30)),
+                  "btc_eth_portfolio_observer": new_state(at - timedelta(minutes=15))}
+    checkpoint["btc_eth_portfolio_observer"]["settled_count"] = 7
+    event = {"schema": "autotrade-whitebit-subhour-forward-shadow-v1",
+             "processed_bar_open_epoch": epoch - 900, "observed_at": at.isoformat(),
+             "additional_market_research": {"BTC_PERP": {"observation": {
+                 "entry_boundary_epoch": epoch,
+                 "quote_received_at": (at - timedelta(seconds=1)).isoformat(),
+                 "entry_quote_sha256": "btc",
+             }}}}
+    report = _record_portfolio_observation(checkpoint, event, now=at,
+                                           depth_database=Path("unused.sqlite3"))
+    assert report["settled_count"] == 7
+    assert report["queued"]["market"] == "BTC_PERP"
+    assert checkpoint["portfolio_observer"]["last_boundary_epoch"] is None

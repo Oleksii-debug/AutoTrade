@@ -1,6 +1,7 @@
 """Restart-safe one-second L2 feature tape for WhiteBIT OFI research."""
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -28,6 +29,8 @@ class WhiteBitDepthTapeStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path=path; self.bucket_seconds=bucket_seconds; self.retention_days=retention_days
         self.connection=sqlite3.connect(path, timeout=30)
+        self._market_bucket_counts: Counter[str] | None = None
+        self._count_data_version: int | None = None
         self.connection.execute("PRAGMA journal_mode=WAL"); self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.executescript("""
         CREATE TABLE IF NOT EXISTS buckets(
@@ -107,7 +110,21 @@ class WhiteBitDepthTapeStore:
                 self.connection.execute("DELETE FROM execution_bbo WHERE bucket_epoch<?",
                                         (bucket - EXECUTION_BBO_RETENTION_SECONDS,))
             cutoff=bucket-self.retention_days*86400
-            self.connection.execute("DELETE FROM buckets WHERE bucket_epoch<?",(cutoff,))
+            expired = Counter(
+                expired_market for (expired_market,) in self.connection.execute(
+                    "DELETE FROM buckets WHERE bucket_epoch<? RETURNING market", (cutoff,),
+                )
+            )
+        counts = self._market_bucket_counts
+        if counts is not None:
+            if row is None:
+                counts[market] += 1
+            for expired_market, removed in expired.items():
+                remaining = counts[expired_market] - removed
+                if remaining > 0:
+                    counts[expired_market] = remaining
+                else:
+                    counts.pop(expired_market, None)
 
     def archive_completed_windows(self, markets: tuple[str, ...], *, now_epoch: int) -> int:
         """Keep compact features after the raw one-second tape expires.
@@ -162,12 +179,23 @@ class WhiteBitDepthTapeStore:
         return added
 
     def status(self) -> dict:
-        count,first,last=self.connection.execute(
-            "SELECT COUNT(*),MIN(bucket_epoch),MAX(bucket_epoch) FROM buckets").fetchone()
-        markets={row[0]:row[1] for row in self.connection.execute(
-            "SELECT market,COUNT(*) FROM buckets GROUP BY market ORDER BY market")}
+        # The writer adjusts the counts after commit. A different SQLite
+        # connection invalidates them, so restart/readback stays exact.
+        with self.connection:
+            self.connection.execute("BEGIN")
+            (data_version,) = self.connection.execute("PRAGMA data_version").fetchone()
+            if self._market_bucket_counts is None or data_version != self._count_data_version:
+                self._market_bucket_counts = Counter(dict(self.connection.execute(
+                    "SELECT market,COUNT(*) FROM buckets GROUP BY market",
+                )))
+                self._count_data_version = data_version
+            first, last = self.connection.execute("""
+                SELECT (SELECT MIN(bucket_epoch) FROM buckets),
+                       (SELECT MAX(bucket_epoch) FROM buckets)
+            """).fetchone()
+        markets = dict(sorted(self._market_bucket_counts.items()))
         return {"schema":SCHEMA,"database":str(self.path),"bucket_seconds":self.bucket_seconds,
-            "retention_days":self.retention_days,"bucket_count":count,"first_bucket_epoch":first,
+            "retention_days":self.retention_days,"bucket_count":sum(markets.values()),"first_bucket_epoch":first,
             "last_bucket_epoch":last,"market_bucket_counts":markets,"public_data_only":True,
             "network_orders":False,"trading_authority":False}
 

@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 from threading import Event
 from types import SimpleNamespace
 
@@ -173,6 +174,46 @@ def test_depth_tape_is_restart_safe_and_public_only(tmp_path):
     assert status["market_bucket_counts"] == {"BTC_USDT": 1}
     assert status["public_data_only"] is True
     assert status["trading_authority"] is False
+
+
+def test_depth_status_counts_updates_expiry_rollback_and_other_connections(tmp_path):
+    path = tmp_path / "depth.sqlite3"
+    initial = DepthLocalBook("BTC_USDT", limit=5).apply(
+        parse_depth_message(frame(), market="BTC_USDT", received_at=NOW), generation=1,
+    )
+    store = WhiteBitDepthTapeStore(path, retention_days=1)
+    try:
+        assert store.status()["bucket_count"] == 0
+        store.ingest(initial)
+        store.ingest(initial)
+        store.ingest(replace(initial, market="ETH_USDT"))
+        assert store.status()["market_bucket_counts"] == {"BTC_USDT": 1, "ETH_USDT": 1}
+
+        later = replace(initial, received_at=NOW + timedelta(days=1, seconds=1))
+        store.connection.execute("""
+            CREATE TRIGGER reject_bucket_expiry BEFORE DELETE ON buckets
+            BEGIN SELECT RAISE(ABORT, 'test expiry rejection'); END
+        """)
+        with pytest.raises(sqlite3.IntegrityError, match="test expiry rejection"):
+            store.ingest(later)
+        assert store.status()["bucket_count"] == 2
+        store.connection.execute("DROP TRIGGER reject_bucket_expiry")
+
+        other = WhiteBitDepthTapeStore(path, retention_days=1)
+        try:
+            other.ingest(later)
+            assert store.status()["market_bucket_counts"] == {"BTC_USDT": 1}
+            store.ingest(replace(later, market="SOL_USDT"))
+            status = other.status()
+            assert status["market_bucket_counts"] == {"BTC_USDT": 1, "SOL_USDT": 1}
+            assert status["bucket_count"] == 2
+            assert status["first_bucket_epoch"] == status["last_bucket_epoch"] == int(
+                later.received_at.timestamp()
+            )
+        finally:
+            other.close()
+    finally:
+        store.close()
 
 
 def test_depth_collector_heartbeat_distinguishes_feed_age_from_local_latency(tmp_path, monkeypatch):

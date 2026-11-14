@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 import time
 import unittest
 from unittest.mock import patch
@@ -799,9 +800,24 @@ class DiagnosticJournalTests(unittest.TestCase):
                 max_segment_bytes=1024,
                 max_segments=3,
             )
-            journal.start()
-            time.sleep(0.34)
-            journal.stop()
+            three_heartbeats = Event()
+            append = journal._append_locked
+            heartbeat_count = 0
+
+            def observe(event, *args):
+                nonlocal heartbeat_count
+                append(event, *args)
+                if event == "HEARTBEAT":
+                    heartbeat_count += 1
+                    if heartbeat_count == 3:
+                        three_heartbeats.set()
+
+            with patch.object(journal, "_append_locked", side_effect=observe):
+                journal.start()
+                try:
+                    self.assertTrue(three_heartbeats.wait(10), journal.error_code)
+                finally:
+                    journal.stop()
             first_rows = [
                 json.loads(line)
                 for path in sorted(root.glob("*.jsonl"))

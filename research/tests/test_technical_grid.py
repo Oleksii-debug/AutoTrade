@@ -3,7 +3,7 @@ from decimal import Decimal as D
 import pytest
 
 from research.autotrade_research.strategies.technical_grid import (
-    Candle, Plan, advance, size_plan,
+    CONTINUATION_FAMILIES, Candle, Plan, advance, make_plan, size_plan,
 )
 
 
@@ -57,3 +57,29 @@ def test_hourly_target_eligible_after_two_full_hours_and_spot_fees():
     assert ladder.funding == 0
     assert advance(ladder, candle(101, 106, 100, 105), index=3, **costs)[0] is None
     assert advance(ladder, candle(101, 106, 100, 105), index=4, **costs)[0] == "TARGET"
+
+
+@pytest.mark.parametrize("side", (1, -1))
+def test_breakout_needs_one_completed_follow_through_bar_and_volume(side):
+    def mirrored(bar):
+        if side == 1:
+            return bar
+        return Candle(200 - bar.opened, 200 - bar.low, 200 - bar.high,
+                      200 - bar.close, bar.volume)
+
+    prior = [candle(98, 99, 97, 98), *([candle(100, 101, 99, 100)] * 190)]
+    impulse = candle(100, 104, 99, 103, "2")
+    follow = candle(103, 105, 102, 104)
+    history = [mirrored(bar) for bar in [*prior, impulse, follow]]
+    plan = make_plan(history, CONTINUATION_FAMILIES[0])
+    assert plan is not None
+    assert plan.side == side
+    assert plan.maximum_bars == 48
+    assert make_plan(history, CONTINUATION_FAMILIES[1]).maximum_bars == 192
+    assert side * (plan.levels[0] - plan.levels[1]) > 0
+    assert side * (plan.levels[1] - plan.stop) > 0
+    assert side * (plan.target - plan.levels[0]) > 0
+    inside = mirrored(candle(103, 104, 99, 100))
+    plain = mirrored(candle(100, 104, 99, 103))
+    assert make_plan([*history[:-1], inside], CONTINUATION_FAMILIES[0]) is None
+    assert make_plan([*history[:-2], plain, history[-1]], CONTINUATION_FAMILIES[0]) is None

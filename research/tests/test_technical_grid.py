@@ -46,3 +46,14 @@ def test_quote_touch_zero_volume_and_expiring_entries_do_not_fill():
         assert advance(ladder, bar, index=index, **costs)[0] is None
         assert ladder.filled_levels == 0
     assert advance(ladder, candle(100, 101, 96, 100), index=48, **costs)[0] == "TIME_EXIT"
+
+
+def test_hourly_target_eligible_after_two_full_hours_and_spot_fees():
+    plan = Plan(1, (D(99),), D(95), D(105), 12)
+    ladder = size_plan(plan, D(500), 0, D("0.0002"), D(0), step=60, fee_rate=D("0.001"))
+    costs = dict(adverse=D("0.0002"), funding_per_day=D(0))
+    assert advance(ladder, candle(100, 101, 98, 99), index=1, **costs)[0] is None
+    assert ladder.fees == ladder.basis * D("0.001")
+    assert ladder.funding == 0
+    assert advance(ladder, candle(101, 106, 100, 105), index=3, **costs)[0] is None
+    assert advance(ladder, candle(101, 106, 100, 105), index=4, **costs)[0] == "TARGET"

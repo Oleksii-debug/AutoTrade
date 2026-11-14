@@ -34,14 +34,18 @@ def main(argv=None) -> int:
         inputs[market] = bars
         sources[market] = identity
         intervals.add(interval)
-    if intervals not in ({"1m"}, {"5m"}, {"15m"}):
-        parser.error("use three archives of the same 1m, 5m or 15m cadence")
-    if (args.selective or args.technical_grid) and intervals != {"15m"}:
-        parser.error("the selective and technical grid modes require M15 archives")
+    if intervals not in ({"1m"}, {"5m"}, {"15m"}, {"1h"}):
+        parser.error("use three archives of the same 1m, 5m, 15m or 1h cadence")
+    if args.selective and intervals != {"15m"}:
+        parser.error("selective mode requires M15 archives")
+    if args.technical_grid and intervals not in ({"15m"}, {"1h"}):
+        parser.error("technical grid requires M15 perpetual or H1 spot archives")
+    if not args.technical_grid and intervals == {"1h"}:
+        parser.error("H1 archives require --technical-grid")
     if args.first_level_only and not args.technical_grid:
         parser.error("--first-level-only requires --technical-grid")
     if args.technical_grid:
-        result = evaluate_grid(inputs, first_level_only=args.first_level_only)
+        result = evaluate_grid(inputs, first_level_only=args.first_level_only, spot=intervals == {"1h"})
     else:
         result = evaluate(inputs, step=int(next(iter(intervals))[:-1]), selective=args.selective)
     receipt = {"sources": sources, "result": result}

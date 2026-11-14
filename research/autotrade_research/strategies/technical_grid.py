@@ -13,7 +13,6 @@ from .two_agent_weekly import (
 
 ZERO = Decimal(0)
 BARS_PER_HOUR = 4
-MIN_TARGET_BARS = 2 * BARS_PER_HOUR
 RISK_FRACTION = Decimal("0.005")
 NOTIONAL_CAP = Decimal("0.5")
 
@@ -36,23 +35,26 @@ class Candle:
     volume: Decimal
 
 
-def make_plan(history: list[Candle], family: str) -> Plan | None:
+def make_plan(history: list[Candle], family: str, *, step: int = 15) -> Plan | None:
     """Use a trailing range, directional efficiency and 14-bar true range."""
     if family not in ("RANGE_GRID", "TREND_PULLBACK_GRID"):
         raise ValueError("unknown technical grid family")
-    if len(history) < 193 or not history[-1].volume:
+    hourly = 60 // step
+    longest = 48 * hourly + 1
+    if len(history) < longest or not history[-1].volume:
         return None
     close = history[-1].close
-    recent = history[-48:]
+    recent = history[-12 * hourly:]
     travel = sum(abs(a.close - b.close) for a, b in zip(recent, recent[1:]))
     if not travel:
         return None
     efficiency = abs(recent[0].close - close) / travel
     lower, upper = min(bar.low for bar in recent), max(bar.high for bar in recent)
     width = upper - lower
-    atr_window = history[-15:]
+    atr_period = max(4, 14 * hourly // BARS_PER_HOUR)
+    atr_window = history[-atr_period - 1:]
     atr = sum(max(b.high - b.low, abs(b.high - a.close), abs(b.low - a.close))
-              for a, b in zip(atr_window, atr_window[1:])) / 14
+              for a, b in zip(atr_window, atr_window[1:])) / atr_period
     if atr <= 0:
         return None
     if family == "RANGE_GRID":
@@ -62,15 +64,15 @@ def make_plan(history: list[Candle], family: str) -> Plan | None:
         side = 1 if close < mid else -1
         edge = lower if side == 1 else upper
         levels = (edge + side * width / 4, edge + side * width / 8)
-        stop, target, hold = edge - side * atr / 2, mid, 48
+        stop, target, hold = edge - side * atr / 2, mid, 12 * hourly
     else:
-        bias = close - history[-193].close
-        mean = sum(bar.close for bar in history[-24:]) / 24
+        bias = close - history[-longest].close
+        mean = sum(bar.close for bar in history[-6 * hourly:]) / (6 * hourly)
         side = 1 if bias > 0 else -1
         if abs(bias) < 6 * atr or abs(close - mean) > 2 * atr or side * (close - mean) < 0:
             return None
         levels = (close - side * atr, close - side * 2 * atr)
-        stop, target, hold = close - side * 3 * atr, close + side * 4 * atr, 288
+        stop, target, hold = close - side * 3 * atr, close + side * 4 * atr, 72 * hourly
     if min(*levels, stop, target) <= 0 or side * (close - levels[0]) <= 0:
         return None
     return Plan(side, levels, stop, target, hold)
@@ -88,27 +90,29 @@ class Ladder:
     funding: Decimal = ZERO
     filled_levels: int = 0
     last_fill: int | None = None
+    step: int = 15
+    fee_rate: Decimal = FEE
 
 
 def size_plan(plan: Plan, balance: Decimal, index: int, adverse: Decimal,
-              funding_per_day: Decimal) -> Ladder | None:
+              funding_per_day: Decimal, *, step: int = 15, fee_rate: Decimal = FEE) -> Ladder | None:
     side = plan.side
     stop_fill = plan.stop * (1 - side * adverse)
     # Use taker costs on every leg. Reserve for all adds reaching the stop.
-    unit_risk = sum(side * (price - stop_fill) + FEE * (price + stop_fill)
-                    + funding_per_day * price * plan.maximum_bars / 96
+    unit_risk = sum(side * (price - stop_fill) + fee_rate * (price + stop_fill)
+                    + funding_per_day * price * plan.maximum_bars / (1440 // step)
                     for price in plan.levels)
-    costs = (FEE + adverse) * (plan.levels[0] + plan.target)
+    costs = (fee_rate + adverse) * (plan.levels[0] + plan.target)
     if unit_risk <= 0 or side * (plan.target - plan.levels[0]) <= 2 * costs:
         return None
     quantity = min(balance * RISK_FRACTION / unit_risk,
                    balance * NOTIONAL_CAP / sum(plan.levels))
-    return Ladder(plan, index, quantity, balance)
+    return Ladder(plan, index, quantity, balance, step=step, fee_rate=fee_rate)
 
 
 def _settlement(ladder: Ladder, reference: Decimal, adverse: Decimal) -> tuple[Decimal, Decimal]:
     price = reference * (1 - ladder.plan.side * adverse)
-    exit_fee = ladder.quantity * price * FEE
+    exit_fee = ladder.quantity * price * ladder.fee_rate
     pnl = ladder.plan.side * (ladder.quantity * price - ladder.basis)
     return ladder.initial_balance + pnl - ladder.fees - exit_fee - ladder.funding, exit_fee
 
@@ -124,12 +128,13 @@ def advance(ladder: Ladder, candle: Candle, *, index: int, adverse: Decimal,
     if index - ladder.opened >= plan.maximum_bars:
         return "TIME_EXIT", candle.opened
     if not candle.volume:
-        ladder.funding += ladder.basis * funding_per_day / 96
+        ladder.funding += ladder.basis * funding_per_day / (1440 // ladder.step)
         return None, candle.close
     adverse_wick = candle.low if side > 0 else candle.high
     favorable_wick = candle.high if side > 0 else candle.low
     prior_fills = ladder.filled_levels
-    first_target_index = index + MIN_TARGET_BARS + 1  # A fill can arrive at the bar close.
+    minimum_target_bars = 120 // ladder.step
+    first_target_index = index + minimum_target_bars + 1  # A fill can arrive at the bar close.
     pending = plan.levels[prior_fills:] if first_target_index <= ladder.opened + plan.maximum_bars else ()
     for level in pending:
         if side * (adverse_wick - level) >= 0:
@@ -139,18 +144,18 @@ def advance(ladder: Ladder, candle: Candle, *, index: int, adverse: Decimal,
         ladder.quantity += ladder.quantity_per_level
         cost = ladder.quantity_per_level * level
         ladder.basis += cost
-        ladder.fees += cost * FEE
-    ladder.funding += ladder.basis * funding_per_day / 96
+        ladder.fees += cost * ladder.fee_rate
+    ladder.funding += ladder.basis * funding_per_day / (1440 // ladder.step)
     if side * (adverse_wick - plan.stop) <= 0:
         return "STOP_TOUCH", plan.stop
-    if (ladder.last_fill is not None and index - ladder.last_fill > MIN_TARGET_BARS
+    if (ladder.last_fill is not None and index - ladder.last_fill > minimum_target_bars
             and side * (favorable_wick - plan.target) > 0):
         return "TARGET", plan.target
     return None, candle.close
 
 
 def _replay(markets, start, first, end, family, adverse, funding_per_day,
-            *, first_level_only: bool) -> dict:
+            *, first_level_only: bool, step: int, spot: bool) -> dict:
     balance = peak = INITIAL
     fees = funding = drawdown = ZERO
     marks = []
@@ -160,8 +165,9 @@ def _replay(markets, start, first, end, family, adverse, funding_per_day,
     net_by_exit: dict[str, Decimal] = {}
     ladder = None
     symbol = None
+    history_size = 48 * (60 // step) + 1
     for index in range(first, end + 1):
-        now = start + timedelta(minutes=15 * index)
+        now = start + timedelta(minutes=step * index)
         reference_equity = balance
         if ladder is not None:
             bar = markets[symbol][index]
@@ -172,14 +178,16 @@ def _replay(markets, start, first, end, family, adverse, funding_per_day,
             if ladder is not None:
                 raise AssertionError("position crossed partition")
             break
-        if (ladder is None and balance > 0 and index - first >= 194
+        if (ladder is None and balance > 0 and index - first >= history_size + 1
                 and now.hour % 8 == 0 and now.minute == 0):
             for name, bars in markets.items():
-                plan = make_plan(bars[index - 194:index - 1], family)
-                if plan is not None and index + plan.maximum_bars < end:
+                plan = make_plan(bars[index - history_size - 1:index - 1], family, step=step)
+                if (plan is not None and (not spot or plan.side > 0)
+                        and index + plan.maximum_bars < end):
                     if first_level_only:
                         plan = replace(plan, levels=plan.levels[:1])
-                    ladder = size_plan(plan, balance, index, adverse, funding_per_day)
+                    ladder = size_plan(plan, balance, index, adverse, funding_per_day,
+                                       step=step, fee_rate=Decimal("0.001") if spot else FEE)
                     if ladder:
                         symbol = name
                         break
@@ -213,13 +221,15 @@ def _replay(markets, start, first, end, family, adverse, funding_per_day,
             "filled_levels": sum(episode["filled_levels"] for episode in episodes)}
 
 
-def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = False) -> dict:
-    start, _ = prepare(inputs, step=15)
+def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = False,
+                  spot: bool = False) -> dict:
+    step = 60 if spot else 15
+    start, _ = prepare(inputs, step=step, spot=spot)
     markets = {symbol: [Candle(*(decimal(bar[key]) for key in ("open", "high", "low", "close", "volume")))
                         for bar in bars] for symbol, bars in sorted(inputs.items())}
-    first, train_end, dev_end, last = _aligned_week_cuts(start, len(next(iter(markets.values()))), 15)
-    costs = (("base", BASE_ADVERSE, FUNDING_RESERVE_PER_DAY),
-             ("stress", STRESS_ADVERSE, STRESS_FUNDING_RESERVE_PER_DAY))
+    first, train_end, dev_end, last = _aligned_week_cuts(start, len(next(iter(markets.values()))), step)
+    costs = (("base", BASE_ADVERSE, ZERO if spot else FUNDING_RESERVE_PER_DAY),
+             ("stress", STRESS_ADVERSE, ZERO if spot else STRESS_FUNDING_RESERVE_PER_DAY))
     with localcontext() as context:
         context.prec = 36
         agents = {}
@@ -230,7 +240,7 @@ def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = Fal
                 ("FINAL", dev_end, last, 8),
             ):
                 scores = {name: _replay(markets, start, begin, end, family, adverse, funding,
-                                        first_level_only=first_level_only)
+                                        first_level_only=first_level_only, step=step, spot=spot)
                           for name, adverse, funding in costs}
                 stages[stage] = scores
                 if not _admitted(scores, minimum_trades=minimum):
@@ -238,11 +248,13 @@ def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = Fal
             agents[family] = stages
     result = {"schema": "autotrade-technical-grid-v1", "mode": "TECHNICAL_GRID_WITH_STOPS",
               "final_evaluated": any("FINAL" in stages for stages in agents.values()), "agents": agents,
-              "bar_minutes": 15, "initial_sleeve_equity": str(INITIAL),
+              "bar_minutes": step, "initial_sleeve_equity": str(INITIAL),
               "order_levels": 1 if first_level_only else 2,
               "maximum_modeled_risk_fraction": str(RISK_FRACTION),
               "maximum_notional_fraction": str(NOTIONAL_CAP), "cash_weekly_return": "0",
               "modeled_ohlcv_limit_fills": True, "paid_model_calls": 0, "network_orders": False,
               "automatic_promotion": False}
+    if spot:
+        result["instrument_policy"] = "SPOT_LONG_ONLY_10_BPS_PER_FILL_NO_FUNDING"
     result["result_sha256"] = digest(result)
     return result

@@ -56,11 +56,12 @@ MINUTE_SMOKE = tuple(Candidate("INTRADAY_REVERSAL", minutes, 5, 5)
                      for minutes in (5, 10))
 
 
-def prepare(inputs: dict[str, list[dict]], *, step: int) -> tuple[datetime, tuple[Market, ...]]:
+def prepare(inputs: dict[str, list[dict]], *, step: int, spot: bool = False) -> tuple[datetime, tuple[Market, ...]]:
     """Require the same gapless executable clock for every market."""
-    if len(inputs) != 3 or set(inputs) != {"BTC_PERP", "ETH_PERP", "SOL_PERP"}:
-        raise ValueError("the frozen universe is BTC_PERP, ETH_PERP and SOL_PERP")
-    if step not in (1, 5, 15):
+    suffix = "USDT" if spot else "PERP"
+    if set(inputs) != {f"{base}_{suffix}" for base in ("BTC", "ETH", "SOL")}:
+        raise ValueError("the frozen universe requires BTC, ETH and SOL of one instrument type")
+    if step not in ((60,) if spot else (1, 5, 15)):
         raise ValueError("unsupported bar cadence")
     if any(len(bars) < 4 for bars in inputs.values()):
         raise ValueError("complete OHLCV history is required")

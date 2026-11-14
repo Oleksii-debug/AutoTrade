@@ -7,6 +7,7 @@ from pathlib import Path
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 from research.autotrade_research.strategies.fast_screen import digest
 from research.autotrade_research.strategies.two_agent_weekly import evaluate
+from research.autotrade_research.strategies.technical_grid import evaluate_grid
 from tools.screen_whitebit_trend_regime import authenticated_bars
 
 
@@ -14,8 +15,13 @@ def main(argv=None) -> int:
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, nargs=3, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--selective", action="store_true",
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--selective", action="store_true",
                         help="use the lower-turnover, quarter-sleeve confirmation policy")
+    mode.add_argument("--technical-grid", action="store_true",
+                      help="compare range and trend order ladders with protective stops")
+    parser.add_argument("--first-level-only", action="store_true",
+                        help="remove the second entry level from the technical grid")
     args = parser.parse_args(argv)
     sources = {}
     inputs = {}
@@ -28,11 +34,20 @@ def main(argv=None) -> int:
         inputs[market] = bars
         sources[market] = identity
         intervals.add(interval)
-    if intervals not in ({"1m"}, {"5m"}, {"15m"}):
-        parser.error("use three archives of the same 1m, 5m or 15m cadence")
+    if intervals not in ({"1m"}, {"5m"}, {"15m"}, {"1h"}):
+        parser.error("use three archives of the same 1m, 5m, 15m or 1h cadence")
     if args.selective and intervals != {"15m"}:
-        parser.error("--selective requires M15 archives")
-    result = evaluate(inputs, step=int(next(iter(intervals))[:-1]), selective=args.selective)
+        parser.error("selective mode requires M15 archives")
+    if args.technical_grid and intervals not in ({"15m"}, {"1h"}):
+        parser.error("technical grid requires M15 perpetual or H1 spot archives")
+    if not args.technical_grid and intervals == {"1h"}:
+        parser.error("H1 archives require --technical-grid")
+    if args.first_level_only and not args.technical_grid:
+        parser.error("--first-level-only requires --technical-grid")
+    if args.technical_grid:
+        result = evaluate_grid(inputs, first_level_only=args.first_level_only, spot=intervals == {"1h"})
+    else:
+        result = evaluate(inputs, step=int(next(iter(intervals))[:-1]), selective=args.selective)
     receipt = {"sources": sources, "result": result}
     output = args.output_dir / f"{digest(receipt)}.json"
     atomic_write_json(output, receipt)

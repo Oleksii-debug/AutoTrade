@@ -15,6 +15,7 @@ ZERO = Decimal(0)
 BARS_PER_HOUR = 4
 RISK_FRACTION = Decimal("0.005")
 NOTIONAL_CAP = Decimal("0.5")
+CONTINUATION_FAMILIES = ("CONFIRMED_BREAKOUT_12H", "CONFIRMED_BREAKOUT_48H")
 
 
 @dataclass(frozen=True)
@@ -35,15 +36,52 @@ class Candle:
     volume: Decimal
 
 
+def _confirmed_breakout(history: list[Candle], atr: Decimal, hourly: int,
+                        family: str) -> Plan | None:
+    prior = history[-24 * hourly - 2:-2]
+    impulse, confirmation = history[-2:]
+    upper = max(bar.high for bar in prior)
+    lower = min(bar.low for bar in prior)
+    if impulse.close > upper:
+        side, boundary = 1, upper
+    elif impulse.close < lower:
+        side, boundary = -1, lower
+    else:
+        return None
+    mean_volume = sum(bar.volume for bar in prior) / len(prior)
+    displacement = side * (confirmation.close - boundary)
+    higher_frame = side * (confirmation.close - history[-48 * hourly - 1].close)
+    if (mean_volume <= 0 or impulse.volume < Decimal("1.25") * mean_volume
+            or side * (impulse.close - boundary) < atr / 4
+            or not atr / 2 <= displacement <= 2 * atr
+            or higher_frame < 2 * atr):
+        return None
+    levels = (boundary + side * atr / 4, boundary)
+    stop = boundary - side * Decimal("1.5") * atr
+    target = boundary + side * 4 * atr
+    if min(*levels, stop, target) <= 0:
+        return None
+    horizon = 12 if family == CONTINUATION_FAMILIES[0] else 48
+    return Plan(side, levels, stop, target, horizon * hourly)
+
+
 def make_plan(history: list[Candle], family: str, *, step: int = 15) -> Plan | None:
-    """Use a trailing range, directional efficiency and 14-bar true range."""
-    if family not in ("RANGE_GRID", "TREND_PULLBACK_GRID"):
+    """Use completed-candle structure and true range to define a fixed plan."""
+    if family not in ("RANGE_GRID", "TREND_PULLBACK_GRID", *CONTINUATION_FAMILIES):
         raise ValueError("unknown technical grid family")
     hourly = 60 // step
     longest = 48 * hourly + 1
     if len(history) < longest or not history[-1].volume:
         return None
     close = history[-1].close
+    atr_period = max(4, 14 * hourly // BARS_PER_HOUR)
+    atr_window = history[-atr_period - 1:]
+    atr = sum(max(b.high - b.low, abs(b.high - a.close), abs(b.low - a.close))
+              for a, b in zip(atr_window, atr_window[1:])) / atr_period
+    if atr <= 0:
+        return None
+    if family in CONTINUATION_FAMILIES:
+        return _confirmed_breakout(history, atr, hourly, family)
     recent = history[-12 * hourly:]
     travel = sum(abs(a.close - b.close) for a, b in zip(recent, recent[1:]))
     if not travel:
@@ -51,12 +89,6 @@ def make_plan(history: list[Candle], family: str, *, step: int = 15) -> Plan | N
     efficiency = abs(recent[0].close - close) / travel
     lower, upper = min(bar.low for bar in recent), max(bar.high for bar in recent)
     width = upper - lower
-    atr_period = max(4, 14 * hourly // BARS_PER_HOUR)
-    atr_window = history[-atr_period - 1:]
-    atr = sum(max(b.high - b.low, abs(b.high - a.close), abs(b.low - a.close))
-              for a, b in zip(atr_window, atr_window[1:])) / atr_period
-    if atr <= 0:
-        return None
     if family == "RANGE_GRID":
         if efficiency > Decimal("0.30") or not 5 * atr <= width <= 16 * atr:
             return None
@@ -166,6 +198,7 @@ def _replay(markets, start, first, end, family, adverse, funding_per_day,
     ladder = None
     symbol = None
     history_size = 48 * (60 // step) + 1
+    decision_hours = 1 if family in CONTINUATION_FAMILIES else 8
     for index in range(first, end + 1):
         now = start + timedelta(minutes=step * index)
         reference_equity = balance
@@ -179,7 +212,7 @@ def _replay(markets, start, first, end, family, adverse, funding_per_day,
                 raise AssertionError("position crossed partition")
             break
         if (ladder is None and balance > 0 and index - first >= history_size + 1
-                and now.hour % 8 == 0 and now.minute == 0):
+                and now.hour % decision_hours == 0 and now.minute == 0):
             for name, bars in markets.items():
                 plan = make_plan(bars[index - history_size - 1:index - 1], family, step=step)
                 if (plan is not None and (not spot or plan.side > 0)
@@ -222,7 +255,7 @@ def _replay(markets, start, first, end, family, adverse, funding_per_day,
 
 
 def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = False,
-                  spot: bool = False) -> dict:
+                  spot: bool = False, continuation: bool = False) -> dict:
     step = 60 if spot else 15
     start, _ = prepare(inputs, step=step, spot=spot)
     markets = {symbol: [Candle(*(decimal(bar[key]) for key in ("open", "high", "low", "close", "volume")))
@@ -233,7 +266,8 @@ def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = Fal
     with localcontext() as context:
         context.prec = 36
         agents = {}
-        for family in ("RANGE_GRID", "TREND_PULLBACK_GRID"):
+        families = CONTINUATION_FAMILIES if continuation else ("RANGE_GRID", "TREND_PULLBACK_GRID")
+        for family in families:
             stages = {}
             for stage, begin, end, minimum in (
                 ("TRAIN", first, train_end, 24), ("DEVELOPMENT", train_end, dev_end, 8),
@@ -256,5 +290,7 @@ def evaluate_grid(inputs: dict[str, list[dict]], *, first_level_only: bool = Fal
               "automatic_promotion": False}
     if spot:
         result["instrument_policy"] = "SPOT_LONG_ONLY_10_BPS_PER_FILL_NO_FUNDING"
+    if continuation:
+        result["mode"] = "CONFIRMED_BREAKOUT_RETEST_WITH_STOPS"
     result["result_sha256"] = digest(result)
     return result

@@ -20,6 +20,8 @@ def main(argv=None) -> int:
                         help="use the lower-turnover, quarter-sleeve confirmation policy")
     mode.add_argument("--technical-grid", action="store_true",
                       help="compare range and trend order ladders with protective stops")
+    mode.add_argument("--confirmed-breakout", action="store_true",
+                      help="compare 12- and 48-hour initial breakout retest ladders")
     parser.add_argument("--first-level-only", action="store_true",
                         help="remove the second entry level from the technical grid")
     args = parser.parse_args(argv)
@@ -38,14 +40,16 @@ def main(argv=None) -> int:
         parser.error("use three archives of the same 1m, 5m, 15m or 1h cadence")
     if args.selective and intervals != {"15m"}:
         parser.error("selective mode requires M15 archives")
-    if args.technical_grid and intervals not in ({"15m"}, {"1h"}):
-        parser.error("technical grid requires M15 perpetual or H1 spot archives")
-    if not args.technical_grid and intervals == {"1h"}:
-        parser.error("H1 archives require --technical-grid")
+    grid_mode = args.technical_grid or args.confirmed_breakout
+    if grid_mode and intervals not in ({"15m"}, {"1h"}):
+        parser.error("grid modes require M15 perpetual or H1 spot archives")
+    if not grid_mode and intervals == {"1h"}:
+        parser.error("H1 archives require a grid mode")
     if args.first_level_only and not args.technical_grid:
         parser.error("--first-level-only requires --technical-grid")
-    if args.technical_grid:
-        result = evaluate_grid(inputs, first_level_only=args.first_level_only, spot=intervals == {"1h"})
+    if grid_mode:
+        result = evaluate_grid(inputs, first_level_only=args.first_level_only,
+                               spot=intervals == {"1h"}, continuation=args.confirmed_breakout)
     else:
         result = evaluate(inputs, step=int(next(iter(intervals))[:-1]), selective=args.selective)
     receipt = {"sources": sources, "result": result}

@@ -317,7 +317,8 @@ def collect_whitebit_history(
         # inclusive candle span instead of the last open timestamp alone.
         query_end = window.start + window.limit * INTERVAL_SECONDS[interval]
         page_path = work / "pages" / f"{index:06d}.json"
-        if page_path.exists():
+        cached = page_path.exists()
+        if cached:
             batch = _load_page(
                 page_path, index=index, market=market, interval=interval,
                 start=window.start, end=query_end, limit=window.limit,
@@ -328,15 +329,16 @@ def collect_whitebit_history(
                 start=window.start, end=query_end, limit=window.limit,
                 max_attempts=max_attempts, sleeper=sleeper,
             )
+        _validate_page(
+            batch, start=window.start, interval=interval,
+            count=window.limit, cutoff=cutoff,
+        )
+        if not cached:
             _write_immutable(
                 page_path,
                 _page_envelope(index, batch, start=window.start,
                                end=query_end, limit=window.limit),
             )
-        _validate_page(
-            batch, start=window.start, interval=interval,
-            count=window.limit, cutoff=cutoff,
-        )
         accepted.append(batch)
         page_records.append({
             "index": index,

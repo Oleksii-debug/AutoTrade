@@ -220,7 +220,13 @@ class WhiteBitHistoricalTests(unittest.TestCase):
         class Partial(Client):
             def klines(self, market, *, interval, start=None, end, limit, training):
                 self.calls.append((market, interval, start, end, limit, training))
-                return batch(end - limit * 3600, limit - 1, interval=interval)
+                complete = batch(end - limit * 3600, limit, interval=interval)
+                response = json.loads(complete.raw)
+                response["result"].pop()
+                return parse_klines(
+                    json.dumps(response).encode(), market, interval, NOW,
+                    source_uri=complete.source_uri, requested_limit=limit, end=end, training=True,
+                )
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -231,6 +237,25 @@ class WhiteBitHistoricalTests(unittest.TestCase):
                     page_limit=2, now=NOW,
                 )
             self.assertEqual(list(root.rglob("*.ohlcv.csv")), [])
+            self.assertEqual(list(root.rglob("000000.json")), [])
+
+            resumed = Client()
+            result = collect_whitebit_history(
+                market="BTC_USDT", interval="1h", start=START,
+                end=START + 3600, output=root, client=resumed,
+                page_limit=2, now=NOW,
+            )
+            self.assertEqual(len(resumed.calls), 1)
+            self.assertEqual(result["row_count"], 2)
+
+            cached = Client()
+            repeated = collect_whitebit_history(
+                market="BTC_USDT", interval="1h", start=START,
+                end=START + 3600, output=root, client=cached,
+                page_limit=2, now=NOW,
+            )
+            self.assertEqual(cached.calls, [])
+            self.assertEqual(repeated, result)
 
 
 if __name__ == "__main__":

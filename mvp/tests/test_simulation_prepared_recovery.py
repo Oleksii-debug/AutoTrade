@@ -23,7 +23,7 @@ AFTER_LEASE = "2026-09-30T12:01:01Z"
 
 
 class SimulationPreparedRecoveryTests(unittest.TestCase):
-    def test_prepared_only_restart_waits_for_lease_then_durably_becomes_unknown(self):
+    def test_prepared_only_restart_waits_for_lease_then_durably_blocks_unsent_attempt(self):
         original_append = GuardedDispatcher._append
 
         def crash_after_prepared(self, **kwargs):
@@ -73,6 +73,7 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(len(reservations.active()), 1)
             self.assertEqual(reservations.active()[0].state, "WORKING")
+            reservation_id = reservations.active()[0].reservation_id
             operator = inspect_canonical_simulation(directory)["status"]
             self.assertEqual(operator["status"], "needs_recovery")
             self.assertEqual(operator["session_status"], "UNKNOWN")
@@ -88,12 +89,13 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                 episode_id="prepared-crash",
                 now=AFTER_LEASE,
             )
-            self.assertEqual(recovered["status"], "UNKNOWN")
+            self.assertEqual(recovered["status"], "BLOCKED")
             self.assertEqual(
                 recovered["reason"],
-                "prepared_owner_lease_expired_without_send_evidence",
+                "prepared_owner_lease_expired_before_send",
             )
             self.assertTrue(recovered["resumed"])
+            self.assertTrue(recovered["reconciled"])
             self.assertEqual(recovered["new_outbound_requests"], 0)
             self.assertEqual(
                 [
@@ -102,16 +104,16 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                         "submission_attempt"
                     )
                 ],
-                ["SubmissionPrepared", "SubmissionUnknown"],
+                ["SubmissionPrepared", "SubmissionBlocked"],
             )
             reservations.refresh()
-            self.assertEqual(len(reservations.active()), 1)
-            self.assertEqual(reservations.active()[0].state, "WORKING")
+            self.assertEqual(reservations.active(), ())
+            self.assertEqual(reservations.get(reservation_id).state, "REJECTED")
             operator = inspect_canonical_simulation(directory)["status"]
-            self.assertEqual(operator["status"], "needs_recovery")
-            self.assertEqual(operator["session_status"], "UNKNOWN")
-            self.assertFalse(operator["reconciled"])
-            self.assertEqual(len(operator["active_reservations"]), 1)
+            self.assertEqual(operator["status"], "completed")
+            self.assertEqual(operator["session_status"], "BLOCKED")
+            self.assertTrue(operator["reconciled"])
+            self.assertEqual(operator["active_reservations"], [])
 
             again = run_canonical_simulation(
                 BUY,
@@ -119,7 +121,7 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                 episode_id="prepared-crash",
                 now="2026-09-30T12:02:00Z",
             )
-            self.assertEqual(again["status"], "UNKNOWN")
+            self.assertEqual(again["status"], "BLOCKED")
             self.assertEqual(again["new_outbound_requests"], 0)
             self.assertEqual(
                 [
@@ -128,7 +130,7 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                         "submission_attempt"
                     )
                 ],
-                ["SubmissionPrepared", "SubmissionUnknown"],
+                ["SubmissionPrepared", "SubmissionBlocked"],
             )
 
     def test_sending_only_restart_durably_becomes_unknown_without_transport(self):

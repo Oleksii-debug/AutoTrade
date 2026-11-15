@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import book_equity_fill, book_external_cash_flow
+from .accounting import book_equity_fill, book_external_cash_flow, canonical_transaction
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import (
     GuardedDispatcher,
@@ -34,6 +34,10 @@ from .exact_decimal import (
     canonical_decimal_text, exact_add, exact_multiply,
     parse_bounded_exact_decimal,
 )
+from .fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
 from .lifecycle_cost import (
     LifecycleCostComponent,
     LifecycleCostProfile,
@@ -46,6 +50,7 @@ from .provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
     commit_order_fill_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
 from .reconciliation import (
     ProviderFillEvidence,
@@ -1042,6 +1047,64 @@ def _reconcile(provider: SimulatedProvider, economic: DurableProviderEconomicBoo
     return result, snapshot
 
 
+def _require_simulation_fill_transaction(
+    store, economic, *, episode_id, result, completed_sequence,
+):
+    """Verify the retained execution binding, including older simulation journals."""
+    transactions = economic.transactions
+    fill_id, order_id = result.get("fill_id"), result.get("order_id")
+    if (len(transactions) != 2 or type(fill_id) is not str or not fill_id
+            or type(order_id) is not str or not order_id):
+        raise ValueError("completed simulation fill is not durably evidenced")
+    transaction = transactions[1]
+    if (transaction.reverses_transaction_id is not None
+            or transaction.corrects_transaction_id is not None):
+        raise ValueError("completed simulation fill transaction was corrected")
+    bindings = JournalStore.load_events_by_aggregate_type(
+        store, "provider_fill_financial_binding",
+    )
+    if not bindings:
+        if (transaction.cause_event_id != fill_id
+                or transaction.transaction_id != _uuid("fill-transaction", episode_id)):
+            raise ValueError("completed simulation fill has no durable execution binding")
+        return transaction
+    if len(bindings) != 1:
+        raise ValueError("completed simulation fill has conflicting execution bindings")
+    event = bindings[0]
+    payload = event["payload"]
+    if type(payload) is not dict:
+        raise ValueError("completed simulation fill execution binding differs")
+    request = payload.get("request")
+    scope = {
+        "provider_id": PROVIDER, "account_id": ACCOUNT, "environment": ENVIRONMENT,
+        "provider_execution_id": fill_id,
+    }
+    if (
+        event["event_type"] != "ProviderFillFinancialPlanBound"
+        or event["aggregate_version"] != 1
+        or event["journal_sequence"] >= completed_sequence
+        or payload_digest(payload) != event["payload_hash"]
+        or type(request) is not dict or payload_digest(request) != payload.get("request_digest")
+        or any(payload.get(key) != value or request.get(key) != value for key, value in scope.items())
+        or request.get("reservation_id") != _uuid("reservation", episode_id)
+        or request.get("intent_id") != _uuid("intent", episode_id)
+        or request.get("transaction_id") != transaction.transaction_id
+        or request.get("transaction_digest") != payload_digest(canonical_transaction(transaction))
+        or not transaction.transaction_id.startswith("provider-fill:")
+        or transaction.cause_event_id != (
+            f"provider:{PROVIDER}:environment:{ENVIRONMENT}:account:{ACCOUNT}:execution:{fill_id}"
+        )
+    ):
+        raise ValueError("completed simulation fill execution binding differs")
+    for key in ("projected_fill", "provider_fill"):
+        evidence = request.get(key)
+        if (type(evidence) is not dict or evidence.get("client_order_id") != order_id
+                or evidence.get("provider_execution_id") != fill_id
+                or payload_digest(evidence) != request.get(f"{key}_digest")):
+            raise ValueError("completed simulation execution evidence differs")
+    return transaction
+
+
 def run_canonical_simulation(
     prices: list[str], state_dir: str | Path, *, episode_id: str,
     now: str | None = None, fault_after_send: bool = False,
@@ -1197,6 +1260,10 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 if result != expected:
                     raise ValueError("completed RISK_REJECTED differs from durable zero-wire facts")
             elif result.get("status") == "FILL_RECONCILED_ORDER_UNCONFIRMED":
+                transaction = _require_simulation_fill_transaction(
+                    store, economic, episode_id=episode_id, result=result,
+                    completed_sequence=prior[1]["journal_sequence"],
+                )
                 artifacts = ArtifactStore(root / "artifacts")
                 settlements = DurableSettlementBook(
                     store,
@@ -1210,7 +1277,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 obligations = settlements.obligations
                 if (
                     len(obligations) != 1
-                    or obligations[0].cause_event_id != result.get("fill_id")
+                    or obligations[0].cause_event_id != transaction.cause_event_id
+                    or obligations[0].source_transaction_id != transaction.transaction_id
                     or obligations[0].amount >= 0
                 ):
                     raise ValueError(
@@ -1533,6 +1601,10 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "price": price_text, "instrument": INSTRUMENT,
     })
     admission_id = _uuid("admission", episode_id)
+    risk_intent = RiskIntent.create(
+        symbol=INSTRUMENT, side="BUY", quantity=quantity_text,
+        price=price_text, expected_state_version=1,
+    )
     admission = authority.admit(
         command_id=_uuid("financial-command", episode_id),
         idempotency_key=_uuid("financial-command", episode_id),
@@ -1541,10 +1613,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
         instrument_version=1, action="ORDER.SUBMIT", notional=amount_text,
         capability_snapshot_id="simulated-capability-v1",
-        risk_intent=RiskIntent.create(
-            symbol=INSTRUMENT, side="BUY", quantity=quantity_text,
-            price=price_text, expected_state_version=1,
-        ),
+        risk_intent=risk_intent,
         risk_context=context, risk_policy=policy, risk_valid_until=future,
         reservation_book=reservations,
         reservation_id=_uuid("reservation", episode_id),
@@ -1606,25 +1675,56 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "reconciled": False, "resumed": False,
             "new_outbound_requests": provider.outbound_request_count,
         }
-    if dispatch.response.get("outcome") != "ACKNOWLEDGED":
+    acknowledgement = dispatch.response
+    if acknowledgement.get("outcome") != "ACKNOWLEDGED":
         raise ValueError("simulated send did not acknowledge; reconciliation required")
     fills = provider.activity_fills()
     if len(fills) != 1:
         raise ValueError("acknowledgement is not a fill; reconciliation required")
     fill = fills[0]
+    acknowledged_order_id = acknowledgement.get("provider_order_id")
+    if (
+        type(acknowledged_order_id) is not str or not acknowledged_order_id
+        or acknowledgement.get("client_order_id") != dispatch.client_order_id
+        or fill.get("order_ref") != acknowledged_order_id
+    ):
+        raise ValueError("simulated fill does not match its acknowledged order")
     fee = fill["fees"][0]
-    fill_transaction = book_equity_fill(
-        transaction_id=_uuid("fill-transaction", episode_id),
-        cause_event_id=fill["provider_execution_id"],
+    provider_fill = ProviderFillEvidence.create(
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_execution_id=fill["provider_execution_id"],
+        client_order_id=dispatch.client_order_id,
         instrument=fill["instrument_version"],
-        settlement_currency="USD",
-        side=fill["side"],
         quantity=fill["last_quantity"]["value"],
         price=fill["last_price"],
-        fee=fee["amount"],
+        fee_amount=fee["amount"],
         fee_currency=fee["currency"],
-        economic_effective_at=fill["trade_time"],
-        economic_order_key=f"provider:{PROVIDER}:execution:{fill['provider_execution_id']}",
+        trade_time=fill["trade_time"],
+        side=fill["side"],
+        evidence_refs=(
+            f"simulated:provider-execution:{fill['provider_execution_id']}",
+        ),
+    )
+    projected_fill = ProjectedFillEvidence.create(
+        fill_id=_uuid("projected-fill", episode_id),
+        provider_execution_id=provider_fill.provider_execution_id,
+        intent_id=intent_id,
+        client_order_id=dispatch.client_order_id,
+        side=risk_intent.side,
+        quantity=risk_intent.quantity,
+        price=risk_intent.price,
+    )
+    reservation_id = _uuid("reservation", episode_id)
+    financial_plan = build_provider_fill_financial_plan(
+        book=economic,
+        provider_id=PROVIDER,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=INSTRUMENT,
+        settlement_currency="USD",
+        reservation_snapshot=reservations.get(reservation_id),
         observed_at=fill["receipt_time"],
     )
     trade_point = datetime.fromisoformat(
@@ -1637,20 +1737,24 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         settlement_date=settlement_date,
     )
     settlement_obligation = equity_cash_obligation_from_transaction(
-        fill_transaction,
+        financial_plan.transaction,
         obligation_id=_uuid("settlement-obligation", episode_id),
         instrument=INSTRUMENT,
         settlement_currency="USD",
         settlement_date=settlement_date,
         rule_binding=settlement_rule,
     )
-    commit_economic_batch_with_reservation_consumption(
-        economic, reservations,
+    commit_provider_fill_with_reservation_consumption(
+        economic,
+        reservations,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
-        reservation_id=_uuid("reservation", episode_id),
-        usage={"CASH:USD": required_text},
-        transactions=(fill_transaction,),
+        reservation_id=reservation_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=INSTRUMENT,
+        settlement_currency="USD",
+        observed_at=fill["receipt_time"],
         committed_at=timestamp,
         settlement_book=settlements,
         settlement_obligations=(settlement_obligation,),

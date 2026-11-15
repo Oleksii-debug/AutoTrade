@@ -179,6 +179,35 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             )
             self.assertEqual(store.load_events_by_aggregate_type("submission_attempt"), [])
 
+    def test_buy_rejects_mismatched_fill_quantity_before_bookkeeping(self):
+        original = simulation_module.SimulatedProvider.activity_fills
+
+        def short_fill(provider):
+            return tuple(
+                {**fill, "last_quantity": {**fill["last_quantity"], "value": "0.5"}}
+                for fill in original(provider)
+            )
+
+        with TemporaryDirectory() as directory:
+            with patch.object(simulation_module.SimulatedProvider, "activity_fills", short_fill):
+                with self.assertRaisesRegex(ValueError, "fill quantity does not match projection"):
+                    run_canonical_simulation(BUY, directory, episode_id="short-fill", now=NOW)
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
+            )
+            self.assertEqual(len(book.transactions), 1)
+            self.assertEqual(book.cash("USD"), Decimal("1000"))
+            self.assertEqual(book.position(INSTRUMENT), Decimal("0"))
+            self.assertEqual(store.load_events_by_aggregate_type("provider_fill_financial_binding"), [])
+            self.assertEqual(store.load_events_by_aggregate_type("settlement_book"), [])
+            self.assertEqual(
+                [event["event_type"] for event in
+                 store.load_events("canonical_simulation_session", "single-episode")],
+                ["SimulationSessionStarted"],
+            )
+
     def test_buy_reconciles_durable_economics_and_resume_sends_nothing(self):
         with TemporaryDirectory() as directory:
             first = run_canonical_simulation(BUY, directory, episode_id="buy", now=NOW)
@@ -256,8 +285,14 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(len(settlements.obligations), 1)
             obligation = settlements.obligations[0]
             self.assertLess(obligation.amount, Decimal("0"))
-            self.assertEqual(obligation.cause_event_id, first["fill_id"])
-            self.assertIsNotNone(obligation.source_transaction_id)
+            self.assertEqual(
+                obligation.cause_event_id,
+                f"provider:{PROVIDER}:environment:{ENVIRONMENT}:account:{ACCOUNT}:"
+                f"execution:{first['fill_id']}",
+            )
+            self.assertEqual(
+                obligation.source_transaction_id, binding_request["transaction_id"]
+            )
             self.assertIsNotNone(obligation.rule_binding)
             self.assertTrue(
                 any(

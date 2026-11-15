@@ -27,7 +27,10 @@ from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
 from .persistence import JournalStore
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .reconciliation_journal import load_latest_reconciliation_checkpoint
-from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _uuid
+from .simulation_session import (
+    ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER,
+    _require_simulation_fill_transaction, _uuid,
+)
 from research.autotrade_research.artifacts.resource_lock import ResourceLock, ResourceLockBusyError
 
 
@@ -484,15 +487,13 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         _require_complete_reconciliation(reconciliation, cash=cash, position=position, fill_id=fill_id)
         if is_fill:
             if (result["decision"] != "BUY" or position <= 0
-                    or type(fill_id) is not str or not fill_id
-                    or type(result.get("order_id")) is not str or not result["order_id"]
-                    or book.transactions[1].cause_event_id != fill_id
-                    or book.transactions[1].transaction_id != _uuid("fill-transaction", episode_id)
-                    or book.transactions[1].reverses_transaction_id is not None
-                    or book.transactions[1].corrects_transaction_id is not None
                     or reconciliation["journal_sequence"] <= max(event["journal_sequence"] for event in events
                         if event["aggregate_type"] == "economic_book")):
                 raise ValueError("completed simulation fill is not durably evidenced")
+            _require_simulation_fill_transaction(
+                store, book, episode_id=episode_id, result=result,
+                completed_sequence=completed["journal_sequence"],
+            )
             _require_completed_send(events, episode_id=episode_id, order_id=result["order_id"])
             admission = _require_recorded_admission(events, episode_id=episode_id, outcome="ADMITTED")
             prepared = next(event for event in events if event["event_type"] == "SubmissionPrepared")

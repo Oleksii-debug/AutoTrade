@@ -7,7 +7,9 @@ It is a development fallback surface, not NVDA release qualification.
 
 from __future__ import annotations
 
+import math
 from typing import Any
+import unicodedata
 
 
 STATE_TEXT = {
@@ -21,13 +23,51 @@ STATE_TEXT = {
 }
 
 
+def _plain_text(value: Any, default: str = "Unavailable") -> str:
+    """Render only inert built-in scalar values.
+
+    The accessibility fallback is an operator-facing failure surface. It must
+    remain readable even when upstream state is malformed, and it must not call
+    caller-controlled __str__ implementations while trying to explain that
+    malformed state.
+    """
+
+    if type(value) is str:
+        if not value or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for char in value
+        ):
+            return default
+        return value
+    if type(value) is int:
+        return str(value)
+    if type(value) is float:
+        return str(value) if math.isfinite(value) else default
+    if type(value) is bool:
+        return "true" if value else "false"
+    return default
+
+
+def _dict_get_exact(mapping: Any, key: str, default: Any = None) -> Any:
+    """Read an exact string key without invoking caller-defined key equality."""
+
+    if type(mapping) is not dict or type(key) is not str:
+        return default
+    for candidate, value in mapping.items():
+        if type(candidate) is str and candidate == key:
+            return value
+    return default
+
+
+def _dict_has_exact_key(mapping: Any, key: str) -> bool:
+    sentinel = object()
+    return _dict_get_exact(mapping, key, sentinel) is not sentinel
+
+
 def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable") -> str:
-    if mapping is None:
+    if type(mapping) is not dict:
         return default
-    value = mapping.get(key)
-    if value is None:
-        return default
-    return str(value)
+    return _plain_text(_dict_get_exact(mapping, key), default)
 
 
 def _replay_verification_text(value: Any) -> str:
@@ -38,13 +78,113 @@ def _replay_verification_text(value: Any) -> str:
     return "unavailable"
 
 
+def accessible_status_state(status: Any) -> str:
+    """Return the exact operator state, failing closed to corrupt."""
+
+    if type(status) is not dict:
+        return "corrupt"
+    state = _dict_get_exact(status, "status", "corrupt")
+    if type(state) is not str or state not in STATE_TEXT:
+        return "corrupt"
+
+    # The current canonical producer always declares canonical_journal while
+    # the retained legacy status has no state_format key.  An explicitly
+    # present unknown/malformed format is therefore damaged canonical state,
+    # not permission to downgrade plausible financial fields to the legacy
+    # rendering path.
+    if _dict_has_exact_key(status, "state_format"):
+        state_format = _dict_get_exact(status, "state_format")
+        if type(state_format) is not str or state_format != "canonical_journal":
+            return "corrupt"
+    return state
+
+
+def _reservation_lines(status: dict[str, Any]) -> list[str]:
+    reservations = _dict_get_exact(status, "active_reservations", [])
+    if type(reservations) is not list:
+        return [
+            "Active reservations: unavailable; malformed state",
+            "Action required: inspect or restore reservation state before relying on exposure status",
+        ]
+
+    detail_lines: list[str] = []
+    readable_entries = 0
+    malformed = False
+    for index, item in enumerate(reservations, start=1):
+        if type(item) is not dict:
+            malformed = True
+            detail_lines.append(f"Reservation {index}: unavailable")
+            continue
+        remaining = _dict_get_exact(item, "remaining")
+        state = _plain_text(_dict_get_exact(item, "state"))
+        if type(remaining) is not dict:
+            malformed = True
+            detail_lines.append(
+                f"Reservation {index}: unavailable; state: {state}"
+            )
+            continue
+
+        entry_readable = state != "Unavailable"
+        if not remaining:
+            detail_lines.append(
+                f"Reservation {index}: no remaining resources; state: {state}"
+            )
+        else:
+            for resource, amount in remaining.items():
+                resource_text = _plain_text(resource)
+                amount_text = _plain_text(amount)
+                if (
+                    resource_text == "Unavailable"
+                    or amount_text == "Unavailable"
+                ):
+                    malformed = True
+                    entry_readable = False
+                detail_lines.append(
+                    f"Reserved {resource_text}: {amount_text}; state: {state}"
+                )
+        if entry_readable:
+            readable_entries += 1
+        else:
+            malformed = True
+
+    if malformed:
+        lines = [
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            f"Structurally readable reservation entries: {readable_entries}",
+            "Action required: inspect or restore reservation state before relying on exposure status",
+        ]
+    else:
+        lines = [f"Active reservations: {readable_entries}"]
+    return lines + detail_lines
+
+
+def _cash_bucket_lines(economic_report: dict[str, Any]) -> list[str]:
+    buckets = _dict_get_exact(economic_report, "cash_buckets")
+    if type(buckets) is not dict:
+        return []
+
+    currency = _value(buckets, "currency")
+    return [
+        f"Гроші на рахунку ({currency}): {_value(buckets, 'account_cash')}",
+        f"Розраховані кошти: {_value(buckets, 'settled_cash')}",
+        f"Нерозраховані надходження: {_value(buckets, 'unsettled_receivable')}",
+        f"Нерозраховані зобов'язання: {_value(buckets, 'unsettled_payable')}",
+        f"Зарезервовані кошти: {_value(buckets, 'reserved_cash')}",
+        f"Реально доступні кошти: {_value(buckets, 'available_cash')}",
+        f"Реалізований прибуток/збиток: {_value(economic_report, 'realized_pnl')}",
+        f"Нереалізований прибуток/збиток: {_value(economic_report, 'unrealized_pnl')}",
+    ]
+
+
 def format_accessible_status(
     status: dict[str, Any],
     economic_report: dict[str, Any] | None = None,
 ) -> str:
     """Render a stable, copyable, screen-reader-friendly status summary."""
 
-    state = str(status.get("status", "corrupt"))
+    state = accessible_status_state(status)
+    if type(status) is not dict:
+        status = {}
     lines = [
         "AutoTrade status",
         "Mode: simulation only",
@@ -72,47 +212,66 @@ def format_accessible_status(
         return "\n".join(lines)
 
     if state == "busy":
-        lines.extend(["Replay verification: unavailable",
-                      "Action required: read status again after the current operation",
-                      "Economic edge: unproven"])
+        lines.extend(
+            [
+                "Replay verification: unavailable",
+                "Action required: read status again after the current operation",
+                "Economic edge: unproven",
+            ]
+        )
         return "\n".join(lines)
 
-    replay_verified = status.get("replay_verified")
+    replay_verified = _dict_get_exact(status, "replay_verified")
+    fills = _dict_get_exact(status, "fills", {})
+    recorded_fills = len(fills) if type(fills) is dict else "Unavailable"
     lines.extend(
         [
             f"Replay verification: {_replay_verification_text(replay_verified)}",
             f"Instrument: {_value(status, 'symbol')}",
             f"Initial capital: {_value(status, 'initial_cash')}",
             f"Recorded evidence items: {_value(status, 'evidence_count', '0')}",
-            f"Recorded fills: {len(status.get('fills', {})) if isinstance(status.get('fills'), dict) else 'Unavailable'}",
+            f"Recorded fills: {recorded_fills}",
         ]
     )
 
     if state == "needs_recovery":
-        lines.append("Action required: recovery or reconciliation is needed before trusting current state")
+        lines.append(
+            "Action required: recovery or reconciliation is needed before trusting current state"
+        )
 
-    if status.get("state_format") == "canonical_journal":
-        lines.extend([
-            f"Episode: {_value(status, 'episode_id')}",
-            f"Session outcome: {_value(status, 'session_status')}",
-            *([f"Autonomous episodes: {status['completed_episodes']} of {status['total_episodes']}",
-               f"Model mode: {status.get('mode', 'Unavailable')}"] if 'completed_episodes' in status else []),
-            f"Cash (USD): {_value(status, 'cash')}",
-            f"Position (shares): {_value(status, 'position')}",
-            f"Journal sequence: {_value(status, 'journal_sequence')}",
-            "Order submission during this read: none",
-        ])
-        reservations = status.get("active_reservations", [])
-        lines.append(f"Active reservations: {len(reservations)}")
-        for item in reservations:
-            for resource, amount in item["remaining"].items():
-                lines.append(f"Reserved {resource}: {amount}; state: {item['state']}")
+    state_format = _dict_get_exact(status, "state_format")
+    if type(state_format) is str and state_format == "canonical_journal":
+        lines.extend(
+            [
+                f"Episode: {_value(status, 'episode_id')}",
+                f"Session outcome: {_value(status, 'session_status')}",
+            ]
+        )
+        if _dict_has_exact_key(status, "completed_episodes"):
+            lines.extend(
+                [
+                    f"Autonomous episodes: {_value(status, 'completed_episodes')} of {_value(status, 'total_episodes')}",
+                    f"Model mode: {_value(status, 'mode')}",
+                ]
+            )
+        lines.extend(
+            [
+                f"Cash (USD): {_value(status, 'cash')}",
+                f"Position (shares): {_value(status, 'position')}",
+                f"Journal sequence: {_value(status, 'journal_sequence')}",
+                "Order submission during this read: none",
+            ]
+        )
+        lines.extend(_reservation_lines(status))
         if state == "awaiting_order_reconciliation":
-            lines.append("Action required: confirm the terminal order state; a reconciled fill does not confirm order completion")
-        if status.get("session_status") == "BLOCKED":
+            lines.append(
+                "Action required: confirm the terminal order state; a reconciled fill does not confirm order completion"
+            )
+        session_status = _dict_get_exact(status, "session_status")
+        if type(session_status) is str and session_status == "BLOCKED":
             lines.append(f"Blocked reason: {_value(status, 'reason')}")
 
-    if economic_report is not None:
+    if type(economic_report) is dict:
         lines.extend(
             [
                 f"Final equity: {_value(economic_report, 'final_equity')}",
@@ -120,23 +279,15 @@ def format_accessible_status(
                 f"Total fees: {_value(economic_report, 'total_fees')}",
                 f"Turnover: {_value(economic_report, 'turnover')}",
                 f"Maximum drawdown: {_value(economic_report, 'max_drawdown')}",
-                f"Economic reconciliation: {'passed' if economic_report.get('reconciled') is True else 'not confirmed'}",
+                f"Economic reconciliation: {'passed' if _dict_get_exact(economic_report, 'reconciled') is True else 'not confirmed'}",
             ]
         )
-        if economic_report.get("valuation_status") == "MARK_UNAVAILABLE":
-            lines.append("Portfolio valuation and profit or loss: unavailable; no retained current market mark")
-        if isinstance(economic_report.get("cash_buckets"), dict):
-            buckets = economic_report["cash_buckets"]
-            lines.extend([
-                f"Гроші на рахунку ({buckets['currency']}): {buckets['account_cash']}",
-                f"Розраховані кошти: {buckets['settled_cash']}",
-                f"Нерозраховані надходження: {buckets['unsettled_receivable']}",
-                f"Нерозраховані зобов'язання: {buckets['unsettled_payable']}",
-                f"Зарезервовані кошти: {buckets['reserved_cash']}",
-                f"Реально доступні кошти: {buckets['available_cash']}",
-                f"Реалізований прибуток/збиток: {economic_report['realized_pnl']}",
-                f"Нереалізований прибуток/збиток: {economic_report['unrealized_pnl']}",
-            ])
+        valuation_status = _dict_get_exact(economic_report, "valuation_status")
+        if type(valuation_status) is str and valuation_status == "MARK_UNAVAILABLE":
+            lines.append(
+                "Portfolio valuation and profit or loss: unavailable; no retained current market mark"
+            )
+        lines.extend(_cash_bucket_lines(economic_report))
 
     lines.append("Economic edge: unproven")
     return "\n".join(lines)

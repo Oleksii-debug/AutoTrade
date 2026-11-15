@@ -51,6 +51,7 @@ async def _checkpoint(path: Path, status: dict, *, phase: str,
 
 async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                    checkpoint: Path, markets: tuple[str, ...]) -> None:
+    generations = store.generation_baselines(markets)
     stop = asyncio.Event()
     phases = {market: "STARTING" for market in markets}
     errors: dict[str, str] = {}
@@ -197,6 +198,7 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
         nonlocal flush_timer
         transport = WhiteBitDepthWebSocketTransport(
             market=market, limit=args.depth_limit,
+            initial_generation=generations[market],
             diagnostic=lambda value: diagnostic(market, value),
         )
         async for observation in transport.observations(stop):

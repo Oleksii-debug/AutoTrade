@@ -117,3 +117,21 @@ At 15:00 Budapest, the BTC/ETH shadow account retained 12 complete hours, −0.1
 Windows rolled back a full-volume copy when SOL's authenticated artifact store rejected changed NTFS identities. The second cutover retained that SOL store at its original location and moved the other five worker states and watchdog to D. Both database integrity checks passed. Six workers resumed, the exact prior journal prefix was preserved, and the 15:00 decision was published once on the new root. [Interrupted-decision recovery](https://github.com/Oleksii-debug/AutoTrade/pull/2584) · [Retained SOL store support](https://github.com/Oleksii-debug/AutoTrade/pull/2586)
 
 One additional retrospective diagnostic on the same 14-market, 2,159-hour sample retained the 30-minute minimum, 25% allocation and 26 bps modeled cost. It allowed one trade to exit at the favorable high or low of an eligible M15 candle known afterward. The number of +1% hours increased from 126 to 170, and the average best hourly outcome from +0.420758% to +0.479368%. The maximum stayed at +4.139108%. This diagnostic assumes prior knowledge of the best market, direction and exit price. Intrabar order and executable size are unknown. No new holdout was opened. Result SHA-256 `cf020f6c1a2b5786a27d6452d5c330dd026dc5bdcd618030aa926b566ed7a7a1`.
+
+## Matched fixed exits and live observations
+
+An offline comparison kept all 44 six-market XGBoost DEVELOPMENT entries and sides fixed. It reproduced every 30-minute modeled outcome within `1e-15` and compared fixed exits at 45 and 60 minutes. Allocation was 25% with the original modeled spread, slippage, fees and duration-proportional carry. No model was refit and FINAL remained closed.
+
+| Holding time | Sum of isolated after-cost returns | Median paired change from 30 minutes | Improved entries |
+| --- | ---: | ---: | ---: |
+| 30 minutes | −0.31748% | — | — |
+| 45 minutes | +1.59575% | +1.60 account bps | 24 of 44 |
+| 60 minutes | +1.17188% | −2.42 account bps | 18 of 44 |
+
+Both longer horizons produced nine overlapping pairs involving 15 positions. Their returns describe separate positions under identical initial allocation. No combined account or hourly return is calculated. The result receipt is `fa16f9c6bd90577d2f9a74ed6c55617f780979791384542fce5d06df68eea952`. [Reproduction bundle](https://drive.google.com/file/d/1FsCIjnVMA2FC7-G8C9dYiwM7Kt1k7CRF/view)
+
+SUI contributed much of the improvement. Applying the observed median spread as a sensitivity input to its 21 historical selections on four dates gave +3.05411% summed at 45 minutes and +1.04618% at 30 minutes. Removing the date with the largest improvement left +0.28779% summed across the other dates. The prospective comparator reuses only the original frozen SUI decisions and public WhiteBIT book, requires identical size at both exits, and waits for 20 chronological valid pairs. Its first scheduled Windows run completed at 17:30 Budapest with zero eligible pairs. [Spread sensitivity](https://drive.google.com/file/d/1zXSln4FHXTa8eYjOKcsKo5RuKZgUg8Eu/view) · [Prospective registration](https://drive.google.com/file/d/1YYv131Y_DerTaDSkUU-hmMcZA81C-YMT/view)
+
+At 17:15 Budapest the BTC/ETH virtual observer had 15 complete modeled hours. It compounded −0.495663% after costs, with zero hours at +1% and a best hour of +0.076167%. The size-qualified projection covered 12 all-HOLD hours at 0%. The observer retained 31 settlements and 37 delayed training labels per market. The separate displayed-liquidity comparison had four terminal windows at 17:40, with one usable pair and three coverage or connection-continuity failures. No promotion or real orders occurred.
+
+The historical course worker now commits closed training episodes and pauses before analyzing realized costs, exit reasons and pre-entry vetoes. It restores the saved phase after interruption and starts its next wait interval after analysis. Replay on 60,000 authenticated candles reproduced both original family results, with neither family qualifying at TRAIN. [Restart-safe review](https://github.com/Oleksii-debug/AutoTrade/pull/2590) · [Verified replay](https://drive.google.com/file/d/1x6VsBiD5yvVxeXW1Y-Gv7SQQDIsPOWk0/view)

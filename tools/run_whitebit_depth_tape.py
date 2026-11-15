@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 import signal
@@ -33,6 +34,7 @@ from research.autotrade_research.learning.whitebit_depth_tape import (
 TIMING_WINDOW_SECONDS = 300
 INGEST_BATCH_SIZE = 32
 INGEST_BATCH_SECONDS = 0.05
+INGEST_QUEUE_LIMIT = 512
 
 
 async def _checkpoint(path: Path, status: dict, *, phase: str,
@@ -49,8 +51,9 @@ async def _checkpoint(path: Path, status: dict, *, phase: str,
     return await publish_checkpoint(path, payload, atomic_write_json, offload_write=True)
 
 
-async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
-                   checkpoint: Path, markets: tuple[str, ...]) -> None:
+async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore | None,
+                   checkpoint: Path, markets: tuple[str, ...], *,
+                   offload_sqlite: bool = False) -> None:
     stop = asyncio.Event()
     phases = {market: "STARTING" for market in markets}
     errors: dict[str, str] = {}
@@ -65,7 +68,16 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     last_observation: dict[str, tuple[float, int]] = {}
     observation_gaps: dict[str, float] = {}
     message_lags: dict[str, float] = {}
-    pending_observations: list[DepthBookObservation] = []
+    pending_observations: deque[tuple[float, DepthBookObservation]] = deque()
+    queue_space = asyncio.Event()
+    queue_space.set()
+    executor = ThreadPoolExecutor(max_workers=1) if offload_sqlite else None
+    write_task: asyncio.Task | None = None
+    sqlite_barrier = False
+    last_persisted_received_at: dict[str, datetime] = {}
+    last_commit_at: datetime | None = None
+    inflight_received_at: float | None = None
+    peak_pending_observations = 0
     flush_timer: asyncio.TimerHandle | None = None
     flush_error: Exception | None = None
     max_ingest = 0.0
@@ -74,16 +86,98 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
     expected_wakeup = monotonic()
     loop = asyncio.get_running_loop()
 
-    def flush_observations() -> None:
-        nonlocal added, max_ingest, flush_timer, flush_error
+    async def sqlite_call(operation, *args, **kwargs):
+        if executor is None:
+            return operation(*args, **kwargs)
+        call = loop.run_in_executor(executor, lambda: operation(*args, **kwargs))
+        try:
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            while not call.done():
+                try:
+                    await asyncio.shield(call)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    break
+            raise
+
+    owns_store = store is None
+    if owns_store:
+        opening = asyncio.create_task(sqlite_call(
+            WhiteBitDepthTapeStore,
+            checkpoint.parent / "depth-tape.sqlite3",
+            bucket_seconds=args.bucket_seconds,
+            retention_days=args.retention_days,
+        ))
+        try:
+            store = await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            try:
+                while not opening.done():
+                    try:
+                        await asyncio.shield(opening)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        break
+                if opening.exception() is None:
+                    await sqlite_call(opening.result().close)
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=False)
+            raise
+        except BaseException:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=False)
+            raise
+
+    async def write_batch(batch: list[DepthBookObservation]) -> None:
+        nonlocal added, max_ingest, flush_error, last_commit_at, inflight_received_at
+        started = monotonic()
+        try:
+            await sqlite_call(store.ingest_many, batch)
+        except Exception as exc:
+            flush_error = exc
+            stop.set()
+            queue_space.set()
+            return
+        finally:
+            inflight_received_at = None
+        max_ingest = max(max_ingest, monotonic() - started)
+        added += len(batch)
+        last_commit_at = datetime.now(timezone.utc)
+        for observation in batch:
+            last_persisted_received_at[observation.market] = observation.received_at
+        if pending_observations and not sqlite_barrier:
+            loop.call_soon(flush_observations)
+
+    def next_batch(maximum: int) -> list[DepthBookObservation]:
+        nonlocal inflight_received_at
+        inflight_received_at = pending_observations[0][0]
+        batch = [pending_observations.popleft()[1]
+                 for _ in range(min(maximum, len(pending_observations)))]
+        queue_space.set()
+        return batch
+
+    def flush_observations(*, at_barrier: bool = False, maximum: int | None = None) -> None:
+        nonlocal added, max_ingest, flush_timer, flush_error, write_task
         if flush_timer is not None:
             flush_timer.cancel()
             flush_timer = None
         if not pending_observations or flush_error is not None:
             return
+        if executor is not None:
+            if sqlite_barrier and not at_barrier:
+                return
+            if write_task is None or write_task.done():
+                write_task = asyncio.create_task(write_batch(next_batch(
+                    INGEST_BATCH_SIZE if maximum is None else maximum,
+                )))
+            return
         started = monotonic()
         try:
-            store.ingest_many(pending_observations)
+            store.ingest_many([observation for _, observation in pending_observations])
         except Exception as exc:
             # Timer callbacks run outside the collector task. Propagate their
             # failure through the next heartbeat without retrying this batch.
@@ -94,13 +188,35 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
         added += len(pending_observations)
         pending_observations.clear()
 
-    async def publish(phase: str, *, wakeup_delay: float, archive_time: float) -> None:
-        nonlocal added, max_ingest, checkpoint_write, checkpoint_retries
-        flush_observations()
+    async def drain_observations() -> None:
+        # Freeze the work already received at this boundary. New socket frames
+        # can queue while the SQLite thread commits this finite prefix.
+        if executor is None:
+            flush_observations()
+        else:
+            remaining = len(pending_observations)
+            if write_task is not None:
+                await asyncio.shield(write_task)
+            while remaining > 0 and flush_error is None:
+                count = min(INGEST_BATCH_SIZE, remaining)
+                flush_observations(at_barrier=True, maximum=count)
+                if write_task is not None:
+                    await asyncio.shield(write_task)
+                remaining -= count
         if flush_error is not None:
             raise flush_error
-        status_start = monotonic()
-        status = store.status()
+
+    async def publish(phase: str, *, wakeup_delay: float, archive_time: float) -> None:
+        nonlocal added, max_ingest, checkpoint_write, checkpoint_retries, sqlite_barrier
+        nonlocal peak_pending_observations
+        sqlite_barrier = True
+        try:
+            await drain_observations()
+            status_start = monotonic()
+            status = await sqlite_call(store.status)
+        finally:
+            sqlite_barrier = False
+            flush_observations()
         measured_at = monotonic()
         timing_samples.append((measured_at, {
             "wakeup_delay": wakeup_delay,
@@ -129,6 +245,19 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             "last_wakeup_delay_ms": round(wakeup_delay * 1000, 3),
             "recent_max_ms": {name: round(value * 1000, 3) for name, value in maxima.items()},
             "checkpoint_retries_since_start": checkpoint_retries,
+            **({"sqlite_writer_pending_observations": len(pending_observations),
+                "sqlite_writer_queue_limit": INGEST_QUEUE_LIMIT,
+                "sqlite_writer_peak_pending_observations": peak_pending_observations,
+                "sqlite_writer_oldest_pending_ms": (
+                    round((measured_at - inflight_received_at) * 1000, 3)
+                    if inflight_received_at is not None else
+                    round((measured_at - pending_observations[0][0]) * 1000, 3)
+                    if pending_observations else None
+                ),
+                "last_sqlite_commit_at": last_commit_at.isoformat() if last_commit_at else None,
+                "last_persisted_received_at": {
+                    market: at.isoformat() for market, at in last_persisted_received_at.items()
+                }} if executor is not None else {}),
             "transport_events_since_start": {
                 market: counts.copy() for market, counts in transport_events.items()
             },
@@ -194,15 +323,20 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             errors[market] = value.code
 
     async def consume(market: str) -> None:
-        nonlocal flush_timer
+        nonlocal flush_timer, peak_pending_observations
         transport = WhiteBitDepthWebSocketTransport(
             market=market, limit=args.depth_limit,
             diagnostic=lambda value: diagnostic(market, value),
         )
         async for observation in transport.observations(stop):
+            received = monotonic()
+            while executor is not None and len(pending_observations) >= INGEST_QUEUE_LIMIT:
+                queue_space.clear()
+                await queue_space.wait()
+                if flush_error is not None:
+                    break
             if flush_error is not None:
                 break
-            received = monotonic()
             if market in last_observation:
                 gap = received - last_observation[market][0]
                 observation_gaps[market] = max(observation_gaps.get(market, 0), gap)
@@ -211,7 +345,8 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
                 # Diagnostic only. This difference includes host clock offset.
                 lag = (observation.received_at - observation.message_time).total_seconds()
                 message_lags[market] = max(message_lags.get(market, lag), lag)
-            pending_observations.append(observation)
+            pending_observations.append((received, observation))
+            peak_pending_observations = max(peak_pending_observations, len(pending_observations))
             if len(pending_observations) >= INGEST_BATCH_SIZE:
                 flush_observations()
             elif flush_timer is None:
@@ -233,13 +368,16 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             archive_boundary = (now_epoch - ARCHIVE_SETTLE_SECONDS) // ARCHIVE_WINDOW_SECONDS
             archive_time = 0.0
             if archive_boundary != last_archive_boundary:
-                flush_observations()
-                if flush_error is not None:
-                    raise flush_error
-                archive_start = monotonic()
-                store.archive_completed_windows(markets, now_epoch=now_epoch)
-                archive_time = monotonic() - archive_start
-                last_archive_boundary = archive_boundary
+                sqlite_barrier = True
+                try:
+                    await drain_observations()
+                    archive_start = monotonic()
+                    await sqlite_call(store.archive_completed_windows, markets, now_epoch=now_epoch)
+                    archive_time = monotonic() - archive_start
+                    last_archive_boundary = archive_boundary
+                finally:
+                    sqlite_barrier = False
+                    flush_observations()
             await publish(phase, wakeup_delay=wakeup_delay, archive_time=archive_time)
             if stopped.is_set() or args.stop_file.exists():
                 break
@@ -247,11 +385,31 @@ async def _collect(args, stopped: Event, store: WhiteBitDepthTapeStore,
             await asyncio.sleep(args.poll_seconds)
     finally:
         stop.set()
-        _, pending = await asyncio.wait(consumers, timeout=10)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*consumers, return_exceptions=True)
-        await publish("STOPPED", wakeup_delay=0, archive_time=0)
+        try:
+            if executor is not None:
+                # Let producers publish the frame already received while
+                # they were waiting for bounded writer capacity.
+                while any(not task.done() for task in consumers) and pending_observations:
+                    await drain_observations()
+                    await asyncio.sleep(0)
+            _, pending = await asyncio.wait(consumers, timeout=10)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+            await publish("STOPPED", wakeup_delay=0, archive_time=0)
+        finally:
+            for task in consumers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+            try:
+                if write_task is not None and not write_task.done():
+                    await asyncio.shield(write_task)
+                if owns_store:
+                    await sqlite_call(store.close)
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=False)
 
 
 def main(argv=None) -> int:
@@ -292,15 +450,7 @@ def main(argv=None) -> int:
     try:
         with ResourceLock(state_dir / "depth-tape.lock"):
             args.stop_file.unlink(missing_ok=True)
-            store = WhiteBitDepthTapeStore(
-                state_dir / "depth-tape.sqlite3",
-                bucket_seconds=args.bucket_seconds,
-                retention_days=args.retention_days,
-            )
-            try:
-                asyncio.run(_collect(args, stopped, store, checkpoint, markets))
-            finally:
-                store.close()
+            asyncio.run(_collect(args, stopped, None, checkpoint, markets, offload_sqlite=True))
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)

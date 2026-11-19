@@ -1,0 +1,11 @@
+{
+  "market": "BTC_USDT", "interval": "1d", "source": "https://www.nber.org/papers/w24877",
+  "hypothesis": "Weekly own-market momentum, unlevered spot, keep the same units through consecutive active weeks.",
+  "decision": "Compare successive Saturday UTC daily closing prices. Submit modeled entry or exit on Monday UTC open, after all of Sunday elapsed.",
+  "controls": ["cash", "passive with same 35% initial allocation", "opposite sign rule"],
+  "capital": 1000, "stake_at_entry": 0.35,
+  "fee_each_side": 0.001, "adverse_price_each_side_base": 0.0002, "adverse_price_each_side_stress": 0.00095,
+  "partitions_monday_to_monday_utc": [["2022-01-10","2024-12-30"],["2024-12-30","2026-11-16"]],
+  "rule_selection": "Fixed prior to fetching or scoring these daily cuts. No fitting. Liquidate at the last Monday open per partition. Mark daily open at liquidation prices. Report all completed calendar weeks.",
+  "qualification": "Later period must beat cash, passive and opposite in both scenarios. Positive results are historical simulations. No automatic promotion."
+}

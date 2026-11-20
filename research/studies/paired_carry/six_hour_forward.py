@@ -94,14 +94,19 @@ def history_to(db, cutoff):
     return bars,funding
 
 
+def online_bias(prior_errors):
+    errors=[max(-.02,min(.02,e)) for e in prior_errors]
+    return sum(errors)/(24+len(errors)) if len(errors)>=12 else 0.
+
+
 def direction(db,t,now):
     bars,funding=history_to(db,t-HOUR)
     model=fit(bars,funding,t,{})
     calibration=cost_sample(now)
-    errors=[max(-.02,min(.02,e)) for (e,) in db.execute(
+    errors=[e for (e,) in db.execute(
         """SELECT residual FROM reviews WHERE timely=1 AND closed<=?
            AND json_extract(body,'$.reviewed_at')<=? ORDER BY closed DESC LIMIT 28""",(t-HOUR,t-HOUR))]
-    correction=sum(errors)/(24+len(errors)) if len(errors)>=12 else 0.
+    correction=online_bias(errors)
     estimate=model["expected"]+correction
     side=0
     if calibration["ready"] and abs(estimate)>calibration["estimated_round_trip"]+model["standard_error"]:

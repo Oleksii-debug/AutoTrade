@@ -12,12 +12,58 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import six_hour_forward as agent
-from six_hour import D, HOUR, MARKET, OUT, STEP
+from six_hour import D, HOUR, MARKET, OUT, ROOT, RULE, STEP, charge, flow, quantity
 from six_hour_book_replay import archived_inputs, stage
 
 
 class NoArchivedQuote(Exception):
     pass
+
+
+def historical_calibration():
+    history=json.loads((OUT/"history.json").read_bytes())
+    if history["rule"]!=RULE:
+        raise ValueError("The stored forecasts use a different base rule")
+    bars,funding=archived_inputs()
+    lots=json.loads((ROOT/"market-rules.json").read_bytes())[MARKET]
+    blocks=[]
+    for block in history["blocks"]:
+        outcomes=[]
+        decisions=[]
+        capital=D(1000)
+        weeks=[]
+        week_open=capital
+        for episode in block["episodes"]:
+            t,model=episode["clock"],episode["model"]
+            if model["last_training_endpoint"]>model["cutoff"] or model["cutoff"]!=t-HOUR:
+                raise ValueError("Training data crossed the decision cutoff")
+            earlier=[error for closed,error in outcomes if closed<=model["cutoff"]][-28:]
+            correction=agent.online_bias(earlier)
+            estimate=model["expected"]+correction
+            side=0
+            if abs(estimate)>model["round_trip"]+model["standard_error"]:
+                side=1 if estimate>0 else -1
+            entry,exit_px=bars[t][0],bars[t+STEP][0]
+            costs_per_unit=flow(funding,t,t+STEP)
+            actual=float((exit_px-entry-costs_per_unit)/entry)
+            q=side*quantity(capital,entry,lots)
+            net=q*(exit_px-entry-costs_per_unit)-charge(q,entry)-charge(-q,exit_px)
+            capital+=net
+            outcomes.append((t+STEP,actual-model["expected"]))
+            decisions.append(dict(clock=t,prior=len(earlier),bias=correction,chosen=side,net=str(net),
+                                  before=abs(actual-model["expected"]),after=abs(actual-estimate),zero=abs(actual)))
+            if len(decisions)%28==0:
+                weeks.append(str(capital/week_open-1))
+                week_open=capital
+        if len(weeks)!=14 or len(decisions)!=392:
+            raise ValueError("Expected two complete 14-week windows")
+        blocks.append(dict(first=block["start"],examples=len(decisions),equity=str(capital),weeks=weeks,
+                           directional=sum(bool(d["chosen"]) for d in decisions),
+                           mean_absolute_errors={k:sum(d[k] for d in decisions)/len(decisions)
+                                                 for k in ("before","after","zero")},decisions=decisions))
+    (OUT/"historical-correction.json").write_text(json.dumps(dict(historical=True,blocks=blocks),separators=(",",":")))
+    for b in blocks:
+        print(b["first"],b["directional"],b["equity"],b["mean_absolute_errors"])
 
 
 def simulate(directory):
@@ -91,6 +137,9 @@ def simulate(directory):
 
 
 if __name__=="__main__":
+    if sys.argv[1:]==["--history"]:
+        historical_calibration()
+        raise SystemExit(0)
     result=simulate(Path(sys.argv[1]).resolve())
     print({k:v for k,v in result.items() if k not in ("attempted_clocks_without_quotes","progress")})
     print(result["progress"])

@@ -1,0 +1,12 @@
+{
+  "name": "BTC and ETH relative-value reversion v1",
+  "registered_before_first_run": true,
+  "markets": ["BTC_PERP", "ETH_PERP"],
+  "capital_usdt_per_phase": "1000",
+  "cuts_utc": ["2025-12-15T01:00:00", "2026-06-01T01:00:00", "2026-11-16T01:00:00"],
+  "signal": "Each fourth hour, use the last observable hourly open (one full hour lag). Compare log(ETH/BTC) with mean and sample standard deviation from the preceding 672 hourly observations. Enter opposite directions when absolute z reaches 2. Each leg capped at 40% of equity, round down to venue quantity step. No adding to positions.",
+  "exit": "Exit on the first hourly observation with signed z <= 0.25, signed z >= 3.5, or 168 hours elapsed, or at evaluation end. No same-hour re-entry.",
+  "costs": "Simulated adverse fills 0.10% per side plus taker fees 0.06% per side on both legs. Receive or pay actual funding on each signed position at settlement before the next fill. Reserve 10% of gross current marked exposure for collateral.",
+  "benchmark": "Idle USDT. Forward eligibility requires net profit in both chronological phases and no collateral or data failure. Compare to 2% weekly on whole equity including idle hours.",
+  "adjustments_after_observing_results": false
+}

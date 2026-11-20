@@ -70,6 +70,23 @@ def episode(panel, decision, day, rules):
     return dict(moves=moves,chosen_net_usdt=pnl([target] if target else []),
                 clock_basket_net_usdt=pnl(MARKETS if target else []),cash_net_usdt="0")
 
+def review(db):
+    rows=db.execute("""SELECT p.d,p.body,o.body,o.recorded FROM predictions p
+                       JOIN outcomes o USING(d) LEFT JOIN reviews r USING(d)
+                       WHERE r.d IS NULL ORDER BY p.d""").fetchall()
+    for day,prediction,outcome,settled in rows:
+        model=json.loads(prediction)
+        result=json.loads(outcome)
+        errors={m:float(v["actual"])-model["scores"][m] for m,v in result["moves"].items()}
+        chosen=D(result["chosen_net_usdt"])
+        basket=D(result["clock_basket_net_usdt"])
+        record=dict(chosen_market=model["target"],settled=settled,
+                    expected_portfolio_return=model["expected_net"] if model["target"] else 0,
+                    realized_portfolio_return=str(chosen/1000),
+                    selection_value_vs_same_clock_usdt=str(chosen-basket),
+                    market_forecast_errors=errors,hit_weekly_target=chosen>=20)
+        db.execute("INSERT INTO reviews VALUES(?,?)",(day,json.dumps(record,sort_keys=True)))
+
 def run():
     OUT.mkdir(parents=True,exist_ok=True)
     now=datetime.now(UTC)
@@ -79,6 +96,7 @@ def run():
                                             PRIMARY KEY(market,d));
             CREATE TABLE IF NOT EXISTS predictions(d TEXT PRIMARY KEY,recorded TEXT,body TEXT);
             CREATE TABLE IF NOT EXISTS outcomes(d TEXT PRIMARY KEY,recorded TEXT,body TEXT);
+            CREATE TABLE IF NOT EXISTS reviews(d TEXT PRIMARY KEY,body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS identity(id INTEGER PRIMARY KEY, digest TEXT);
         """)
         db.execute("BEGIN IMMEDIATE")
@@ -87,6 +105,7 @@ def run():
         saved=db.execute("SELECT digest FROM identity WHERE id=1").fetchone()
         if saved and saved[0]!=rule_hash: raise ValueError("Weekly model identity changed")
         if not saved: db.execute("INSERT INTO identity VALUES(1,?)",(rule_hash,))
+        review(db)
         if now.date()>LAST and not db.execute(
             "SELECT 1 FROM predictions p LEFT JOIN outcomes o USING(d) WHERE o.d IS NULL LIMIT 1"
         ).fetchone():
@@ -111,6 +130,7 @@ def run():
             if pred and day+WEEK<now.date() and not db.execute("SELECT 1 FROM outcomes WHERE d=?",(key,)).fetchone():
                 outcome=episode(panel,json.loads(pred[0]),day,rules)
                 db.execute("INSERT INTO outcomes VALUES(?,?,?)",(key,now.isoformat(),json.dumps(outcome)))
+                review(db)
         db.commit()
         print("Public daily candles added after archive:",db.execute("SELECT count(*) FROM bars").fetchone()[0],
               "prospective predictions:",db.execute("SELECT count(*) FROM predictions").fetchone()[0],

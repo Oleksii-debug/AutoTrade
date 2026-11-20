@@ -1,0 +1,13 @@
+{
+  "date":"2026-11-20",
+  "universe":["BTC","ETH","SOL","XRP","DOGE","ADA"],
+  "data":"WhiteBIT only, archived public hourly spot USDT and perpetual candles plus realized funding history, identical base units, UTC.",
+  "capital":1000,
+  "leg_fraction":0.40,
+  "cuts":["2025-11-17T01:00:00","2026-05-18T01:00:00","2026-11-16T01:00:00"],
+  "rule":"Every fourth Monday at 01 UTC compare markets on realized settlements strictly before 00 UTC. Forecast four weeks as the lower of the last 28-day sum and four times the last seven-day sum. Reject incomplete histories or any historical funding gap >8h. Deduct round-trip fees (spot 0.10%, perp 0.06% each side), four 0.10% adverse prices and a 0.25% allowance for unfavorable basis. Choose the highest positive remaining forecast. Retain the incumbent if its positive forecast is within 0.25 percentage points of the best. Carry the same base units until switch or end. Fixed prior to download; no fitting or threshold optimization.",
+  "controls":["cash","persistently paired BTC spot long and BTC perpetual short, same 40% initial leg fraction"],
+  "costs":"Base adverse price 0.03% per fill, stress 0.10%. No margin interest credited. Quantities rounded down using the stricter market lot step. Fixed fee assumptions are charged on actual turnover. Exclude phases with incomplete synchronized prices or funding on held markets. Spot and short each start at 40% of account; the remaining cash collateralizes the short. No borrowing. Flag the entire phase if the stressed intrabar perpetual high would breach the remaining cash collateral at 10% maintenance buffer.",
+  "valuation":"Apply realized funding on the perpetual reference settlement price to held signed quantity. Debit trading costs on entry and exit. Mark weekly equity after modeled cost to close both legs. Weeks in cash count. Terminal liquidation and no open inventory at cut. Independently restart both 26-week phases at 1000. Compare geometric weekly net, median weekly net, count of weeks >=2%, drawdown and total after all costs.",
+  "deployment":"Only prospective simulation; no account or orders. For eligibility require positive net under stressed costs in BOTH phases with full held-period coverage and collateral checks, distinguish this from a 2% weekly result. Compare both arms and cash. Confirm open and close reference quotes on fresh books before starting. No selection on individual profitable weeks."
+}

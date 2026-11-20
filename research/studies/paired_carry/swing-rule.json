@@ -1,0 +1,10 @@
+{
+  "hypothesis": "After a high-volume failed break of a two-week low, buyers can carry a liquid spot market back toward its old range.",
+  "universe": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
+  "archive_first_day": "2022-01-01",
+  "cuts": ["2022-02-07", "2024-12-30", "2026-11-16"],
+  "entry": "Use the candle that ended at least 24h before the entry open. Its low must fall below the minimum low of the prior 14 completed days, close back above that minimum in its upper half, and volume exceed median volume of those 14 days. When several markets qualify, choose highest volume relative to its prior median. Open at the next specified daily open only if above signal low and below previous range high. One concurrent long spot position, up to half of the account, no borrowing.",
+  "exit": "Stop at signal low, take profit at prior 14-day high, otherwise sell at the open after seven days. Handle downward opening gaps at the open, positive gaps at the target. Assume stop hit first for ambiguous bars. No re-entry on exit day. Terminal liquidation at final open.",
+  "costs": "0.10% fee and 0.10% adverse execution on each buy and sale, buys rounded down by public quantity steps.",
+  "acceptance": "Both chronological portfolios must show positive net, positive net excluding their strongest trade, at least 10 closed trades each, and a higher return than an equal-weight buy-and-hold basket with 50% cash. Evaluate weekly 2% target across all weeks including idle time. Data previously used for other research. No parameter search."
+}

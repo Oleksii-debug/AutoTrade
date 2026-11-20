@@ -42,12 +42,17 @@ def read_quote(tape,t):
     return tuple(map(D,row[:4]))+(seen,row[6])
 
 
-def replay(directory):
+def archived_inputs():
     bars,funding=base_data()
     with closing(sqlite3.connect((OUT/"agent.sqlite3").resolve().as_uri()+"?mode=ro",uri=True)) as live:
         for k,body in live.execute("SELECT epoch,body FROM candles"):
             bars[k]=tuple(map(D,json.loads(body)))
         funding.update({k:D(v) for k,v in live.execute("SELECT epoch,value FROM funding")})
+    return bars,funding
+
+
+def replay(directory):
+    bars,funding=archived_inputs()
     rule=json.loads((ROOT/"market-rules.json").read_bytes())[MARKET]
     with TemporaryDirectory() as tmp,closing(sqlite3.connect(Path(tmp)/"books.db")) as tape:
         count=stage(tape,directory)

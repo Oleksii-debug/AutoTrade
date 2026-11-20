@@ -52,6 +52,9 @@ class SixHourTests(unittest.TestCase):
                         self.assertEqual(D(r["matched_alternatives"]["short"]),q*(D("-11.9")-D(210)*agent.FEE))
                         self.assertEqual(D(r["capital"])-1000,D(r["net"]))
                         self.assertEqual(D(r["net"]),D(r["matched_alternatives"][{1:"long",-1:"short"}[side]]) if side else 0)
+                        stats=json.loads(db.execute("SELECT body FROM progress").fetchone()[0])["forecast_review"]
+                        self.assertEqual(stats["timely_examples"],1)
+                        self.assertEqual(D(stats["mean_absolute_errors"]["flat_market"]),D(".099"))
 
     def test_missed_entry_stays_empty(self):
         with (TemporaryDirectory() as tmp,patch.object(agent,"OUT",Path(tmp)),

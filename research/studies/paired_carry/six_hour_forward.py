@@ -139,6 +139,13 @@ def balance(db):
     return D(row[0]) if row else D(1000)
 
 
+def funding_per_unit(start,end):
+    if int(end)//(8*HOUR)==int(start)//(8*HOUR):
+        return D(0), []
+    events,sources=settlements(start,end,MARKET,keep)
+    return sum((rate*px for rate,px in events.values()),D(0)),sources
+
+
 def advance(db, now):
     active=db.execute("""SELECT e.clock,e.body,d.body FROM entries e JOIN decisions d USING(clock)
                          LEFT JOIN reviews r USING(clock) WHERE r.clock IS NULL""").fetchall()
@@ -164,11 +171,7 @@ def advance(db, now):
             continue
         at,source,exit_px=receipt["at"],receipt["source"],D(receipt["fill"])
         entry_px=D(entry["fill"])
-        flow_per_unit=D(0)
-        evidence=[]
-        if int(at)//(8*HOUR)>int(entry["at"])//(8*HOUR):
-            events,evidence=settlements(entry["at"],at,MARKET,keep)
-            flow_per_unit=sum((rate*px for rate,px in events.values()),D(0))
+        flow_per_unit,evidence=funding_per_unit(entry["at"],at)
         opening_mid=D(entry["mid"])
         actual=(D(receipt["mid"])-opening_mid-flow_per_unit)/opening_mid
         fee=abs(q)*(entry_px+exit_px)*FEE
@@ -185,10 +188,17 @@ def advance(db, now):
         if q and D(controls["long" if q>0 else "short"])!=pnl:
             raise ValueError("Actual action and matched settlement disagree")
         timely=at<t+STEP+300
+        base_prediction=D(str(model["model"]["expected"]))
+        adjusted_prediction=base_prediction+D(str(model.get("online_bias",0)))
+        forecast_errors={
+            "original":str(abs(actual-base_prediction)),
+            "adjusted":str(abs(actual-adjusted_prediction)),
+            "flat_market":str(abs(actual))
+        }
         review=dict(chosen=model["side"],actual_signed_long=str(actual),fees=str(fee),funding=str(-q*flow_per_unit),
                     fill=str(exit_px),net=str(pnl),opening_capital=entry["capital"],capital=str(capital),
                     quote=source,funding_sources=evidence,closed=at,reviewed_at=time.time(),timely=timely,
-                    matched_alternatives=controls,cash_net="0")
+                    matched_alternatives=controls,cash_net="0",absolute_forecast_errors=forecast_errors)
         db.execute("INSERT INTO reviews VALUES(?,?,?,?,?,?)",
                    (t,at,int(timely),float(actual)-model["model"]["expected"],str(capital),json.dumps(review)))
         # A failure getting the next entry must never undo an observed exit.
@@ -235,8 +245,14 @@ def update_progress(db,now):
         weekly.append(dict(start=start,missing=missing,timely=valid,
                            net_fraction=str(rate) if valid else None,at_target=valid and rate>=target))
     passed=len(weekly)==SPEC["duration_weeks"] and all(w["at_target"] for w in weekly)
+    errors=[json.loads(body)["absolute_forecast_errors"] for (body,) in db.execute(
+        """SELECT body FROM reviews WHERE timely=1 AND json_type(body,'$.absolute_forecast_errors')='object'
+           ORDER BY closed DESC LIMIT 28""")]
+    averages={name:str(sum((D(row[name]) for row in errors),D(0))/len(errors))
+              for name in ("original","adjusted","flat_market")} if errors else {}
     progress=dict(next_due=FIRST if now<FIRST else min(END,FIRST+(int((now-FIRST)//STEP)+1)*STEP),
                   capital=str(balance(db)),weeks=weekly,target_verified=passed,
+                  forecast_review=dict(timely_examples=len(errors),mean_absolute_errors=averages),
                   status="collecting" if now<END else ("verified" if passed else "not_verified"))
     db.execute("INSERT OR REPLACE INTO progress VALUES(1,?)",(json.dumps(progress),))
 
@@ -261,10 +277,33 @@ def write_account_view(db):
     if reviewed:
         review=json.loads(reviewed[0])
         lines.append(f"Останній завершений період {local_clock(review['closed'])}. Чистий результат {D(review['net']):+.2f} USDT.")
+    stats=progress["forecast_review"]
+    if stats["timely_examples"]:
+        average=stats["mean_absolute_errors"]
+        lines.append(f"Середня помилка за {stats['timely_examples']} останніх вчасних спостережень. "
+                     f"Прогноз з навчанням {100*D(average['adjusted']):.3f}%, "
+                     f"початкова модель {100*D(average['original']):.3f}%, "
+                     f"прогноз нульової зміни {100*D(average['flat_market']):.3f}%.")
     lines.append(f"Тижнів із повними спостереженнями {sum(w['timely'] for w in progress['weeks'])}.")
     temp=OUT/f"account-{os.getpid()}.tmp"
     temp.write_text("\n".join(lines)+"\n",encoding="utf-8-sig")
     os.replace(temp,OUT/"Рахунок BTC за шість годин.txt")
+
+
+def export_agent_report(db):
+    rows=db.execute("""
+        SELECT clock,recorded,'decision',body FROM decisions
+        UNION ALL SELECT clock,json_extract(body,'$.at'),'entry',body FROM entries
+        UNION ALL SELECT clock,json_extract(body,'$.at'),'exit_quote',body FROM exit_quotes
+        UNION ALL SELECT clock,json_extract(body,'$.reviewed_at'),'review',body FROM reviews
+        ORDER BY 2,1,3""")
+    temp=OUT/f"agent-report-{os.getpid()}.tmp"
+    with temp.open("w",encoding="utf-8") as file:
+        for clock,recorded,event,body in rows:
+            record=dict(agent="BTC six-hour",mode="simulation",clock=clock,observed_at=recorded,
+                        event=event,data=json.loads(body))
+            file.write(json.dumps(record,ensure_ascii=False,separators=(",",":"))+"\n")
+    os.replace(temp,OUT/"Звіт агента.jsonl")
 
 
 def run():
@@ -289,7 +328,35 @@ def run():
         update_progress(db,time.time())
         db.commit()
         write_account_view(db)
+        export_agent_report(db)
         print("Decisions, opened episodes, settled reviews:",*[db.execute("SELECT count(*) FROM "+table).fetchone()[0]
                                                                for table in ("decisions","entries","reviews")])
 
-if __name__=="__main__": run()
+def worker_main():
+    from logging import Formatter, INFO, getLogger
+    from logging.handlers import RotatingFileHandler
+    OUT.mkdir(parents=True,exist_ok=True)
+    logger=getLogger("autotrade.six_hour")
+    logger.setLevel(INFO)
+    logger.propagate=False
+    with closing(RotatingFileHandler(OUT/"Технічна діагностика.log",maxBytes=512*1024,
+                                     backupCount=3,encoding="utf-8")) as handler:
+        handler.setFormatter(Formatter("%(message)s"))
+        logger.addHandler(handler)
+        def record(event,**fields):
+            logger.info(json.dumps(dict(utc=datetime.now(UTC).isoformat(),event=event,**fields)))
+        try:
+            record("started",engine=sha256((CODE/"six_hour_forward.py").read_bytes()).hexdigest())
+            run()
+            record("completed")
+        except Exception as error:
+            trace=error.__traceback__
+            while trace.tb_next:
+                trace=trace.tb_next
+            record("failed",error=type(error).__name__,operation=trace.tb_frame.f_code.co_name)
+            raise
+        finally:
+            logger.removeHandler(handler)
+
+
+if __name__=="__main__": worker_main()

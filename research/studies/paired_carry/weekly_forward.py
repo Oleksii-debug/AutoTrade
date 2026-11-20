@@ -7,6 +7,7 @@ import sqlite3
 from data import CODE, ROOT, WhiteBitPublicClient, _write_immutable, DAY as SECONDS
 from swing import BUY, SELL, D, DAY, authenticated_bars, buy_qty
 from weekly_agent import WEEK, features, train
+from earnings_goal import evaluate
 import numpy as np
 
 OUT = ROOT/"weekly-forward"
@@ -97,6 +98,7 @@ def run():
             CREATE TABLE IF NOT EXISTS predictions(d TEXT PRIMARY KEY,recorded TEXT,body TEXT);
             CREATE TABLE IF NOT EXISTS outcomes(d TEXT PRIMARY KEY,recorded TEXT,body TEXT);
             CREATE TABLE IF NOT EXISTS reviews(d TEXT PRIMARY KEY,body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS earnings_goal(id INTEGER PRIMARY KEY,body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS identity(id INTEGER PRIMARY KEY, digest TEXT);
         """)
         db.execute("BEGIN IMMEDIATE")
@@ -106,14 +108,18 @@ def run():
         if saved and saved[0]!=rule_hash: raise ValueError("Weekly model identity changed")
         if not saved: db.execute("INSERT INTO identity VALUES(1,?)",(rule_hash,))
         review(db)
+        rules=json.loads((ROOT/"market-rules.json").read_bytes())
+        def checkpoint_goal():
+            progress=evaluate(db,FIRST,SPEC["weeks"],datetime.now(UTC).date(),rules)
+            db.execute("INSERT OR REPLACE INTO earnings_goal VALUES(1,?)",(json.dumps(progress,ensure_ascii=False),))
         if now.date()>LAST and not db.execute(
             "SELECT 1 FROM predictions p LEFT JOIN outcomes o USING(d) WHERE o.d IS NULL LIMIT 1"
         ).fetchone():
+            checkpoint_goal()
             db.commit()
             print("Weekly forecast recording window finished.")
             return
         panel=refresh(db,min(now.date(),LAST+DAY),WhiteBitPublicClient())
-        rules=json.loads((ROOT/"market-rules.json").read_bytes())
         # Take the clock after network reads, so a slow refresh cannot backdate a decision.
         now=datetime.now(UTC)
         for i in range(SPEC["weeks"]):
@@ -131,6 +137,7 @@ def run():
                 outcome=episode(panel,json.loads(pred[0]),day,rules)
                 db.execute("INSERT INTO outcomes VALUES(?,?,?)",(key,now.isoformat(),json.dumps(outcome)))
                 review(db)
+        checkpoint_goal()
         db.commit()
         print("Public daily candles added after archive:",db.execute("SELECT count(*) FROM bars").fetchone()[0],
               "prospective predictions:",db.execute("SELECT count(*) FROM predictions").fetchone()[0],

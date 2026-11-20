@@ -1,0 +1,6 @@
+{
+  "asset":"Native coin of The Open Network. Markets now use GRAM.",
+  "primary":"WhiteBIT GRAM_USDT. Its public hourly query returned no bars before the 2026 rename. Use from June 24, 2026. Only price the strategy from this venue's own bars.",
+  "secondary":"Bybit public spot GRAMUSDT historical candles. This symbol also returns 2024 hourly history. Use the original full dates. Never join the two venues into one account.",
+  "gaps":"Use common 60-day daily-close warmup per contiguous segment, start and end on Mondays 01:00 UTC. Report exclusions, prices are modeled and the markets are observed separately."
+}

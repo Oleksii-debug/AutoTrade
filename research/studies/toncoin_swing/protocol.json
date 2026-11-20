@@ -1,0 +1,20 @@
+{
+  "market": "TON_USDT",
+  "interval": "1h",
+  "start_utc": "2023-10-01",
+  "phase_boundaries_monday_utc": ["2024-01-01","2024-11-18","2025-11-17","2026-11-16"],
+  "rule": "At 00:00 UTC compare yesterday's completed daily close to the preceding 14 daily closing highs (maximum of closes). At the next 01:00 open buy only after the threshold is met. After closing a position require a fresh signal: the drawdown must first recover above the entry threshold and subsequently cross below it. One spot position, all or nothing, no borrowing, new phases start flat.",
+  "arms": [
+    {"name":"wait5","drop":0.05,"target":0.05,"max_days":null,"trend":false},
+    {"name":"wait10","drop":0.10,"target":0.10,"max_days":null,"trend":false},
+    {"name":"filtered","drop":0.075,"target":0.075,"max_days":21,"trend":true}
+  ],
+  "trend": "Yesterday close above 60-day mean, yesterday close above previous close. Filter can confirm while the pullback is still active. With 21-day cap, scheduled time exit at 01:00.",
+  "exit": "A resting sell target is active starting the hour AFTER entry. Require a positive-volume hourly high beyond target by the adverse execution allowance. Credit target less adverse execution and fee. No assumed stop. Terminal horizon closes any remaining position at the 01:00 open. Base and stress use separate books.",
+  "costs":{"fee_each_side":0.001,"base_adverse_each_side":0.0005,"stress_adverse_each_side":0.0015},
+  "capital":1000,
+  "controls":["cash","passive TON"],
+  "selection":"Use only the first period, rank stressed compounded weekly return among arms with >=5 completed round trips; alphabetical tiebreak. Always report all arms for all periods. Do not change rules based on the later results.",
+  "qualification":"For selected strategy in EACH later period under stress require geometric weekly net >=2%, median week >=2%, drawdown <=25%, at least 5 round trips and net higher than passive and cash. Also report number of calendar weeks gaining 2%, invested-capital trade returns, waiting durations, longest hold, terminal liquidation, worst week and daily/hourly open marked drawdown. Ineligible rules stay in research.",
+  "source_fallback":"If the full contiguous hourly sample is unavailable, retain completed whole Monday-to-Monday weeks covered by contiguous public candles, report lost dates and reset account after gaps; do not impute tradable prices."
+}

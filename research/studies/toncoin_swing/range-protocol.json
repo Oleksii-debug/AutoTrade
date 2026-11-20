@@ -1,0 +1,10 @@
+{
+  "primary_markets":["BTC_USDT","ETH_USDT","LTC_USDT"],
+  "evaluation":"Fixed equal initial sleeves, no rebalancing, all cash when flat. Shared exchange and clock. Compare entire portfolio with cash and equal initial buy-and-hold. Separately replay the already reviewed Toncoin observations as exploratory examples. No model fitting.",
+  "dates":["2024-01-01","2024-11-18","2025-11-17","2026-11-16"],
+  "decision":"Use the 42 daily closes BEFORE yesterday. Sorted ranks 7 and 36 are floor and ceiling. Width 8% to 35% relative to floor. Require 2 distinct visits to each outer quarter of the channel, each separated by an exit from that zone, and <8% absolute drift between the medians of the first and last 14 reference closes. Yesterday must close above its preceding close in the lower third of the channel and at or above the floor.",
+  "execution":"At 01 UTC enter at the observed open only if floor <= open <= lower third and modeled target upside >=5%. Buy using only that sleeve's available cash. Freeze its target at the floor plus 85% of the channel width, and stop 3% below the floor. Both active from the entry hour. If stop and target occur in the same bar, choose stop. For downside gaps, use the worse of stop or open. Require target trade-through by the modeled price allowance. Exit any remaining units after 14 days, otherwise at the end of the phase. Require price to leave the lower third before rearming. Zero leverage. Prices and depth remain modeled.",
+  "costs":"Fee 0.10% and adverse execution 0.05% per side. Repeat at adverse execution 0.15% per side.",
+  "qualification":"In each of the two later intervals the primary diversified portfolio must cover all weeks, beat cash and passive after stressed costs and achieve both >=2% geometric mean weekly and >=2% median weekly return, with <=25% hourly-open marked drawdown. No promotion based on isolated winning coins or weeks.",
+  "coverage":"Use the longest common contiguous hourly series in each period with at least 43 daily closes of warmup, ending and starting at Monday 01:00. Report lost weeks. No fills invented in data gaps."
+}

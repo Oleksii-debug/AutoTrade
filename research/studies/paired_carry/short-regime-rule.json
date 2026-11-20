@@ -1,0 +1,6 @@
+{
+  "question": "The always-short control won in the two already inspected 2025-11 to 2026-11 windows. Check the preceding three non-overlapping 26-week periods before considering it repeatable.",
+  "universe": ["BTC","ETH","SOL"],
+  "utc_midnight_cuts": ["2024-05-20","2024-11-18","2025-05-19","2025-11-17"],
+  "policy": "Each window starts with 1000 USDT. Open one unlevered-budget perpetual short per asset at 20% initial capital each, rounded down to public lot step. Hold fixed units until the final open. Compare identical long, cash, and 2% weekly. Pay actual public funding and 0.06% fee plus 0.1% adverse execution per side. Mark to liquidation at each daily open, stress short collateral at all assets' simultaneous daily highs. Include funding strictly after entry and through exit. Missing eight-hour settlements or daily marks disqualify a window; do not replace instruments or periods. No automatic trading or deployment."
+}

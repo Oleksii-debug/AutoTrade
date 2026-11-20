@@ -1,0 +1,8 @@
+{
+  "universe": ["BTC", "ETH", "SOL"],
+  "cuts_utc": ["2025-11-17T01:00:00", "2026-05-18T01:00:00", "2026-11-16T01:00:00"],
+  "decision": "At Monday 01 UTC compare Saturday's spot closing price with the closes 28 and 84 days earlier. If both returns are positive hold a long perpetual. If both are negative hold a short perpetual. Otherwise stay flat on that market. Keep the same units while the direction stays unchanged. Close reversing legs before any new entry. All trades are virtual.",
+  "risk_and_cost": "Start each period separately with 1000 USDT cash, 20% of marked account value per new leg, public lot steps rounded down. At entry cap total gross marked exposure at equity. Pay 0.06% fee plus 0.10% adverse fill on every side. Settle actual signed WhiteBIT funding on the actual position held. Require full hourly open/high/low and funding coverage on held markets. Flag any 10% gross maintenance breach even at simultaneous adversarial intrabar extremes. Value each weekly mark net of closing costs, including time flat.",
+  "controls": "Cash; continuous long; continuous short; reverse of the trend signals. Controls use identical position sizing, costs, margin and funding. The historical market regimes have been seen in other experiments.",
+  "eligibility": "Both separate periods must yield positive net after stress, beat perpetual long, perpetual short and inverted signals, and stay collateralized. Compare all 52 weeks against 2% on the whole account, and report both sides and drawdown. No forward activation if any condition fails."
+}

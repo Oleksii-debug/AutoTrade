@@ -27,7 +27,7 @@ from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
 from .persistence import JournalStore
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .reconciliation_journal import load_latest_reconciliation_checkpoint
-from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _uuid
+from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _matches_session_fill, _uuid
 from research.autotrade_research.artifacts.resource_lock import ResourceLock, ResourceLockBusyError
 
 
@@ -486,8 +486,11 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
             if (result["decision"] != "BUY" or position <= 0
                     or type(fill_id) is not str or not fill_id
                     or type(result.get("order_id")) is not str or not result["order_id"]
-                    or book.transactions[1].cause_event_id != fill_id
-                    or book.transactions[1].transaction_id != _uuid("fill-transaction", episode_id)
+                    or not _matches_session_fill(
+                        book.transactions[1],
+                        [e for e in events if e["aggregate_type"] == "provider_fill_financial_binding"],
+                        episode_id=episode_id, fill_id=fill_id, order_id=result["order_id"],
+                    )
                     or book.transactions[1].reverses_transaction_id is not None
                     or book.transactions[1].corrects_transaction_id is not None
                     or reconciliation["journal_sequence"] <= max(event["journal_sequence"] for event in events

@@ -256,8 +256,11 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(len(settlements.obligations), 1)
             obligation = settlements.obligations[0]
             self.assertLess(obligation.amount, Decimal("0"))
-            self.assertEqual(obligation.cause_event_id, first["fill_id"])
-            self.assertIsNotNone(obligation.source_transaction_id)
+            self.assertEqual(
+                obligation.cause_event_id,
+                f"provider:{PROVIDER}:environment:{ENVIRONMENT}:account:{ACCOUNT}:execution:{first['fill_id']}",
+            )
+            self.assertEqual(obligation.source_transaction_id, binding_request["transaction_id"])
             self.assertIsNotNone(obligation.rule_binding)
             self.assertTrue(
                 any(

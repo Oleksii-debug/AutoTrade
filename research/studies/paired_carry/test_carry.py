@@ -9,11 +9,18 @@ import unittest
 from unittest.mock import patch
 
 import forward
+from swing import exit_fill
 from data import HOUR, WEEK
 from study import Account, forecasts
 
 
 class AccountingTests(unittest.TestCase):
+    def test_reversal_bar_with_two_exits_books_the_stop(self):
+        bar = dict(open=D(100), low=D(85), high=D(122))
+        self.assertEqual(exit_fill(bar, D(90), D(120)), D(90))
+        bar["open"] = D(86)
+        self.assertEqual(exit_fill(bar, D(90), D(120)), D(86))
+
     def test_round_trip_at_flat_prices_debits_four_fills(self):
         rules = dict(step="0.001", min_qty="0.001", min_value="1")
         wallet = Account(D(1000), D(".001"))

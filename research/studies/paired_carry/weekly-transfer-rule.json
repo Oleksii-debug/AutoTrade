@@ -1,0 +1,5 @@
+{
+  "rule": "Apply weekly-agent-rule.json without modifying its inputs, target, model, training horizon, costs, portfolio allocation, timing, or acceptance. Fit and evaluate one separate pooled portfolio using LTC, LINK and ADA spot on WhiteBIT, with BTC retained solely for the existing market-relative feature. Asset choice fixed before inspecting their weekly model outcomes. Dates overlap the original test; assets are different. If any daily market history is incomplete, mark transfer unscorable and do not replace a market.",
+  "universe": ["LTC_USDT", "LINK_USDT", "ADA_USDT"],
+  "cuts": ["2024-11-18", "2025-11-17", "2026-11-16"]
+}

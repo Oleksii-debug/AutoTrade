@@ -2,11 +2,12 @@
 from datetime import date
 from hashlib import sha256
 import json
+import sys
 from math import log
 from statistics import stdev
 import numpy as np
-from data import CODE, ROOT
-from swing import BUY, SELL, DAY, D, buy_qty, authenticated_bars
+from data import CODE, ROOT, WhiteBitPublicClient, _write_immutable
+from swing import BUY, SELL, DAY, D, buy_qty, authenticated_bars, collect_whitebit_history
 
 WEEK = 7 * DAY
 
@@ -77,24 +78,40 @@ def account(first, last, panel, rules, decisions, mode):
                 geometric_weekly=(cash/1000)**(D(1)/len(weeks))-1,
                 without_best=cash/(1+max(weeks))-1000, modeled_cost=costs,drawdown=dd,fills=fills)
 
-def main():
+def main(transfer=False):
     protocol=(CODE/"weekly-agent-rule.json").read_bytes()
     cfg=json.loads(protocol)
+    transfer_sha=None
+    if transfer:
+        rule=(CODE/"weekly-transfer-rule.json").read_bytes()
+        cfg.update(json.loads(rule))
+        transfer_sha=sha256(rule).hexdigest()
     cuts=list(map(date.fromisoformat,cfg["cuts"]))
     panel, ident={},{}
-    for m in cfg["universe"]:
+    for m in dict.fromkeys([*cfg["universe"], "BTC_USDT"]):
         path=ROOT/"daily"/"spot"/m/"1d"/"1640995200-1794787200.manifest.json"
+        if not path.exists():
+            collect_whitebit_history(market=m,interval="1d",start=1640995200,end=1794787200,
+                                     output=ROOT/"daily",page_limit=1000,max_attempts=2)
         bars,ident[m],meta=authenticated_bars(path)
-        if meta["market"]!=m or any(D(b["volume"])<=0 for b in bars):
+        if meta["market"]!=m or len(bars)!=1781 or any(D(b["volume"])<=0 for b in bars):
             raise ValueError("Incomplete market")
         panel[m]={b["opened_at"].date():{k:D(b[k]) for k in ("open","close")} for b in bars}
-    rules=json.loads((ROOT/"market-rules.json").read_bytes())
+    profile=ROOT/("transfer-market-rules.json" if transfer else "market-rules.json")
+    if not profile.is_file():
+        rules={i.market:dict(step=i.step_size,min_qty=i.minimum_quantity,min_value=i.minimum_notional)
+               for i in WhiteBitPublicClient().instruments() if i.market in cfg["universe"]}
+        if len(rules)!=len(cfg["universe"]): raise ValueError("Missing instrument rules")
+        _write_immutable(profile,json.dumps(rules,sort_keys=True).encode())
+    rules=json.loads(profile.read_bytes())
     t=cuts[0]-79*WEEK
     samples={}
     while t<cuts[-1]:
-        for m in panel: samples[t,m]=np.array(features(panel,m,t))
+        for m in cfg["universe"]: samples[t,m]=np.array(features(panel,m,t))
         t+=WEEK
+    panel={m:panel[m] for m in cfg["universe"]}
     out=dict(protocol_sha256=sha256(protocol).hexdigest(),data_sha256=ident,periods=[],decisions=[])
+    if transfer: out["transfer_sha256"]=transfer_sha
     for first,last in zip(cuts,cuts[1:]):
         decisions={first+i*WEEK:train(first+i*WEEK,panel,samples) for i in range(52)}
         out["decisions"].extend(decisions.values())
@@ -103,6 +120,10 @@ def main():
         results["qualified"]=candidate["net"]>max(D(0),results["passive"]["net"],results["clock"]["net"]) and candidate["active"]>=10 and candidate["without_best"]>0
         out["periods"].append(results)
         print(first,[(s,str(results[s]["net"]),results[s]["active"]) for s in ("model","passive","clock")],candidate["at_target"],results["qualified"])
-    (ROOT/"weekly-agent-results.json").write_text(json.dumps(out,default=str,indent=2))
+    dest="weekly-transfer-results.json" if transfer else "weekly-agent-results.json"
+    (ROOT/dest).write_text(json.dumps(out,default=str,indent=2))
 
-if __name__=="__main__": main()
+if __name__=="__main__":
+    if sys.argv[1:] not in ([],["--transfer"]):
+        raise SystemExit("Run weekly_agent.py with optional --transfer")
+    main(bool(sys.argv[1:]))

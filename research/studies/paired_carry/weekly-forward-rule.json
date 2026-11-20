@@ -1,0 +1,9 @@
+{
+  "first_monday_utc": "2026-11-23",
+  "weeks": 26,
+  "universe": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
+  "purpose": "Prospective forecast audit of the unmodified weekly spot learner. Historical evidence is insufficient to commit capital. No orders or private endpoints.",
+  "decision_window": "After Saturday UTC closes and strictly before Monday UTC opens. Record all asset estimates, fitted coefficients, normalization and the last available training outcome. A missed forecast stays missing. Predictions can never be overwritten.",
+  "assessment": "Use separate individual hypothetical 1000 USDT one-week episodes for forecast auditing. Once both Monday opening prices are public, compare the proposed asset, a three-asset equal-weight control active on the same clock, and cash. Include the registered buy and sell costs and lot rounding. Keep realized returns of every asset even when the decision was cash so prediction errors remain observable. Never treat an unrecorded forecast as a trade.",
+  "completion": "Stop new forecasts after 26 registered clocks, reconcile available outcomes, keep the ledger for independent review. No automatic promotion."
+}

@@ -1,0 +1,8 @@
+{
+  "markets": ["BTC_PERP", "ETH_PERP", "SOL_PERP"],
+  "first_entry_clock": "2026-11-20T15:00:00+00:00",
+  "entry_window_minutes": 10,
+  "duration_days": 182,
+  "purpose": "A prospective public-book comparison of the permanent short control versus its permanent long mirror and 1000 USDT held in cash. Two modeled portfolios, no exchange orders. Lock before opening either side. Record the very next full hourly window without waiting for a favorable price.",
+  "execution": "Start each mirror at 1000 USDT. Up to 200 USDT per market on each side, same base units for the two mirrors, floored to lot step. Use synchronized books and full depth for both opening and liquidation, with 0.10% additional adverse execution and 0.06% fee each side. Fixed quantities. Apply opposite actual settlement cash flows to the two mirrors. Reconcile missed funding on resume. Mark unseen hours explicitly. Stop both observations if a marked maintenance buffer is breached or after 182 days. Weekly 2% targets must be measured across the entire portfolio. Quotes while the computer is asleep are unavailable."
+}

@@ -40,13 +40,13 @@ def paired_books():
         raise ValueError("Public books outside paired time tolerance")
     return books
 
-def settlements(after,at):
+def settlements(after,at,market="BTC_PERP",save=archive):
     rows={}
     evidence=[]
     c=WhiteBitPublicClient()
     for off in range(0,1000,100):
-        page=c.funding_history("BTC_PERP",limit=100,offset=off)
-        evidence.append(archive(page))
+        page=c.funding_history(market,limit=100,offset=off)
+        evidence.append(save(page))
         for r in page.records:
             t=int(r.funding_time.timestamp())
             if after<t<=at: rows[t]=(D(r.funding_rate),D(r.settlement_price))

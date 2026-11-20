@@ -1,0 +1,15 @@
+# Six-hour BTC paper learner
+
+Run `python six_hour.py` for the two fixed 14-week historical blocks. Run `python six_hour_forward.py` before the registered entry clock and again within the entry window. Windows runs the learner 25 minutes before each clock and 22 seconds after it, with an additional login trigger for recovery. The clocks are 01:00, 07:00, 13:00 and 19:00 UTC.
+
+The learner stores its side, neighbor labels, training cutoff and cost estimate before entry in `six-hour/agent.sqlite3`. At entry and exit it reads public depth and preserves the received bytes. The review reconciles direction, price, fees, signed funding and capital with the two matched alternatives. Twelve timely completed observations are needed before the first live forecast-error adjustment. A missed entry stays missing. Delayed exits are excluded from learning and disqualify their week from target verification. Simulated capital starts at 1,000 USDT.
+
+The historical model held cash throughout both 14-week stress replays. On a separate replay of 28 clock opportunities using retained public books, 16 had matched quotes and depth and none produced a directional decision on those matched quotes. No historical 2% weekly edge was established. The prospective ledger is an experiment.
+
+Run `python test_six_hour.py` to exercise long, short, cash, signed funding, delayed entry refusal, review and process restart. To repeat the retained-book check, pass the existing exact-retention directory to `python six_hour_book_replay.py`. The course entry-window audit is available via `python course_limit_check.py <original-range-entry-receipt.json>`. A one-minute candle only bounds price reachability and cannot establish a passive fill.
+
+To restore the worker, extract the study checkpoint with its market archive and databases. Run `install_six_hour.ps1` from the restored script directory using Windows PowerShell. A checkout containing `tools/whitebit_historical_klines.py` and a Python environment with NumPy are required. Set the user environment variable `AUTOTRADE_CHECKOUT` if the checkout is outside the detected paths, and `AUTOTRADE_DEPTH_TAPE` for a relocated collector database. The scheduled task runs whenever Windows is awake and the registered user is logged in. Missing market clocks remain visible as gaps. The latest readable account statement is `six-hour/Рахунок BTC за шість годин.txt`.
+
+The exit quote is committed before funding retrieval. If funding is temporarily unavailable, the next run settles the stored exit. Missing depth for an unchosen alternative leaves that comparison empty. The selected position is valued only when sufficient depth is observed.
+
+Running `python weekly_decision_audit.py` after both weekly replays attributes the older weekly model's choices across all 104 weeks in each universe, including weeks originally held in cash. Relaxing its entry requirement to a positive forecast after costs produced net results of −146.09 and −153.83 USDT in the primary blocks and +108.54 and −491.60 USDT in the transfer blocks, each starting at 1,000 USDT. The relaxed policy did not qualify for prospective use.

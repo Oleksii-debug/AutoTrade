@@ -5,15 +5,15 @@ import json
 from data import CODE, ROOT, DAY, HOUR, WEEK, stamp, pack, WhiteBitPublicClient, parse_funding_history, parse_klines
 from pairs import charge
 
-def sample(asset,begin,end):
+def sample(asset,begin,end,*,tag="daily"):
     client=WhiteBitPublicClient()
     market=asset+"_PERP"
     count=(end-begin)//DAY+1
     args=dict(start=begin,end=end+DAY,training=True)
-    raw,received,uri=pack(ROOT/"older"/(market+"-daily.json"),
+    raw,received,uri=pack(ROOT/"older"/(market+"-"+tag+".json"),
                          lambda:client.klines(market,interval="1d",limit=count,**args))
     data=parse_klines(raw,market,"1d",received,requested_limit=count,source_uri=uri,**args)
-    bars={int(b.open_time.timestamp()):(D(b.open),D(b.low),D(b.high),D(b.base_volume)) for b in data.candles}
+    bars={int(b.open_time.timestamp()):(D(b.open),D(b.low),D(b.high),D(b.base_volume),D(b.close)) for b in data.candles}
     rates={}
     for off in range(0,5000,100):
         raw,received,uri=pack(ROOT/"data"/asset/f"funding-{off}.json",
@@ -65,7 +65,7 @@ def run(panel,rules,left,right,side):
             worst=before
             maintenance=D(0)
             for m,(q,px) in positions.items():
-                _,low,high,_=panel[m][0][t-DAY]
+                low,high=panel[m][0][t-DAY][1:3]
                 adverse=low if q>0 else high
                 worst+=q*(adverse-px)-charge(-q,adverse)
                 maintenance+=abs(q)*high*D(".1")

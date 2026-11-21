@@ -1,0 +1,10 @@
+{
+  "start_utc": "2026-11-23T01:00:00+00:00",
+  "weeks": 26,
+  "markets": ["ADA", "BTC", "DOGE", "ETH", "SOL", "XRP"],
+  "goal": "Choose both members of a weekly pair before the market moves. Evaluate a local model on the entire collateralized account, including idle weeks, then score new predictions on subsequent public data.",
+  "features": "At Monday 01 UTC use only spot observations available 24 hours earlier. For each market compute the 7-day and 1-day log returns from hourly open prices, the standard deviation of the 168 hourly log returns over the week and the log ratio of mean base volume during the last 24 completed hours to the preceding 144 hours. Subtract the simultaneous cross-sectional mean of each feature.",
+  "training": "Fit two independent standardized ridge regressions on the earlier and later 24 weeks among the last 48 eligible weeks. The final training outcome ends at least a day before the decision. For each market the target is the next week's perpetual open-to-open return net of actual signed funding per long unit, centered on that week's six-market mean. Ridge penalty 0.1 times observations; no tuning. Save weights, feature scales, training clocks and scores.",
+  "choice": "Rank the six markets by their average predicted relative return. Select the highest for a long and the lowest for a short only when both training halves separately predict a gap above four stressed one-way fee-plus-slippage allowances. Otherwise hold cash. Allocate at most 25% per leg using the existing exchange lot and collateral model. Resolve ties by market name.",
+  "evaluation": "Use the preexisting two recent 26-week blocks as exploratory chronological evaluations with the disjoint earlier year for initial training. Compare to always-reversal, cash and the registered price-independent rotation. Require positive net without the best week and geometric 2% weekly in both blocks before promotion. Record prospective predictions for 26 weeks independently of this gate for research. A forecast saved after the clock cannot be called prospective. No exchange trading, leverage or paid inference."
+}

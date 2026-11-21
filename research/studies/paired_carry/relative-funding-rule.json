@@ -1,0 +1,8 @@
+{
+  "objective": "Estimate whether relative funding identifies a profitable pair before the trade, after directional price changes, actual settlements and execution costs.",
+  "markets": ["BTC","ETH","SOL","XRP","ADA","DOGE"],
+  "rule": "At the registered weekly decision clock rank the six liquid perpetual markets by mean funding rate over the preceding 21 complete days, with a 24-hour information embargo. Each window requires all 63 eight-hour settlements per market. Short the highest and buy the lowest, allocating at most 25% of account value to each leg, without leverage. Abstain if the annualized headline rate would be attractive but the observed weekly rate differential does not exceed the stressed round-trip costs of both legs. Close both at the next weekly clock. The reversed pair trades on exactly the same clocks.",
+  "time": "The two 26-week blocks in protocol.json. Start each at 1000 USDT. Use all idle weeks. No retrospective choice of side, pair, holding duration or threshold.",
+  "accounting": "Charge the existing perpetual taker fee and adverse execution for each fill. Round down to market lots; pay or receive each signed funding settlement using the exchange's settlement price. Mark the full account hourly after modeled exit costs and flag stressed intrabar maintenance breaches.",
+  "decision": "Publish both blocks and cash, the reversed-side matched control, and a count of 2% weeks. Only advance if both blocks beat both controls after costs, remain positive excluding the best week, and have no missing or breached margin evidence."
+}

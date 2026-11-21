@@ -1,0 +1,6 @@
+{
+  "chosen_after_inspection": "The reversed direction earned 54.70 and 47.92 virtual USDT per 1000 in two recent 26-week blocks. Treat those as discovery. Select the reversal for a separate earlier year without changing sizing, universe, costs, clock or holding horizon.",
+  "prior_year": ["2024-11-18T01:00:00", "2025-05-19T01:00:00", "2025-11-17T01:00:00"],
+  "primary": "Long the worst and short the best of the six prior seven-day spot returns, ending a day before the trade. Same WhiteBIT perpetual settlement and hourly collateral checks. The two earlier 26-week blocks must both beat cash, forward momentum and the fixed rotation, stay positive without their best week and meet the 2% geometric net target. Report failures and unavailable evidence. No substitution of dates or markets.",
+  "history_limit": "Periods are earlier and disjoint from the two discovery blocks. The market history has also been used in other research, so it cannot replace subsequent forward evidence."
+}

@@ -1,0 +1,7 @@
+{
+  "question": "Does the existing cash-heavy weekly model contain a useful asset ranking or return forecast before the 2% account objective is applied?",
+  "forecasts": "Use all 104 already saved forecasts for each of the two fixed three-market universes. Preserve every coefficient and prediction. Validate input protocol and daily price receipts. Do not refit any model or change its prospective account.",
+  "comparison": "Replay the original policy unchanged. Independently apply one economic alternative: hold its highest scoring spot market if its signed expected return after the same stressed purchase and sale costs is positive, with the existing half-account budget. Otherwise hold cash. Compare with buying the equally weighted basket at exactly the same active clocks and with passive and cash. Keep units across unchanged selections. Include all weeks.",
+  "attribution": "On every clock compare the forecast ranking with all three realized open-to-open returns; report top minus basket, top minus bottom, number of correct top choices and mean forecast bias. Use matched clock data even when the original policy abstains. Report each of the two 52-week blocks separately for each universe.",
+  "eligibility": "The relaxed economic policy must beat cash, passive and the matched-clock basket after all costs in all four blocks, remain positive without its single best week in each, and meet the 2% geometric weekly target in each. All periods have previously been used for research. A historical pass would justify a fresh prospective simulation only."
+}

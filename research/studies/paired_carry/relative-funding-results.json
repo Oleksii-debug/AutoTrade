@@ -1,0 +1,1234 @@
+{
+  "protocol_sha256": "b832eaf23cec280a6a81e038dbd541f8b785cb1e7682ea3473ce749d2016bf9e",
+  "blocks": [
+    {
+      "records": [
+        {
+          "clock": 1763341200,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.002166933333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1763946000,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.001734633333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1764550800,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.001665233333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1765155600,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.001463766666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1765760400,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.002283000000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1766365200,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.002868500000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1766970000,
+          "long": "XRP",
+          "short": "BTC",
+          "spread": "0.004135400000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1767574800,
+          "long": "XRP",
+          "short": "BTC",
+          "spread": "0.0034716",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1768179600,
+          "long": "ADA",
+          "short": "BTC",
+          "spread": "0.002609033333333333333333333334",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1768784400,
+          "long": "DOGE",
+          "short": "BTC",
+          "spread": "0.002085600000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1769389200,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.002245543333333333333333333334",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1769994000,
+          "long": "ADA",
+          "short": "BTC",
+          "spread": "0.001616033333333333333333333334",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1770598800,
+          "long": "ADA",
+          "short": "BTC",
+          "spread": "0.001913010000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1771203600,
+          "long": "DOGE",
+          "short": "BTC",
+          "spread": "0.002317313333333333333333333334",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1771808400,
+          "long": "ADA",
+          "short": "BTC",
+          "spread": "0.001778140000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1772413200,
+          "long": "ADA",
+          "short": "BTC",
+          "spread": "0.002012353333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1773018000,
+          "long": "ETH",
+          "short": "XRP",
+          "spread": "0.001038403333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1773622800,
+          "long": "ETH",
+          "short": "ADA",
+          "spread": "0.001447356666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1774227600,
+          "long": "BTC",
+          "short": "ADA",
+          "spread": "0.0009996833333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1774832400,
+          "long": "BTC",
+          "short": "XRP",
+          "spread": "0.001894343333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1775437200,
+          "long": "BTC",
+          "short": "DOGE",
+          "spread": "0.002491393333333333333333333334",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1776042000,
+          "long": "BTC",
+          "short": "DOGE",
+          "spread": "0.003446766666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1776646800,
+          "long": "BTC",
+          "short": "DOGE",
+          "spread": "0.003792033333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1777251600,
+          "long": "BTC",
+          "short": "DOGE",
+          "spread": "0.003745556666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1777856400,
+          "long": "BTC",
+          "short": "DOGE",
+          "spread": "0.00297314",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1778461200,
+          "long": "ADA",
+          "short": "DOGE",
+          "spread": "0.002379123333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        }
+      ],
+      "balance": {
+        "selected": "1000",
+        "reversed": "1000"
+      },
+      "drawdown": {
+        "selected": "0",
+        "reversed": "0"
+      },
+      "excluding_best": "0",
+      "hits": 0,
+      "active": 0,
+      "passes": false
+    },
+    {
+      "records": [
+        {
+          "clock": 1779066000,
+          "long": "ADA",
+          "short": "SOL",
+          "spread": "0.00376708",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1779670800,
+          "long": "ADA",
+          "short": "SOL",
+          "spread": "0.00260288",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1780275600,
+          "long": "XRP",
+          "short": "SOL",
+          "spread": "0.002424826666666666666666666666",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1780880400,
+          "long": "XRP",
+          "short": "DOGE",
+          "spread": "0.003480730000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1781485200,
+          "long": "XRP",
+          "short": "DOGE",
+          "spread": "0.00352893",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1782090000,
+          "long": "XRP",
+          "short": "DOGE",
+          "spread": "0.003320826666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1782694800,
+          "long": "SOL",
+          "short": "BTC",
+          "spread": "0.002362120000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1783299600,
+          "long": "XRP",
+          "short": "BTC",
+          "spread": "0.001644623333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1783904400,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.00154760",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1784509200,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.002548800000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1785114000,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.003695663333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1785718800,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.002745613333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1786323600,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.002573506666666666666666666666",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1786928400,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.001061473333333333333333333334",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1787533200,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.003033653333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1788138000,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.003552626666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1788742800,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.005911916666666666666666666666",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1789347600,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.007043136666666666666666666666",
+          "active": true,
+          "selected": {
+            "funding": "0.23198602207085",
+            "price_pnl": "-5.840120",
+            "costs": "1.6505059040720",
+            "margin_ok": true,
+            "net": "-7.25863988200115",
+            "weekly": "-0.00725863988200115"
+          },
+          "reversed": {
+            "funding": "-0.23198602207085",
+            "price_pnl": "5.840120",
+            "costs": "1.6504988959280",
+            "margin_ok": true,
+            "net": "3.95763508200115",
+            "weekly": "0.00395763508200115"
+          }
+        },
+        {
+          "clock": 1789952400,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.00617021",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1790557200,
+          "long": "XRP",
+          "short": "ETH",
+          "spread": "0.003590906666666666666666666666",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1791162000,
+          "long": "BTC",
+          "short": "ETH",
+          "spread": "0.001643706666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1791766800,
+          "long": "BTC",
+          "short": "ETH",
+          "spread": "0.002079940000000000000000000000",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1792371600,
+          "long": "BTC",
+          "short": "ETH",
+          "spread": "0.00181180",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1792976400,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.00154867",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1793581200,
+          "long": "ADA",
+          "short": "ETH",
+          "spread": "0.001429243333333333333333333333",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        },
+        {
+          "clock": 1794186000,
+          "long": "ADA",
+          "short": "BTC",
+          "spread": "0.001222426666666666666666666667",
+          "active": false,
+          "selected": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          },
+          "reversed": {
+            "funding": "0",
+            "price_pnl": "0",
+            "costs": "0",
+            "margin_ok": true,
+            "net": "0E-14",
+            "weekly": "0"
+          }
+        }
+      ],
+      "balance": {
+        "selected": "992.74136011799885",
+        "reversed": "1003.95763508200115"
+      },
+      "drawdown": {
+        "selected": "0.0247027062721377412310246738",
+        "reversed": "0.020405265068745"
+      },
+      "excluding_best": "-7.25863988200115",
+      "hits": 0,
+      "active": 1,
+      "passes": false
+    }
+  ],
+  "eligible": false
+}

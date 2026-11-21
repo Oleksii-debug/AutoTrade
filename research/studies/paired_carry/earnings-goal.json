@@ -1,0 +1,8 @@
+{
+  "objective_uk": "Довести, чи може агент AutoTrade стабільно заробляти 2% на тиждень на всьому капіталі після витрат, самостійно приймаючи рішення до руху ціни.",
+  "currency": "USDT",
+  "initial_simulated_capital": "1000",
+  "target_net_fraction_per_week": "0.02",
+  "evidence": "Use the weekly learner's immutable prospective predictions and subsequently settled public WhiteBIT prices. Carry the full simulated account value into the next episode, including all cash weeks. Report geometric weekly return, individual target hits, coverage, and whether every week met the target. An incomplete or missing week cannot certify success.",
+  "trading_authority": "simulation_only"
+}

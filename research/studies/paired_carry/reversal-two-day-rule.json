@@ -1,0 +1,5 @@
+{
+  "question": "Does applying the same relative recovery strategy three times each week create enough net opportunities to improve on a fixed weekly pair?",
+  "rule": "At Monday, Wednesday and Friday 01 UTC rank the six archived WhiteBIT spot markets on the previous seven-day return ending a full day earlier. Buy the prior loser and short the prior winner only on the first hourly ratio breakout above the previous 24 hourly ratios within the next 12 hours. Enter at the following hourly open and close both legs at the original clock plus 48 hours. Hold cash from Sunday through the next Monday. Only one pair may be open. No new parameters after replay.",
+  "accounting": "Start each 26-week block at 1000 virtual USDT, with 25% per leg and the same costs, funding and collateral model. Compound all episodes. Compare fixed entry on the same pairs, the exact opposite of the confirmed decision with the same windows, cash and the weekly confirmation benchmark. Record all weeks including idle weeks. Apply unchanged to the three archived years. All three have been inspected for weekly strategies."
+}

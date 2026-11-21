@@ -5,7 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $study = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-$runner = Join-Path $study 'six_hour_forward.py'
+$runner = Join-Path $study 'six_hour_due.py'
 $config = Get-Content -Raw -LiteralPath (Join-Path $study 'six-hour-forward-rule.json') | ConvertFrom-Json
 $first = [DateTimeOffset]$config.first_entry_utc
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name

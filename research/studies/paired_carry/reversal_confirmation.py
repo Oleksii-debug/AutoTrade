@@ -12,9 +12,9 @@ from momentum_pair import ranking_price,WhiteBitPublicClient
 MARKETS=json.loads((CODE/"momentum-pair-rule.json").read_bytes())["markets"]
 
 
-def confirm(panel,clock,long,short):
+def confirm(panel,clock,long,short,window=2*DAY):
     ratios=[]
-    for t in range(clock-DAY,clock+2*DAY,HOUR):
+    for t in range(clock-DAY,clock+window,HOUR):
         a,b=panel[long][1][t],panel[short][1][t]
         if min(a[2],b[2])<=0:
             return None
@@ -57,7 +57,7 @@ def phase(panel,lows,rules,first,last):
                 target_hits=sum(D(r["confirmed"])>=D(".02") for r in records),eligible=geo>=D(".02") and cash["confirmed"]>cash["fixed"])
 
 
-def evaluate(era):
+def load_era(era):
     archive=None
     if era=="recent":
         cuts=CUTS
@@ -79,6 +79,11 @@ def evaluate(era):
             panel=dict(zip(MARKETS,pool.map(load,MARKETS),strict=True))
         rules=json.loads((ROOT/"market-rules.json").read_bytes())
     lows={m:hourly_lows(m,archive) for m in MARKETS}
+    return cuts,panel,rules,lows
+
+
+def evaluate(era):
+    cuts,panel,rules,lows=load_era(era)
     blocks=[]
     for a,b in zip(cuts,cuts[1:]):
         try:

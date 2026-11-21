@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import six_hour_forward as agent
+from six_hour_due import needs_work
 
 
 class SixHourTests(unittest.TestCase):
@@ -35,8 +36,11 @@ class SixHourTests(unittest.TestCase):
                 agent.run()
                 self.assertEqual(db.execute("SELECT count(*) FROM reference_reviews").fetchone()[0],0)
                 now[0]+=100
+                path=Path(tmp)/"agent.sqlite3"
+                self.assertTrue(needs_work(path,t,agent.END,now[0]))
                 agent.run()
                 agent.run()
+                self.assertFalse(needs_work(path,t,agent.END,now[0]))
                 rows=db.execute("SELECT body FROM reference_reviews").fetchall()
                 self.assertEqual(len(rows),1)
                 self.assertIsNone(json.loads(rows[0][0])["challenger_error"])

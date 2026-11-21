@@ -15,6 +15,8 @@ The momentum experiment draws on the cross-sectional hypothesis in [Common Risk 
 
 Each block began with a separate 1,000 virtual USDT. Entries assigned up to 25% to each leg. The two 2023–24 blocks were obtained after freezing the recovery rule. Neither qualified. In the two recent blocks, the learned six-market selector returned −19.36 and −38.81 USDT after costs. Across those 52 weeks, inspecting all 30 possible pairs after each week ended found 24 weeks with at least one modeled gain of 20 USDT on a fresh 1,000 USDT account. That count measures opportunities within this particular sizing and holding period. Future prices were used only for that diagnostic.
 
+The 48-hour confirmation variant made at most three entries a week using the same ranking. Its six consecutive half-year results after costs were +55.88, −16.51, −14.66, −144.64, +13.43 and +9.79 virtual USDT per 1,000. In the weakest period the confirmed positions lost 96.91 USDT before modeled execution costs. Reducing fees alone could not make that period profitable. Run `python reversal_two_day.py` after the weekly confirmation replays to reproduce the paired controls, costs and individual weeks.
+
 Run the following from the study directory with the existing AutoTrade checkout and market archives.
 
 1. Run `momentum_pair.py` and then `momentum_pair.py --earlier-year`. The optional `--with-exits` tests closing a position one hour after the first observed 2% gain or loss on the whole account.

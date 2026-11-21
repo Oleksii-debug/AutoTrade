@@ -1,0 +1,8 @@
+{
+  "source": "https://www.nber.org/papers/w25882",
+  "question": "Does one-week relative momentum pay after realistic friction and funding on the six existing liquid WhiteBIT perpetual markets?",
+  "markets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA"],
+  "ranking": "At each Monday 01 UTC rank the six spot price changes over seven days ending 24 hours before the decision. Buy the highest ranked perpetual, sell the lowest. Use market name as deterministic tie breaker. Compare to the exact reverse, cash and a predetermined rotation through ordered pairs independent of prices. Do not select a rule from the results.",
+  "account": "Reuse the existing collateralized paired episode ledger at 25% per leg, with actual signed funding, hourly marks, stressed fee/slippage, exchange lot rules, and adverse intrahour maintenance checks. Close weekly and give each arm its own compounded 1000 USDT starting balance. Use both archived 26-week blocks. Previously explored markets.",
+  "qualification": "Both blocks must beat all controls, remain positive excluding their best week, hit a geometric mean net of 2% weekly, and stay collateralized. Record median week, number of weeks reaching the target and maximum hourly marked drawdown. No order or paid model call."
+}

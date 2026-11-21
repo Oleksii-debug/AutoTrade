@@ -8,9 +8,9 @@ from data import CODE, ROOT, HOUR, WEEK, inputs, parse_klines, stamp
 from pairs import charge
 from swing import DAY, authenticated_bars
 
-def hourly_lows(asset):
+def hourly_lows(asset, archive=None):
     lows={}
-    for path in (ROOT/"data"/asset).glob(asset+"_PERP-*.json"):
+    for path in ((ROOT/"data" if archive is None else archive)/asset).glob(asset+"_PERP-*.json"):
         packet=json.loads(path.read_bytes())
         raw=packet["raw"].encode()
         if sha256(raw).hexdigest()!=packet["sha256"]: raise ValueError("Changed candle packet")

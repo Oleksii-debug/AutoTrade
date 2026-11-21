@@ -116,12 +116,15 @@ def simulate(directory):
         with closing(sqlite3.connect(state/"agent.sqlite3")) as db:
             forecasts=[json.loads(b) for b, in db.execute("SELECT body FROM decisions ORDER BY clock")]
             reviews=[json.loads(b) for b, in db.execute("SELECT body FROM reviews ORDER BY clock")]
+            references=[json.loads(b) for b, in db.execute("SELECT body FROM reference_reviews ORDER BY clock")]
             progress=json.loads(db.execute("SELECT body FROM progress").fetchone()[0])
             if db.execute("PRAGMA integrity_check").fetchone()!=("ok",):
                 raise ValueError("Archived account failed integrity validation")
         report=dict(historical=True,source="retained BTC best bid/ask with recorded receipt timestamps",
                     shards=shard_count,first=first,last=last,forecasts=len(forecasts),reviews=len(reviews),
                     timely=sum(r["timely"] for r in reviews),corrected=sum(f["prior_reviews"]>=12 for f in forecasts),
+                    reference_observations=len(references),
+                    reference_forecasts_after_warmup=sum(f.get("reference_examples",0)>=12 for f in forecasts),
                     largest_absolute_bias=max((abs(f["online_bias"]) for f in forecasts),default=0),
                     directional_choices=sum(bool(f["side"]) for f in forecasts),
                     attempted_clocks_without_quotes=gaps,progress=progress)

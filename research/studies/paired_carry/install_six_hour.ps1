@@ -9,7 +9,9 @@ $runner = Join-Path $study 'six_hour_forward.py'
 $config = Get-Content -Raw -LiteralPath (Join-Path $study 'six-hour-forward-rule.json') | ConvertFrom-Json
 $first = [DateTimeOffset]$config.first_entry_utc
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$triggers = foreach ($start in @($first.AddMinutes(-25), $first.AddSeconds(22))) {
+$triggers = foreach ($start in @($first.AddMinutes(-25), $first.AddMinutes(-10),
+                                 $first.AddSeconds(22), $first.AddSeconds(142), $first.AddSeconds(255),
+                                 $first.AddMinutes(10))) {
     $trigger = New-ScheduledTaskTrigger -Once -At $start.LocalDateTime -RepetitionInterval (New-TimeSpan -Hours 6)
     # UTC preserves the market clock across changes in local daylight saving time.
     $trigger.StartBoundary = $start.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss'Z'")

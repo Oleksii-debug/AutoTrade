@@ -1,6 +1,6 @@
 # Six-hour BTC paper learner
 
-Run `python six_hour.py` for the two fixed 14-week historical blocks. Run `python six_hour_forward.py` before the registered entry clock and again within the entry window. Windows runs the learner 25 minutes before each clock and 22 seconds after it, with an additional login trigger for recovery. The clocks are 01:00, 07:00, 13:00 and 19:00 UTC.
+Run `python six_hour.py` for the two fixed 14-week historical blocks. Windows runs the learner 25 and 10 minutes before each clock and 22, 142 and 255 seconds after it. Another invocation ten minutes after the clock and a login trigger recover pending settlements. The clocks are 01:00, 07:00, 13:00 and 19:00 UTC.
 
 The learner stores its side, neighbor labels, training cutoff and cost estimate before entry in `six-hour/agent.sqlite3`. At entry and exit it reads public depth and preserves the received bytes. The review reconciles direction, price, fees, signed funding and capital with the two matched alternatives. Twelve timely completed observations are needed before the first live forecast-error adjustment. A missed entry stays missing. Delayed exits are excluded from learning and disqualify their week from target verification. Simulated capital starts at 1,000 USDT.
 
@@ -11,6 +11,8 @@ Run `python test_six_hour.py` to exercise long, short, cash, signed funding, del
 To restore the worker, extract the study checkpoint with its market archive and databases. Run `install_six_hour.ps1` from the restored script directory using Windows PowerShell. A checkout containing `tools/whitebit_historical_klines.py` and a Python environment with NumPy are required. Set the user environment variable `AUTOTRADE_CHECKOUT` if the checkout is outside the detected paths, and `AUTOTRADE_DEPTH_TAPE` for a relocated collector database. The scheduled task runs whenever Windows is awake and the registered user is logged in. Missing market clocks remain visible as gaps. The latest readable account statement is `six-hour/Рахунок BTC за шість годин.txt`.
 
 The exit quote is committed before funding retrieval. If funding is temporarily unavailable, the next run settles the stored exit. Missing depth for an unchosen alternative leaves that comparison empty. The selected position is valued only when sufficient depth is observed.
+
+The status view counts missing entry windows and late settlements immediately. A separate research review compares every saved forecast with six completed public candles and signed funding. This can teach the reference model even when the machine missed an entry. The review stores source hashes and forecast error, and leaves wallet and execution evidence intact. Its prediction is recorded before future periods and evaluated separately. On the first actual period, the wallet stayed at 1,000.00 virtual USDT. The late close was excluded from timely execution learning and the public market reference was retained.
 
 The Windows worker writes timestamped process outcomes to `six-hour/Технічна діагностика.log`, with up to three rotated copies. `six-hour/Звіт агента.jsonl` is rebuilt atomically from its durable ledger. It includes every decision, observed entry, recorded exit and review. The forecast review compares rolling absolute error against the original model and a zero-change forecast on the same timely observations.
 

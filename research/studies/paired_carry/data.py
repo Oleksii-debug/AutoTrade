@@ -37,13 +37,16 @@ def pack(path,fetch):
     if sha256(raw).hexdigest()!=p["sha256"]: raise ValueError("Archive changed")
     return raw,datetime.fromisoformat(p["received"]),p["uri"]
 
-def market_data(asset):
+def market_data(asset, *, first_epoch=None, last_epoch=None, archive=None, funding_archive=None):
     c=WhiteBitPublicClient()
-    base=ROOT/"data"/asset
+    first_epoch=CUTS[0] if first_epoch is None else first_epoch
+    last_epoch=CUTS[-1] if last_epoch is None else last_epoch
+    base=(ROOT/"data" if archive is None else archive)/asset
+    funding_dir=base if funding_archive is None else funding_archive/asset
     future=asset+"_PERP"
     funding={}
     for offset in range(0,4000,100):
-        raw,at,uri=pack(base/f"funding-{offset}.json",lambda:c.funding_history(future,limit=100,offset=offset))
+        raw,at,uri=pack(funding_dir/f"funding-{offset}.json",lambda:c.funding_history(future,limit=100,offset=offset))
         page=parse_funding_history(raw,future,at,limit=100,offset=offset)
         if page.source_uri!=uri: raise ValueError("Funding source mismatch")
         for r in page.records:
@@ -51,12 +54,12 @@ def market_data(asset):
             value=(D(r.funding_rate),D(r.settlement_price))
             if t in funding and funding[t]!=value: raise ValueError("Conflicting settlement")
             funding[t]=value
-        if not page.records or min(funding)<=CUTS[0]-30*DAY or len(page.records)<100: break
+        if not page.records or min(funding)<=first_epoch-30*DAY or len(page.records)<100: break
     prices={}
     for symbol in (asset+"_USDT",future):
         series=prices[symbol]={}
-        for first in range(CUTS[0],CUTS[-1]+1,1000*HOUR):
-            n=min(1000,(CUTS[-1]-first)//HOUR+1)
+        for first in range(first_epoch,last_epoch+1,1000*HOUR):
+            n=min(1000,(last_epoch-first)//HOUR+1)
             end=first+n*HOUR
             args=dict(start=first,end=end,training=True)
             raw,at,uri=pack(base/f"{symbol}-{first}.json",lambda:c.klines(symbol,interval="1h",limit=n,**args))

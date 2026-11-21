@@ -99,6 +99,38 @@ def online_bias(prior_errors):
     return sum(errors)/(24+len(errors)) if len(errors)>=12 else 0.
 
 
+def reference_learning(db,now):
+    """Score registered forecasts on completed public candles, separately from portfolio fills."""
+    pending=db.execute("""SELECT d.clock,d.body FROM decisions d LEFT JOIN reference_reviews r USING(clock)
+                          WHERE r.clock IS NULL AND d.clock+?<=? ORDER BY d.clock""",(STEP,now-60)).fetchall()
+    if not pending:
+        return
+    bars,funding=history_to(db,pending[-1][0]+STEP)
+    for t,body in pending:
+        hours=range(t,t+STEP,HOUR)
+        settlements_due=range((t//(8*HOUR)+1)*8*HOUR,t+STEP+1,8*HOUR)
+        if any(k not in bars for k in hours) or any(k not in funding for k in settlements_due):
+            continue
+        opening=bars[t][0]
+        closing_price=bars[t+STEP-HOUR][1]
+        financing=sum((funding[k] for k in settlements_due),D(0))
+        change=(closing_price-opening-financing)/opening
+        prediction=json.loads(body)
+        expected=D(str(prediction["model"]["expected"]))
+        error=change-expected
+        earlier=prediction.get("reference_prediction")
+        sources=[sha for sha, in db.execute(
+            "SELECT DISTINCT sha FROM candles WHERE epoch>=? AND epoch<? ORDER BY sha",(t,t+STEP))]
+        funding_sources=[json.loads(s) for s, in db.execute(
+            "SELECT sources FROM funding WHERE epoch>? AND epoch<=? ORDER BY epoch",(t,t+STEP))]
+        receipt=dict(market=MARKET,opening=str(opening),closing=str(closing_price),funding_per_unit=str(financing),
+                     first_hour=t,last_hour=t+STEP-HOUR,change=str(change),base_error=str(error),
+                     challenger_error=None if earlier is None else str(change-D(str(earlier))),
+                     candle_sources=sources,funding_sources=funding_sources,
+                     basis="public hourly open to final hourly close",recorded=time.time())
+        db.execute("INSERT INTO reference_reviews VALUES(?,?,?)",(t,receipt["recorded"],json.dumps(receipt)))
+
+
 def direction(db,t,now):
     bars,funding=history_to(db,t-HOUR)
     model=fit(bars,funding,t,{})
@@ -107,12 +139,15 @@ def direction(db,t,now):
         """SELECT residual FROM reviews WHERE timely=1 AND closed<=?
            AND json_extract(body,'$.reviewed_at')<=? ORDER BY closed DESC LIMIT 28""",(t-HOUR,t-HOUR))]
     correction=online_bias(errors)
+    reference_errors=[float(json.loads(body)["base_error"]) for body, in db.execute(
+        "SELECT body FROM reference_reviews WHERE recorded<=? ORDER BY clock DESC LIMIT 28",(t-HOUR,))]
     estimate=model["expected"]+correction
     side=0
     if calibration["ready"] and abs(estimate)>calibration["estimated_round_trip"]+model["standard_error"]:
         side=1 if estimate>0 else -1
     return dict(side=side,model=model,calibration=calibration,online_bias=correction,
-                prior_reviews=len(errors),rule=IDENTITY,epoch=t)
+                prior_reviews=len(errors),rule=IDENTITY,epoch=t,reference_examples=len(reference_errors),
+                reference_prediction=model["expected"]+online_bias(reference_errors))
 
 
 def quote():
@@ -250,6 +285,9 @@ def update_progress(db,now):
         weekly.append(dict(start=start,missing=missing,timely=valid,
                            net_fraction=str(rate) if valid else None,at_target=valid and rate>=target))
     passed=len(weekly)==SPEC["duration_weeks"] and all(w["at_target"] for w in weekly)
+    due=set(range(FIRST,min(END,int(now)-299),STEP))
+    opened={clock for clock, in db.execute("SELECT clock FROM entries")}
+    late=[clock for clock, in db.execute("SELECT clock FROM reviews WHERE timely=0 ORDER BY clock")]
     errors=[json.loads(body)["absolute_forecast_errors"] for (body,) in db.execute(
         """SELECT body FROM reviews WHERE timely=1 AND json_type(body,'$.absolute_forecast_errors')='object'
            ORDER BY closed DESC LIMIT 28""")]
@@ -257,6 +295,7 @@ def update_progress(db,now):
               for name in ("original","adjusted","flat_market")} if errors else {}
     progress=dict(next_due=FIRST if now<FIRST else min(END,FIRST+(int((now-FIRST)//STEP)+1)*STEP),
                   capital=str(balance(db)),weeks=weekly,target_verified=passed,
+                  missed_entries=sorted(due-opened),late_closes=late,
                   forecast_review=dict(timely_examples=len(errors),mean_absolute_errors=averages),
                   status="collecting" if now<END else ("verified" if passed else "not_verified"))
     db.execute("INSERT OR REPLACE INTO progress VALUES(1,?)",(json.dumps(progress),))
@@ -282,7 +321,11 @@ def write_account_view(db):
     if reviewed:
         review=json.loads(reviewed[0])
         lines.append(f"Останній завершений період {local_clock(review['closed'])}. Чистий результат {D(review['net']):+.2f} USDT.")
+    lines.append(f"Пропущено початків періоду {len(progress['missed_entries'])}. "
+                 f"Запізнілих закриттів {len(progress['late_closes'])}.")
     stats=progress["forecast_review"]
+    learned=db.execute("SELECT count(*) FROM reference_reviews").fetchone()[0]
+    lines.append(f"Перевірено прогнозів за завершеними біржовими свічками {learned}.")
     if stats["timely_examples"]:
         average=stats["mean_absolute_errors"]
         lines.append(f"Середня помилка за {stats['timely_examples']} останніх вчасних спостережень. "
@@ -301,6 +344,7 @@ def export_agent_report(db):
         UNION ALL SELECT clock,json_extract(body,'$.at'),'entry',body FROM entries
         UNION ALL SELECT clock,json_extract(body,'$.at'),'exit_quote',body FROM exit_quotes
         UNION ALL SELECT clock,json_extract(body,'$.reviewed_at'),'review',body FROM reviews
+        UNION ALL SELECT clock,recorded,'market_reference',body FROM reference_reviews
         ORDER BY 2,1,3""")
     temp=OUT/f"agent-report-{os.getpid()}.tmp"
     with temp.open("w",encoding="utf-8") as file:
@@ -321,6 +365,7 @@ def run():
             CREATE TABLE IF NOT EXISTS decisions(clock INTEGER PRIMARY KEY,recorded REAL NOT NULL,body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS entries(clock INTEGER PRIMARY KEY,body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS exit_quotes(clock INTEGER PRIMARY KEY,body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS reference_reviews(clock INTEGER PRIMARY KEY,recorded REAL NOT NULL,body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS reviews(clock INTEGER PRIMARY KEY,closed REAL NOT NULL,timely INTEGER NOT NULL,
                 residual REAL NOT NULL,capital TEXT NOT NULL,body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS progress(id INTEGER PRIMARY KEY,body TEXT NOT NULL);
@@ -330,10 +375,23 @@ def run():
         if db.execute("SELECT sha FROM identity WHERE id=1").fetchone()[0]!=IDENTITY:
             raise ValueError("Frozen policy mismatch")
         advance(db,time.time())
+        # Commit actual execution before any optional public-history acquisition.
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        reference_error=None
+        db.execute("SAVEPOINT public_reference")
+        try:
+            reference_learning(db,time.time())
+        except (OSError,ValueError,RuntimeError) as error:
+            db.execute("ROLLBACK TO public_reference")
+            reference_error=error
+        db.execute("RELEASE public_reference")
         update_progress(db,time.time())
         db.commit()
         write_account_view(db)
         export_agent_report(db)
+        if reference_error is not None:
+            raise reference_error
         print("Decisions, opened episodes, settled reviews:",*[db.execute("SELECT count(*) FROM "+table).fetchone()[0]
                                                                for table in ("decisions","entries","reviews")])
 

@@ -22,7 +22,10 @@ def rank(panel, markets, clock):
     return ordered[0], ordered[-1], spread, spread > 4*(SLIP+FEE)
 
 
-def episode(panel, lows, rules, start, long, short, account):
+def episode(panel, lows, rules, start, long, short, account, *, exit_band=None, end_clock=None):
+    end_clock=start+WEEK if end_clock is None else end_clock
+    if end_clock<=start or (end_clock-start)%HOUR:
+        raise ValueError("Invalid pair settlement clock")
     positions = {}
     initial_cost = D(0)
     for market, side in ((long, 1), (short, -1)):
@@ -37,7 +40,8 @@ def episode(panel, lows, rules, start, long, short, account):
     funding = D(0)
     equity_path = [account]
     margin_ok = True
-    for t in range(start+HOUR, start+WEEK+1, HOUR):
+    trigger = None
+    for t in range(start+HOUR, end_clock+1, HOUR):
         prior_funding = funding
         worst_pnl = pnl = maintenance = exit_cost = D(0)
         for market,(q,entry) in positions.items():
@@ -54,8 +58,15 @@ def episode(panel, lows, rules, start, long, short, account):
             exit_cost += charge(-q, px)
         margin_ok &= account-initial_cost+min(prior_funding,funding)+worst_pnl > maintenance
         equity_path.append(account-initial_cost+pnl+funding-exit_cost)
-    return equity_path, dict(funding=str(funding), price_pnl=str(pnl),
-                             costs=str(initial_cost+exit_cost), margin_ok=margin_ok)
+        if exit_band is not None:
+            if trigger is not None:
+                break
+            if t<end_clock and abs(equity_path[-1]/account-1)>=exit_band:
+                trigger=t
+    result=dict(funding=str(funding),price_pnl=str(pnl),costs=str(initial_cost+exit_cost),margin_ok=margin_ok)
+    if exit_band is not None:
+        result.update(trigger=trigger,exit_clock=t)
+    return equity_path,result
 
 
 def phase(panel, lows, rules, markets, first, last):

@@ -1,0 +1,6 @@
+{
+  "hypothesis": "Weekly reversal pairs might give back tradable gains before their scheduled weekly exit. Test one symmetric portfolio exit without changing the entry rule or increasing leverage.",
+  "entry": "Same long prior-week loser, short prior-week winner, 24-hour embargo, one entry opportunity weekly, 25% of initial weekly capital per leg.",
+  "exit": "At each completed hourly observation value both legs net of closing costs and funding. If the whole account crosses +2% or -2% relative to the start of this week, submit a simulated closing decision for the NEXT hourly opening observation. Value that exit at the next price after fees and slippage, even for a gap past the threshold. Stay in cash for the rest of the week. Close any outstanding position at the original weekly clock. Never choose the best path afterwards.",
+  "controls": "Same pair held the full week, same starting capital and sizing each week on its own compounded account. Cash is another comparator. Freeze the rule before inspecting any barrier results or earlier-year reversal results. Reuse the two recent blocks and report the entire disjoint prior year. Record each entry, trigger, exit, signed funding, costs, collateral status and all weekly returns."
+}

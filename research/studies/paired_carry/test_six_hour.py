@@ -18,6 +18,31 @@ class SixHourTests(unittest.TestCase):
         rules={agent.MARKET: dict(step="0.001", min_qty="0.001", min_value="5")}
         (folder/"market-rules.json").write_text(json.dumps(rules))
         self.enterContext(patch.object(agent,"ROOT",folder))
+        self.enterContext(patch.object(agent,"history_to",return_value=({},{})))
+
+    def test_reference_survives_missed_trade_and_never_changes_cash(self):
+        t=agent.FIRST
+        bars={k:(D(100),D(101),D(99),D(102)) for k in range(t,t+agent.STEP,agent.HOUR)}
+        funding={k:D(".1") for k in range((t//(8*agent.HOUR)+1)*8*agent.HOUR,t+agent.STEP+1,8*agent.HOUR)}
+        now=[t+agent.STEP]
+        with (TemporaryDirectory() as tmp,patch.object(agent,"OUT",Path(tmp)),
+              patch.object(agent.time,"time",lambda:now[0]),patch.object(agent,"history_to",return_value=(bars,funding)),
+              redirect_stdout(StringIO())):
+            agent.run()
+            with closing(sqlite3.connect(Path(tmp)/"agent.sqlite3")) as db:
+                db.execute("INSERT INTO decisions VALUES(?,?,?)",(t,t-60,json.dumps(dict(side=1,model={"expected":0}))))
+                db.commit()
+                agent.run()
+                self.assertEqual(db.execute("SELECT count(*) FROM reference_reviews").fetchone()[0],0)
+                now[0]+=100
+                agent.run()
+                agent.run()
+                rows=db.execute("SELECT body FROM reference_reviews").fetchall()
+                self.assertEqual(len(rows),1)
+                self.assertIsNone(json.loads(rows[0][0])["challenger_error"])
+                self.assertEqual(D(json.loads(rows[0][0])["change"]),(D(1)-sum(funding.values()))/100)
+                self.assertEqual(db.execute("SELECT count(*) FROM entries").fetchone()[0],0)
+                self.assertEqual(agent.balance(db),D(1000))
 
     def test_decision_entry_review_and_restart(self):
         for side in (-1,0,1):
@@ -62,6 +87,9 @@ class SixHourTests(unittest.TestCase):
             agent.run()
             with closing(sqlite3.connect(Path(tmp)/"agent.sqlite3")) as db:
                 self.assertEqual(db.execute("select count(*) from entries").fetchone()[0],0)
+                progress=json.loads(db.execute("SELECT body FROM progress").fetchone()[0])
+                self.assertEqual(progress["missed_entries"],[agent.FIRST])
+                self.assertEqual(progress["late_closes"],[])
 
     def test_settlement_retry_uses_original_exit_even_without_opposite_depth(self):
         with TemporaryDirectory() as tmp:
